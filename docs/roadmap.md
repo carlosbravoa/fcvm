@@ -26,8 +26,9 @@ Windows. fcvm needs KVM and never will.
 - **A2. Snapshots and commit.** ✅ `fcvm commit VM IMAGE` saves a VM's
   writable layer as a new image layer (Docker-style stacking, instant,
   rootless). ✅ `fcvm snapshot` / `fcvm fork`: Firecracker memory snapshots,
-  forked into running VMs in ~120 ms, each with its own disk, IP, MAC and
-  hostname, and RNG reseeding through VMGenID. Still open: diff snapshots
+  forked into running VMs in ~150 ms (about 1 s for jailed VMs, which get a
+  fresh jail), each with its own disk, IP, MAC and hostname, and RNG
+  reseeding through VMGenID. Still open: diff snapshots
   (only dirty pages) to cut the ~0.75 s/GB pause, and snapshots of VMs with
   read-write volumes.
 - **A3. Machine interface.** ✅ `--json` for `ls`/`images`, `fcvm inspect`,
@@ -97,41 +98,34 @@ operation, and a small auditable code base. What blocks adoption, in order:
 
 ### E1. Run VMs under the Firecracker jailer ✅
 
-Done: `fcvm create --jail` / `JAIL=1` and `fcvm jail-setup` (see "Jailed
-VMs"): a per-VM uid, chroot, cgroup v2 limits and a per-VM network namespace
-(tap inside, veth to the bridge), through a root helper that validates every
-path. Snapshots and fork of jailed VMs, cgroup-based I/O stats, and jailed by
-default for MCP sandboxes and the web console. `--new-pid-ns` was left out on
-purpose (see "Jailed VMs" for why). The original plan follows.
+Before this, Firecracker always ran as your user, with KVM and its seccomp
+filters as the only boundary. Now `fcvm create --jail` / `JAIL=1` runs a VM
+under Firecracker's jailer, through `fcvm-jaild`, a root helper installed by
+`fcvm jail-setup`. Details are in [docs/security.md](security.md#jailed-vms-in-detail).
 
-Before this, Firecracker always ran as your user. KVM and Firecracker's own seccomp filters
-are the only boundary between a guest and the host, and every VM can reach the
-files of every other VM. `bin/jailer` (already downloaded by `fcvm firecracker`)
-is Firecracker's production wrapper. Plan:
+**What's done:**
+- **Validated requests.** The helper checks every path a launch names
+  against the owner's fcvm tree, and runs root-owned copies of the jailer
+  and Firecracker.
+- **Per VM:**
+  - its own uid/gid;
+  - a chroot with its disks bind-mounted in, images read-only;
+  - cgroup v2 limits (CPU, memory, pids) and an open-files limit;
+  - its own network namespace, with the tap inside and a veth to the
+    bridge;
+  - access to your files by ACL, so every CLI command keeps working.
+- **Snapshots and fork** of jailed VMs.
+- **Stats.** Disk I/O comes from the cgroup and traffic from the veth.
+- **Cleanup** on exit, and a sweep of leftovers at helper startup.
+- **Jailed by default** for MCP sandboxes and in the web console. The CLI
+  stays opt-in.
 
-- **Opt-in mode**: `fcvm start --jail VM` / `JAIL=1`, with the rootless mode
-  staying the default for development. The jailer has to start as root (chroot,
-  mknod, cgroups, namespaces, then drop privileges). That means either `sudo`
-  per start or a small root helper (a systemd service owning `/srv/jailer`)
-  that `fcvm` asks to launch VMs. The helper keeps the CLI password-free.
-- **Chroot per VM** under `/srv/jailer/firecracker/<vm>/root`. The kernel, the
-  shared image (read-only) and the VM's `rw.ext4` are hard-linked or
-  bind-mounted in. `fc.json` paths become chroot-relative.
-- **Dedicated uid/gid per VM** from a reserved range, owning only that VM's
-  `rw.ext4` and sockets, so one compromised VMM can't read or write another
-  VM's disk.
-- **cgroup v2 limits** (`--cgroup-version 2`, `cpu.max`, `memory.max`, pids)
-  derived from `--vcpus`/`--mem`, plus `--resource-limit no-file=...`.
-- **Namespaces**: `--new-pid-ns`, and `--netns` with the VM's tap inside a
-  per-VM network namespace, joined to `fcbr0` through a veth pair. `net.sh`
-  would create those instead of the flat tap pool.
-- **Keep the CLI working**: the API socket and vsock socket live in the chroot.
-  `stop`, `exec`/`shell` and the port forwarder need group access to them, so
-  the helper would create them with a shared `fcvm` group.
+**Decided against:** `--new-pid-ns`. fcvm needs the VMM's real pid, and the
+per-VM uid already prevents signalling or ptracing other processes.
 
 ### E2. Network isolation and policy ✅
 
-Done (see "Isolation" under networking):
+Done (details in [docs/security.md](security.md#network-isolation)):
 - VMs are isolated from each other, both bridged and routed through the host.
 - VMs are cut off from host services.
 - Anti-spoofing pins each port to its MAC and IPv4 address.
@@ -175,9 +169,12 @@ central.
 
 ### E6. Resource governance
 
-Host-side cgroup limits (with E1), Firecracker rate limiters for block and
-network I/O, quotas on writable layers and volumes (today they are sparse
-files that can fill the host disk), and disk encryption at rest.
+Jailed VMs have cgroup v2 limits on CPU, memory and pids (E1). Still open:
+- limits for rootless VMs (a user-level cgroup through systemd);
+- Firecracker rate limiters for block and network I/O;
+- quotas on writable layers and volumes (today they are sparse files that
+  can fill the host disk);
+- disk encryption at rest.
 
 ### E7. Credentials in images
 
@@ -202,5 +199,7 @@ shared images. Keys should be injected per VM at boot instead.
 - Published ports are TCP only and don't preserve the client address. An
   nftables DNAT mode in `net.sh` (root) would fix both.
 - `exec` via the agent has no auth beyond access to the VM's vsock socket.
-  That is fine for a single user; the jailer's per-VM uids are the natural
-  place to tighten it.
+  For jailed VMs, that socket lives in the chroot, where only you and the
+  VM's uid can reach it; rootless VMs keep it in `vms/<vm>/`, protected by
+  your file permissions. Enough for a single user. A multi-user setup (W2,
+  E4) would need per-request authentication.

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """fcvm web console (fcvm serve): a local, cloud-console-like UI for one host.
 
-  fcvm serve [--port 8686]
+  fcvm serve [--port 8686] [--service]
+
+It is also fcvm's daemon: the supervisor (supervisor.py) brings VMs back after
+a reboot and applies restart policies, and the JSON API under /api/ accepts
+the token as "Authorization: Bearer <token>" for scripts (docs/api.md).
+`fcvm service install` runs it at boot with --service, which keeps the token
+across restarts. The running server's URL and token are in vms/.serve.json.
 
 Standard library only. HTTP/1.1 and WebSockets (RFC 6455) are implemented
 here on asyncio streams. Every change goes through the fcvm CLI, like the MCP
@@ -10,8 +16,9 @@ fast (stats, terminals) use the VM directories and sockets directly.
 
 Security (local only): binds 127.0.0.1. The startup URL carries a random
 token, exchanged for an HttpOnly SameSite=Strict cookie. Requests must have a
-localhost Host header (against DNS rebinding), and changes and WebSockets a
-same-origin Origin (against cross-site requests).
+localhost Host header (against DNS rebinding), and browser changes and
+WebSockets a same-origin Origin (against cross-site requests). API calls with
+a bearer token need no Origin: browsers never add that header by themselves.
 """
 import argparse
 import asyncio
@@ -29,6 +36,8 @@ import sys
 import time
 import urllib.parse
 from collections import deque
+
+from supervisor import Supervisor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FCVM = os.path.join(ROOT, "fcvm")
@@ -414,10 +423,28 @@ def project_file(root, rel):
 
 # --- the application -----------------------------------------------------------------
 
+def service_token():
+    """The --service token: kept in vms/.serve-token (0600) across restarts."""
+    path = os.path.join(VMS, ".serve-token")
+    try:
+        with open(path) as f:
+            tok = f.read().strip()
+        if len(tok) >= 32:
+            return tok
+    except OSError:
+        pass
+    tok = secrets.token_urlsafe(24)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(tok + "\n")
+    return tok
+
+
 class App:
-    def __init__(self, port):
+    def __init__(self, port, service=False):
         self.port = port
-        self.token = secrets.token_urlsafe(24)
+        self.token = service_token() if service else secrets.token_urlsafe(24)
+        self.supervisor = Supervisor(FCVM, VMS)
         self.jobs = Jobs()
         self.stats = Stats()
         self.last_builds = {}
@@ -427,6 +454,11 @@ class App:
         host = headers.get("host", "")
         if host not in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
             raise HTTPError(403, "bad Host header")
+        auth = headers.get("authorization", "")
+        if auth.startswith("Bearer ") and path.startswith("/api/"):   # scripts: no cookie, no Origin
+            if not secrets.compare_digest(auth[7:].strip(), self.token):
+                raise HTTPError(401, "wrong token")
+            return
         cookies = dict(c.strip().split("=", 1) for c in headers.get("cookie", "").split(";") if "=" in c)
         if not secrets.compare_digest(cookies.get("fcvm_token", ""), self.token):
             raise HTTPError(401, "open the URL printed by `fcvm serve` (it carries the access token)")
@@ -484,9 +516,9 @@ class App:
             case ("GET", "host", 1):
                 return await self.host_info()
             case ("GET", "vms", 1):
-                return await fcvm_json("ls", "--json")
+                return [{**v, "supervisor": self.supervisor.status(v["name"])} for v in await fcvm_json("ls", "--json")]
             case ("GET", "vms", 2):
-                return await fcvm_json("inspect", name)
+                return {**await fcvm_json("inspect", name), "supervisor": self.supervisor.status(name)}
             case ("POST", "vms", 1):
                 return await self.launch(d)
             case ("POST", "vms", 3) if parts[2] not in ("files", "mounts"):
@@ -776,6 +808,8 @@ class App:
             args.append("--idle")
         if d.get("jail"):
             args.append("--jail")
+        if d.get("restart") and d["restart"] != "no":
+            args += ["--restart", d["restart"]]
         cmd = d.get("command", "").strip()
         if cmd and not d.get("idle"):
             args += ["--", "sh", "-c", cmd]
@@ -800,6 +834,11 @@ class App:
             if not NAME.match(snap or "-"):
                 raise HTTPError(400, "a snapshot name is required")
             await fcvm_ok("snapshot", name, snap, timeout=300)
+        elif action == "update":
+            policy = d.get("restart", "")
+            if policy not in ("no", "on-failure", "unless-stopped", "always"):
+                raise HTTPError(400, "restart must be no, on-failure, unless-stopped or always")
+            await fcvm_ok("update", name, "--restart", policy)
         elif action == "commit":
             img = d.get("image", "").strip()
             if not NAME.match(img or "-"):
@@ -930,7 +969,12 @@ class App:
     async def serve(self):
         server = await asyncio.start_server(self.handle, "127.0.0.1", self.port, limit=1 << 20)
         asyncio.get_running_loop().create_task(self.stats.run())
+        asyncio.get_running_loop().create_task(self.supervisor.run())
         url = f"http://127.0.0.1:{self.port}/?token={self.token}"
+        state = os.path.join(VMS, ".serve.json")
+        fd = os.open(state, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"url": url, "token": self.token, "port": self.port, "pid": os.getpid()}, f)
         print(f"\033[1;34m==>\033[0m fcvm web console: {url}", file=sys.stderr, flush=True)
         print("    (local only; the token in the URL is the key - Ctrl-C to stop)", file=sys.stderr, flush=True)
         async with server:
@@ -941,11 +985,13 @@ def main():
     ap = argparse.ArgumentParser(prog="fcvm serve")
     ap.add_argument("--port", type=int, default=8686)
     ap.add_argument("--r-prefix", default="172.30.1")
+    ap.add_argument("--service", action="store_true", help="run as the fcvm service: keep the token across restarts")
     args = ap.parse_args()
     global R_PREFIX
     R_PREFIX = args.r_prefix
+    os.makedirs(VMS, exist_ok=True)
     try:
-        asyncio.run(App(args.port).serve())
+        asyncio.run(App(args.port, args.service).serve())
     except KeyboardInterrupt:
         pass
     except OSError as e:

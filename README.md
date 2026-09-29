@@ -31,6 +31,8 @@ built from scratch (Ubuntu 26.04 is the included example).
   stdout/stderr.
 - `cp`, and `--json` output.
 - Snapshots of running VMs, forked into copies in ~150 ms.
+- Restart policies (`--restart unless-stopped`, as in Docker), and a
+  service that keeps VMs up across crashes and reboots.
 
 **Isolation** (details: [docs/security.md](docs/security.md))
 - **Jailed VMs**: Firecracker's jailer through a small root helper. Each VM
@@ -48,6 +50,8 @@ built from scratch (Ubuntu 26.04 is the included example).
   default, and the server can pin their network policy.
 - **Web console** (`fcvm serve`): VMs, images, builds, stats, a browser
   terminal and files, local-only with a token.
+- **HTTP API** for scripts, the same operations as JSON
+  ([docs/api.md](docs/api.md)).
 
 Only `host-setup`, `net-up` and `jail-setup` need sudo; VMs themselves start
 without it. Building images uses user namespaces and `mkfs.ext4 -d
@@ -59,7 +63,7 @@ From a fresh clone to a shell in a microVM (x86_64 Linux with KVM):
 
 ```sh
 ./fcvm host-setup            # packages and /dev/kvm access (sudo, once)
-./fcvm net-up                # bridges, taps, NAT and isolation rules (sudo, after every reboot)
+./fcvm net-up                # bridges, taps, NAT and isolation rules (sudo; see below to make it permanent)
 ./fcvm firecracker           # download Firecracker into bin/
 ./fcvm kernel                # build the guest kernel from kernel.org (a few minutes, once)
 ./fcvm import alpine:latest  # any OCI image; becomes the fcvm image "alpine-latest"
@@ -90,6 +94,16 @@ From here, pick how you want to drive it:
 
 - **The CLI**: read on.
 
+To keep fcvm running across reboots, install it as a service. That sets up
+the network at boot (no more `net-up`) and keeps the console up. It also
+brings back VMs that have a restart policy. See
+[The fcvm service](#the-fcvm-service).
+
+```sh
+./fcvm service install        # sudo, once
+./fcvm service status         # console URL and API token
+```
+
 ## A tour
 
 ```sh
@@ -119,6 +133,7 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 |---|---|
 | `host-setup` | installs build/runtime packages, checks `/dev/kvm` access |
 | `jail-setup [--remove]` | installs (or removes) `fcvm-jaild`, the root helper that runs VMs under the Firecracker jailer (sudo) |
+| `service install [--port N]`, `service remove`, `service status` | runs fcvm at boot (sudo to install): the network, then `fcvm serve` as you, which brings VMs back and applies restart policies. `status` prints the console URL and API token. See [The fcvm service](#the-fcvm-service) |
 | `net-up` / `net-down` | bridges `fcbr0` (172.30.0.1/24, NAT) and `fcbr1` (172.30.1.1/24, restricted), 64 taps each, nftables rules, ufw rules |
 | `firecracker` | downloads the latest Firecracker release into `bin/` (checksum-verified) |
 | `kernel [stable\|mainline\|longterm\|X.Y.Z]` | builds `kernels/vmlinux-X.Y.Z`; `kernels/vmlinux` points at the newest |
@@ -128,10 +143,11 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `build [-t NAME] [-f FILE] [--build-arg K=V] [--no-cache] [--net none\|--allow H,...] [CONTEXT]` | builds an image from a Dockerfile subset, cached per step. The result is the FROM image plus one layer |
 | `images [--all] [--json]`, `ls [--all] [--json]` | lists images (with what uses each) / VMs (state, exit code, memory used/allocated, disk use, network, ports, volumes). `--all` includes the build cache and build VMs |
 | `inspect VM` | the VM's details as JSON |
-| `create VM IMAGE [opts] [-- CMD...]` | VM on the shared image plus its own writable layer. `--vcpus N`, `--mem MiB`, `--disk SIZE` (layer size, default 8G sparse), `-p [BIND:]HOST:GUEST` (repeatable), `-v VOLUME:/PATH[:ro]` (named volume, created on first use) or `-v /HOST/DIR:/PATH[:ro]` (live host directory), repeatable, `--net none`, `--allow HOSTS`, `--idle` (container: run nothing, stay up for `exec`), `--copy` (private full copy instead), `-- CMD` (replaces the image's CMD and keeps its ENTRYPOINT, as `docker run` does), `--entrypoint CMD` (`""` clears it) |
+| `create VM IMAGE [opts] [-- CMD...]` | VM on the shared image plus its own writable layer. `--vcpus N`, `--mem MiB`, `--disk SIZE` (layer size, default 8G sparse), `-p [BIND:]HOST:GUEST` (repeatable), `-v VOLUME:/PATH[:ro]` (named volume, created on first use) or `-v /HOST/DIR:/PATH[:ro]` (live host directory), repeatable, `--net none`, `--allow HOSTS`, `--idle` (container: run nothing, stay up for `exec`), `--copy` (private full copy instead), `-- CMD` (replaces the image's CMD and keeps its ENTRYPOINT, as `docker run` does), `--entrypoint CMD` (`""` clears it), `--jail`, `--restart no\|on-failure\|unless-stopped\|always` |
 | `start [-a] VM` | boots in the background, like `docker start`. `-a` attaches the console |
 | `run IMAGE [-d] [opts] [-- CMD...]` | throwaway VM, deleted when it stops. **App images**: attached like `docker run`: you see the output, Ctrl-C goes to the app, Ctrl-] detaches, and fcvm exits with the container's exit code. **System images**: boots and opens `fcvm shell` (or runs CMD); when the shell or CMD ends, the VM is stopped and deleted. `-d`: background |
-| `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s |
+| `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s. Restart policies then leave the VM alone until you start it |
+| `update VM --restart POLICY` | changes a VM's restart policy |
 | `exec [-i] [-t] [-u USER] [-w DIR] [-e K=V]... [--timeout S] VM CMD...` | runs a command in a running VM, like `docker exec`. Exits with its status, or 124 on timeout |
 | `cp [-L] SRC DST` | copies files or directories into or out of a running VM (`VM:PATH` on one side), like `docker cp` |
 | `commit VM IMAGE` | saves a stopped VM's changes as a new image, a read-only layer on its image |
@@ -141,11 +157,11 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `mount VM /HOST/DIR:/PATH[:ro]`, `umount VM /PATH` | adds or removes a live host directory: immediately on a running VM, from the next start on a stopped one |
 | `snapshot VM NAME` | saves a running VM's memory, device state and disk. The VM keeps running (paused ~0.75 s per GB of RAM) |
 | `snapshot ls [--json]`, `snapshot rm NAME` | lists / deletes snapshots |
-| `fork SNAPSHOT [NAME] [-n N]` | starts running VM(s) from a snapshot in ~120 ms each, with their own disk, IP, MAC and hostname |
+| `fork SNAPSHOT [NAME] [-n N]` | starts running VM(s) from a snapshot in ~150 ms each (~1 s jailed), with their own disk, IP, MAC and hostname |
 | `volume create NAME [SIZE]`, `volume ls [--json]`, `volume rm NAME` | named volumes: persistent ext4 disks attached with `-v` |
 | `egress VM [--allow H,...] [--deny H,...] [-n N \| -f]` | a restricted VM's allowlist and its allowed/denied requests. Changes apply live |
 | `mcp` | MCP server on stdio, for agents |
-| `serve [--port 8686]` | web console on `http://127.0.0.1:8686`, local only. Prints a login URL |
+| `serve [--port 8686]` | web console and [HTTP API](docs/api.md) on `http://127.0.0.1:8686`, local only, plus the supervisor for restart policies. Prints a login URL |
 | `shell [-u USER] VM` | interactive shell in a running VM (bash, else sh). Same as `exec -it VM` |
 | `console VM` | attaches to the live serial console. Ctrl-] detaches and the VM keeps running |
 | `logs [-f] VM` | console output of the current or last boot |
@@ -737,6 +753,65 @@ works offline. Light and dark themes follow the OS, with a toggle.
   VMs. Remote access with real authentication is
   [roadmap item W2](docs/roadmap.md#web-console).
 
+## The fcvm service
+
+```sh
+./fcvm service install              # sudo, once; re-run after updating fcvm or network settings
+./fcvm create web nginx-latest -p 8080:80 --restart unless-stopped
+./fcvm start web                    # from now on it survives crashes and reboots
+./fcvm service status               # units, console URL, API token
+```
+
+`fcvm service install` sets up two systemd units:
+
+- **`fcvm-net.service`** (root, oneshot) brings up the bridges, taps and
+  firewall rules at boot, so `fcvm net-up` is no longer needed after a
+  reboot. It runs a root-owned copy of `lib/net.sh` with settings written to
+  `/etc/fcvm/net.env` at install time. It never runs files from your
+  (user-writable) fcvm tree as root.
+- **`fcvm.service`** runs `fcvm serve` as you, after the network and
+  `fcvm-jaild`. That is the web console, its [HTTP API](docs/api.md), and the
+  **supervisor**.
+
+**Restart policies** (`create --restart`, `fcvm update VM --restart`, or the
+web console) work like Docker's:
+
+| policy | the supervisor restarts the VM when... |
+|---|---|
+| `no` (default) | never |
+| `on-failure` | an app exits non-zero, or Firecracker dies (killed, crashed) instead of the guest shutting down. Also after a host crash or reboot |
+| `unless-stopped` | it exits for any reason, unless you stopped it (`fcvm stop`, or Stop in the console) |
+| `always` | as `unless-stopped`, and it is also started at every boot even if you had stopped it |
+
+**How the supervisor behaves:**
+- **Backoff.** Restarts back off from 1 s, doubling up to 60 s. The count
+  resets once a VM has stayed up for a minute. The console shows
+  "restarting in N s", and the last error if a start failed.
+- **Exit records.** Each exit is recorded in `vms/<vm>/last-exit`, visible
+  in `fcvm inspect`: the app's exit code, Firecracker's status, and whether
+  the host went down under it.
+- **Manual starts.** `fcvm start` clears your stop, and the policy applies
+  again.
+
+**Shutdown and boot:**
+- **Clean shutdown.** When the host shuts down, the service first stops
+  every running VM cleanly and marks it to resume.
+- **At boot**, VMs with a policy other than `no` come back. That includes
+  VMs that were running when the host crashed: a crashed VM's leftover state
+  is recognized (each start records the boot id and process start time) and
+  cleaned up.
+- **Restarting the service** (`systemctl restart fcvm`) leaves running VMs
+  alone.
+
+**Other ways to run it:**
+- **Without the service**, a plain `fcvm serve` runs the same supervisor for
+  as long as it runs.
+- **Without either**, restart policies are simply not applied. Everything
+  else works the same.
+
+`fcvm service remove` removes both units. Running VMs keep running, and
+after the next reboot you're back to `./fcvm net-up`.
+
 ## Agents (MCP)
 
 `fcvm mcp` is an MCP server on stdio (standard library only). It wraps the
@@ -791,10 +866,12 @@ lib/egress_proxy.py     egress proxy for restricted VMs (allowlists, logging)
 lib/share9p.py          9P server for live host directories (-v /host:/path)
 lib/jaild.py            fcvm-jaild, the root helper for jailed VMs (installed by jail-setup)
 lib/jail-setup.sh       installs/removes fcvm-jaild (sudo)
+lib/service.sh          fcvm service install/remove/status: boot-time network + fcvm serve (sudo)
 lib/egress-presets.conf allowlist presets (@pypi, @npm, ...)
 lib/exec_client.py      host side of fcvm exec / shell (vsock)
 lib/mcp_server.py       MCP server (fcvm mcp)
-lib/web/server.py       web console backend (fcvm serve): HTTP, WebSockets, stats
+lib/web/server.py       web console backend and API (fcvm serve): HTTP, WebSockets, stats
+lib/web/supervisor.py   restart policies and recovery after a crash or reboot (runs in fcvm serve)
 lib/web/static/         web console frontend (plain HTML/CSS/JS, vendored xterm.js)
 lib/build.py            fcvm build (Dockerfile subset)
 lib/console.py          per-VM serial console relay (attach/detach, logs)
@@ -802,6 +879,7 @@ lib/net.sh              host bridges, taps, NAT, isolation and anti-spoofing rul
 init/fc-init.c          init for every VM (initramfs): root assembly, container PID 1, exec agent
 kernel/microvm-*.config kernel fragment
 docs/security.md        security and isolation reference (jailer, network, verification)
+docs/api.md             HTTP API reference
 docs/roadmap.md         planned work
 bin/ kernels/ images/ vms/ volumes/ snapshots/ cache/ build/   generated
 ```

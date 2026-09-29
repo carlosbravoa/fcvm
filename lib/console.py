@@ -141,8 +141,9 @@ def serve(args):
     else:
         while alive(pid):
             time.sleep(0.05)
-    if args.on_exit:
-        subprocess.run(args.on_exit, shell=True)
+    if args.on_exit:   # Firecracker's status, when we launched it (jailed: the helper knows)
+        env = {**os.environ, "FCVM_FC_STATUS": str(proc.returncode)} if proc else None
+        subprocess.run(args.on_exit, shell=True, env=env)
     for c in list(clients):
         drop(c)
     try:

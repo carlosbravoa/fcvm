@@ -74,8 +74,9 @@ fleet view would be a separate control-plane product built on this API.
   mounts, live on running VMs.
 - **W5. Activity and audit.** A timeline of who did what (launch, exec,
   console sessions, egress denials), feeding E5.
-- **W6. Service mode.** Run `fcvm serve` as a systemd user service; VMs
-  marked "start on boot" come back after a host reboot (with E4).
+- **W6. Service mode.** ✅ `fcvm service install`: the network and
+  `fcvm serve` at boot (a system unit running as you). VMs with a restart
+  policy come back after a reboot or crash (with E4).
 - **W7. Metrics.** Guest-level metrics through the agent (CPU, memory, disk
   and processes inside the VM), longer history, and a Prometheus endpoint.
 - **W8. Templates.** Saved launch presets, e.g. "Python sandbox, @pypi only,
@@ -152,14 +153,29 @@ Still open:
   default: a pinned LTS kernel (`KERNEL_CHANNEL=longterm`), SBOMs, and
   reproducible image builds.
 
-### E4. Daemon and API
+### E4. Daemon and API ◐
 
-State lives in JSON files, pid files and file locks. After a host reboot,
-nothing is recovered: taps are gone and VMs aren't restarted. There is only
-light protection against two `fcvm` commands running at once, and no API.
-Needed: a daemon with an API and a state store that reconciles after reboot.
-Orchestration would build on it later. The control plane likely moves to Go
-or Rust at that point, while `fc-init` stays small and static.
+**Done:**
+- **The daemon.** `fcvm serve` is it: web console, JSON API (bearer
+  tokens for scripts, [docs/api.md](api.md)), and a supervisor.
+- **Recovery.** The supervisor recovers after a crash or reboot: stale VMs
+  are recognized by boot id and process start time, and reaped without
+  touching reused pids.
+- **Restart policies**, Docker-style: `no`, `on-failure`, `unless-stopped`,
+  `always`, with backoff.
+- **Clean shutdown.** VMs stop cleanly at host shutdown and resume at boot.
+- **Per-VM locks** keep your commands and the supervisor from racing.
+- **At boot.** `fcvm service install` runs the network and the daemon at
+  boot (W6).
+
+**Still open:**
+- **A state store.** State is still JSON files, pid files and markers per
+  VM, which is simple and inspectable, but gives no transactions or history.
+- **Remote and multi-user access** (with W2): TLS, real accounts, roles.
+- **Events.** An event stream (VM started, exited, restarted) for the
+  console and for audit (E5).
+- **The long-term move.** The control plane may move to Go or Rust once
+  orchestration is on the table, while `fc-init` stays small and static.
 
 ### E5. Audit and observability
 

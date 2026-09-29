@@ -12,9 +12,20 @@
 # Guests can't reach each other (NET_ISOLATE=0 allows it on the full bridge),
 # nor host services (NET_HOST_ACCESS=1 allows it); each tap (or a jailed VM's
 # veth, fcv<i> / fcrv<i>) only passes IPv4 and ARP from its own MAC and address.
-. "$(dirname "$0")/common.sh"
-
-owner=$(id -un)
+if [ -n "${FCVM_NET_ENV:-}" ]; then
+    # Boot-time mode (fcvm-net.service, installed by `fcvm service install`): a
+    # root-owned copy of this script, run by root, reading root-owned settings.
+    # Nothing from the user-writable fcvm tree is sourced as root.
+    set -euo pipefail
+    . "$FCVM_NET_ENV"
+    log()  { printf '==> %s\n' "$*" >&2; }
+    die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+    sudo() { "$@"; }
+    owner=$FCVM_OWNER
+else
+    . "$(dirname "$0")/common.sh"
+    owner=$(id -un)
+fi
 action=${1:?up|down}
 
 ufw_active() { command -v ufw >/dev/null && sudo ufw status | grep -q '^Status: active'; }

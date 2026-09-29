@@ -449,6 +449,26 @@ Every one of these gives a guest access to something outside it:
 - The create form's "Run under the Firecracker jailer" box is checked by
   default when `fcvm-jaild` is installed.
 
+**The HTTP API** is the web console's own, and scripts can use it with
+`Authorization: Bearer <token>` ([docs/api.md](api.md)). A bearer token
+works only under `/api/`, and it's the same token as the console's: whoever
+has it has your fcvm. `vms/.serve.json` and `vms/.serve-token` hold it,
+mode 0600.
+
+**The fcvm service** (`fcvm service install`):
+- **`fcvm-net.service`** runs as root at boot. It runs a root-owned copy
+  of `net.sh` (`/usr/local/lib/fcvm/net.sh`) with root-owned settings
+  (`/etc/fcvm/net.env`). Like `fcvm-jaild`, it never executes files from
+  your user-writable fcvm tree as root, so that tree can't be used to gain
+  root. Re-run `service install` after updating fcvm.
+- **`fcvm.service`** runs `fcvm serve` as you, with no more privileges
+  than you have. It's a system unit (with `User=`) rather than a user unit
+  so it can start at boot without a login, after the network and the
+  jailer helper.
+- **`_shutdown`.** At host shutdown, `fcvm _shutdown` stops VMs cleanly.
+  It acts only while the system is shutting down, so restarting the
+  service doesn't stop anything.
+
 **MCP server** (`fcvm mcp`):
 - An agent gets tools to create and use sandboxes.
 - **Jailing.** Sandboxes are created with `--jail` whenever

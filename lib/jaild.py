@@ -88,6 +88,7 @@ class Jaild:
         self.bridges = cfg.get("bridges", {"fctap": "fcbr0", "fcrtap": "fcbr1"})
         self.isolate = cfg.get("isolate", {"fctap": False, "fcrtap": True})
         self.running = {}            # vm -> {pid, slot, id, mounts, acls, tap}
+        self.exits = {}              # vm -> Firecracker's last exit status (for restart policies)
         self.lock = threading.Lock()
         self.cgroup_parent = self.setup_cgroup()
         self.sweep_stale()
@@ -325,6 +326,7 @@ class Jaild:
         proc.wait()
         state = self.running.get(vm, {})
         log(f"{vm} exited ({proc.returncode})")
+        self.exits[vm] = proc.returncode
         if state.get("netns"):   # deleting it takes tap0, br0 and the veth pair along
             subprocess.run(["ip", "netns", "del", os.path.basename(state["netns"])], capture_output=True)
         for src in state.get("acls", []):
@@ -368,6 +370,10 @@ class Jaild:
             os.chmod(d_path, 0o600)
             os.unlink(s_path)
         return {"collected": name}
+
+    def exit_status(self, req):
+        """Firecracker's exit status for a VM that has exited (negative: a signal)."""
+        return {"status": self.exits.get(req.get("vm"))}
 
     def status(self, _req):
         return {vm: {k: v for k, v in s.items() if k in ("pid", "slot", "id", "tap")} for vm, s in self.running.items()}
@@ -424,6 +430,8 @@ def serve(jd):
                     reply = jd.status(req)
                 elif op == "snapshot_collect":
                     reply = jd.snapshot_collect(req)
+                elif op == "exit_status":
+                    reply = jd.exit_status(req)
                 else:
                     raise Refused(f"unknown op {op!r}")
                 conn.sendall(json.dumps({"ok": True, **reply}).encode() + b"\n")

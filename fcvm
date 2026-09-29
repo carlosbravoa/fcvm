@@ -11,6 +11,8 @@ Host (need sudo):
   host-setup                 install build/runtime packages, check KVM access
   net-up | net-down          create/remove bridges, $NET_TAPS tap devices each, NAT and egress rules
   jail-setup [--remove]      install fcvm-jaild, the root helper for jailed VMs (create --jail)
+  service install|remove     start fcvm at boot: network (no more net-up), then fcvm serve
+                             as you (console, API, restart policies); status needs no sudo
 
 Build:
   firecracker                download the Firecracker release ($FC_VERSION) into bin/
@@ -36,6 +38,8 @@ VMs:
                              command, stays up for exec) --net none (no network)
                              --allow HOST,*.DOMAIN,@PRESET (egress allowlist via proxy)
                              --jail (run under the Firecracker jailer; see jail-setup)
+                             --restart no|on-failure|unless-stopped|always (applied by
+                             fcvm serve / the fcvm service, like docker's)
   start [-a] VM              boot a VM in the background; -a attaches its console
   run IMAGE [-d] [opts] [-- CMD...]
                              throwaway VM, deleted when it stops. App images: attached
@@ -57,8 +61,9 @@ VMs:
   umount VM /PATH            remove it
   snapshot VM NAME           save a running VM's memory + disk (it keeps running)
   snapshot ls [--json] | rm NAME
-  fork SNAPSHOT [NAME] [-n N]  new running VM(s) from a snapshot in ~50 ms, with their own
+  fork SNAPSHOT [NAME] [-n N]  new running VM(s) from a snapshot in ~150 ms, with their own
                              disk, IP, MAC and hostname (processes keep running)
+  update VM --restart POLICY change a VM's restart policy
   inspect VM                 VM details as JSON
   ls [--all] [--json]        list VMs (--all: include build VMs)
   rm VM                      delete a VM
@@ -68,7 +73,8 @@ VMs:
   volume create NAME [SIZE] | ls [--json] | rm NAME
                              named volumes (persistent ext4 disks)
   mcp                        MCP server on stdio, for agents (see README)
-  serve [--port 8686]        web console on http://127.0.0.1:8686 (local only; prints a login URL)
+  serve [--port 8686]        web console and API on http://127.0.0.1:8686 (local only; prints a
+                             login URL) and the supervisor for restart policies
 EOF
 }
 
@@ -77,6 +83,7 @@ case $cmd in
     host-setup)         exec "$FCVM_ROOT/lib/host-setup.sh" "$@" ;;
     net-up|net-down)    exec "$FCVM_ROOT/lib/net.sh" "${cmd#net-}" "$@" ;;
     jail-setup)         exec "$FCVM_ROOT/lib/jail-setup.sh" "$@" ;;
+    service)            exec "$FCVM_ROOT/lib/service.sh" "$@" ;;
     firecracker)        exec "$FCVM_ROOT/lib/fetch-firecracker.sh" "$@" ;;
     kernel)             exec "$FCVM_ROOT/lib/build-kernel.sh" "$@" ;;
     init)               exec "$FCVM_ROOT/lib/build-init.sh" "$@" ;;
@@ -88,7 +95,7 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|snapshot|fork|mount|umount|_reap)
+    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|snapshot|fork|mount|umount|update|_reap|_shutdown)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     serve)              exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;

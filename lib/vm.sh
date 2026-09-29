@@ -14,9 +14,50 @@ cmd=$1; shift
 vm_dir()     { echo "$VMS_DIR/$1"; }
 vm_exists()  { [ -f "$VMS_DIR/$1/vm.json" ]; }
 vm_pid()     { cat "$VMS_DIR/$1/pid" 2>/dev/null || true; }
-# jailed VMs run as another uid, where kill -0 says EPERM: check /proc too
-vm_running() { local p; p=$(vm_pid "$1"); [ -n "$p" ] && { kill -0 "$p" 2>/dev/null || [ -e "/proc/$p" ]; }; }
 vm_jailed()  { [ "$(jq -r '.jail // false' "$VMS_DIR/$1/vm.json" 2>/dev/null)" = true ]; }
+boot_id()    { cat /proc/sys/kernel/random/boot_id; }
+proc_start() {   # a process's start time (clock ticks since boot), from /proc/PID/stat
+    local s; s=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+    s=${s##*) }; set -- $s; echo "${20}"
+}
+# A VM runs if its pid file names that VM's live Firecracker. pid.id (boot id
+# and start time, recorded at start) keeps a stale pid file, left by a crash or
+# a host reboot, from matching whatever process reuses the pid. Jailed VMs run
+# as another uid, so this reads /proc rather than using kill -0.
+vm_running() {
+    local p id; p=$(vm_pid "$1")
+    [ -n "$p" ] && [ -e "/proc/$p" ] || return 1
+    if id=$(cat "$VMS_DIR/$1/pid.id" 2>/dev/null); then
+        [ "$id" = "$(boot_id) $(proc_start "$p")" ]
+    else
+        [ "$(cat "/proc/$p/comm" 2>/dev/null)" = firecracker ]
+    fi
+}
+record_pid_id() { echo "$(boot_id) $(proc_start "$2")" > "$VMS_DIR/$1/pid.id"; }   # vm pid
+
+# Kill pid $1 only if it is still one of our helpers (its command line has $2):
+# after a crash or reboot, a recorded pid may belong to anything.
+kill_ours() {
+    [ -n "$1" ] && tr '\0' ' ' <"/proc/$1/cmdline" 2>/dev/null | grep -qF -- "$2" && kill "$1" 2>/dev/null || true
+}
+
+# Lifecycle changes to one VM (create, start, stop, rm, update, commit,
+# snapshot, fork) take its lock, so the supervisor in `fcvm serve` and your
+# own commands don't race. Background processes started meanwhile close
+# VM_LOCK, or they would hold the lock for their whole life.
+exec {VM_LOCK}</dev/null
+VM_LOCKED=""
+lock_vm() {
+    [ "$VM_LOCKED" = "$1" ] && return 0
+    mkdir -p "$VMS_DIR/.locks"
+    exec {VM_LOCK}>&- {VM_LOCK}>"$VMS_DIR/.locks/vm-$1"
+    flock -w 30 "$VM_LOCK" || die "VM '$1' is busy (another fcvm command is changing it)"
+    VM_LOCKED=$1
+}
+unlock_vm() { exec {VM_LOCK}>&- {VM_LOCK}</dev/null; VM_LOCKED=""; }
+
+RESTART_POLICIES="no on-failure unless-stopped always"
+valid_restart() { [[ " $RESTART_POLICIES " == *" $1 "* ]] || die "--restart wants one of: $RESTART_POLICIES"; }
 
 # jaild, printing the helper's reply only when it refuses.
 jaild_quiet() { local r; r=$(jaild "$@") || { jq -r '.error // .' <<<"$r" >&2; return 1; }; }
@@ -79,11 +120,11 @@ exit_code() {
 }
 
 create() {
-    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [-- CMD...]"
+    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [--restart POLICY] [-- CMD...]"
     local vm=${1:?$usage} image=${2:?$usage}
     shift 2
     local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full allow=()
-    local entrypoint=() set_entrypoint=0 jail=${JAIL:-0}
+    local entrypoint=() set_entrypoint=0 jail=${JAIL:-0} restart=no
     while [ $# -gt 0 ]; do
         case $1 in
             --vcpus)        vcpus=$2; shift 2 ;;
@@ -93,6 +134,7 @@ create() {
             --idle)         idle=1; shift ;;
             --jail)         jail=1; shift ;;
             --no-jail)      jail=0; shift ;;
+            --restart)      valid_restart "${2:-}"; restart=$2; shift 2 ;;
             --entrypoint)   set_entrypoint=1; [ -z "${2-}" ] || entrypoint=("$2"); shift 2 ;;
             -p|--publish)   ports+=("$2"); shift 2 ;;
             -v|--volume)    case $2 in
@@ -107,7 +149,9 @@ create() {
         esac
     done
     [[ $vm =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid VM name '$vm'"
+    lock_vm "$vm"
     vm_exists "$vm" && die "VM '$vm' already exists"
+    [ "$restart" = no ] || [ -z "${EPHEMERAL:-}" ] || die "--restart doesn't apply to throwaway VMs (fcvm run); use create"
     local meta type
     meta=$(image_json "$image")
     type=$(jq -r '.type // "app"' "$meta")
@@ -166,10 +210,10 @@ create() {
         --argjson ephemeral "${EPHEMERAL:-false}" \
         --argjson ports "$(jq -n '$ARGS.positional' --args "${ports[@]}")" \
         --argjson volumes "$(jq -n '$ARGS.positional' --args "${vols[@]}")" --argjson shares "$sharejson" \
-        --argjson jail "$([ "$jail" = 1 ] && echo true || echo false)" \
+        --argjson jail "$([ "$jail" = 1 ] && echo true || echo false)" --arg restart "$restart" \
         --argjson net "$(jq -n --arg mode "$netmode" '{mode: $mode, allow: $ARGS.positional}' --args "${allow[@]}")" \
         '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
-          shares: $shares, net: $net, jail: $jail, ephemeral: $ephemeral, created: (now | todate)}' > "$dir/vm.json"
+          shares: $shares, net: $net, jail: $jail, restart: $restart, ephemeral: $ephemeral, created: (now | todate)}' > "$dir/vm.json"
     [ -n "${EPHEMERAL:-}" ] || log "created VM '$vm' from $image ($([ $copy = 1 ] && echo 'private copy' || echo 'shared image + writable layer'))"
 }
 
@@ -222,6 +266,7 @@ ensure_proxy() {
     mkdir -p "$VMS_DIR/.egress"
     (   # don't let the long-lived proxy inherit this VM's tap lock
         if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
+        exec {VM_LOCK}>&-
         exec setsid bash -c 'while :; do python3 "$1" --listen "$2" --policy-dir "$3"; sleep 1; done' egress-proxy \
             "$FCVM_ROOT/lib/egress_proxy.py" "$NET_R_PREFIX.1:$EGRESS_PORT" "$VMS_DIR/.egress" \
             </dev/null >>"$VMS_DIR/.egress/proxy.log" 2>&1
@@ -241,7 +286,7 @@ start_portfwd() {
     [ ${#PORTS[@]} -gt 0 ] || return 0
     if [ -z "$IP" ]; then warn "no network: ports not published"; return 0; fi
     setsid python3 "$FCVM_ROOT/lib/portfwd.py" --watch "$1" --target "$IP" "${PORTS[@]}" \
-        </dev/null >"$DIR/portfwd.log" 2>&1 &
+        </dev/null >"$DIR/portfwd.log" 2>&1 {VM_LOCK}>&- &
     echo $! > "$DIR/portfwd.pid"
     sleep 0.3
     kill -0 $! 2>/dev/null || { cat "$DIR/portfwd.log" >&2; return 1; }
@@ -261,8 +306,10 @@ start() {
         esac
     done
     [ -n "$vm" ] || die "$usage"
+    lock_vm "$vm"
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" && die "VM '$vm' is already running (pid $(vm_pid "$vm"))"
+    rm -f "$VMS_DIR/$vm/stopped" "$VMS_DIR/$vm/resume"
     [ -x "$FIRECRACKER" ] || die "firecracker not installed (run: ./fcvm firecracker)"
     local kernel type vcpus mem image
     DIR=$(vm_dir "$vm")
@@ -405,6 +452,7 @@ start() {
     start_shares() {   # uds-prefix
         (   # exits with the VM
             if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
+            exec {VM_LOCK}>&-
             exec setsid python3 "$FCVM_ROOT/lib/share9p.py" --uds-prefix "$1" --pidfile "$DIR/pid" \
                 "${exports[@]}" </dev/null >"$DIR/share.log" 2>&1
         ) &
@@ -417,10 +465,11 @@ start() {
     [ $jailed = 0 ] || launch=(--jail "$DIR/jail-request.json" --link-dir "$DIR")
     setsid python3 "$FCVM_ROOT/lib/console.py" serve --sock "$DIR/console.sock" --log "$DIR/console.log" \
         --pidfile "$DIR/pid" --on-exit "$(printf '%q _reap %q' "$FCVM_ROOT/fcvm" "$vm")" "${launch[@]}" \
-        </dev/null >"$DIR/relay.log" 2>&1 &
+        </dev/null >"$DIR/relay.log" 2>&1 {VM_LOCK}>&- &
     local i pid=""
     for ((i = 0; i < 100; i++)); do pid=$(vm_pid "$vm"); [ -n "$pid" ] && break; sleep 0.02; done
     [ -n "$pid" ] || { cat "$DIR/relay.log" >&2; die "console relay failed to start"; }
+    record_pid_id "$vm" "$pid"
     if [ ${#exports[@]} -gt 0 ] && [ $jailed = 1 ]; then start_shares "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi
     if ! start_portfwd "$pid"; then
         if [ $jailed = 1 ]; then jaild kill "$vm" >/dev/null || true; else kill "$pid" 2>/dev/null || true; fi
@@ -442,6 +491,7 @@ start() {
         cat "$DIR/console.log" "$DIR/firecracker.log" >&2
         die "firecracker failed to start"
     fi
+    unlock_vm
     if [ $attach = 1 ]; then
         attach_vm "$vm"
     elif [ -z "${QUIET_START:-}" ]; then
@@ -474,8 +524,12 @@ attach_vm() {
 
 stop() {
     local vm=${1:?usage: fcvm stop VM} dir pid i
+    lock_vm "$vm"
     vm_exists "$vm" || die "no VM '$vm'"
     dir=$(vm_dir "$vm")
+    # Stopped by you: restart policies leave it alone until you start it again.
+    # A stop for host shutdown (fcvm _shutdown) marks it to resume instead.
+    [ -n "${FCVM_SYSTEM_STOP:-}" ] || touch "$dir/stopped"
     if vm_running "$vm"; then
         pid=$(vm_pid "$vm")
         # Resent every 2 s: during early boot the guest's keyboard driver isn't listening yet.
@@ -510,17 +564,30 @@ reap() {
         mkdir -p "$VMS_DIR/.exit"
         echo "${code}" > "$VMS_DIR/.exit/$vm"
     fi
-    if [ -f "$dir/portfwd.pid" ]; then kill "$(cat "$dir/portfwd.pid")" 2>/dev/null || true; fi
-    if [ -f "$dir/share.pid" ]; then kill "$(cat "$dir/share.pid")" 2>/dev/null || true; rm -f "$dir/share.pid"; fi
+    # What ended it, for restart policies (fcvm serve) and inspect: the app's
+    # exit code, and Firecracker's own status (0 = the guest shut down or
+    # rebooted; otherwise killed or crashed). A stale reap (the VM was running
+    # when the host crashed or rebooted) knows neither.
+    local fcs=${FCVM_FC_STATUS:-} app=""
+    if [ -z "${FCVM_STALE:-}" ]; then
+        if [ -z "$fcs" ] && vm_jailed "$vm"; then
+            fcs=$(jaild exit_status "$vm" 2>/dev/null | jq -r '.status // empty' 2>/dev/null || true)
+        fi
+        [ "$(jq -r .type "$dir/vm.json")" != app ] || app=$(exit_code "$vm")
+    fi
+    jq -n --arg code "$app" --arg fcs "$fcs" --argjson stale "$([ -n "${FCVM_STALE:-}" ] && echo true || echo false)" \
+        '{code: ($code | tonumber? // null), fc_status: ($fcs | tonumber? // null), stale: $stale, at: now}' > "$dir/last-exit"
+    kill_ours "$(cat "$dir/portfwd.pid" 2>/dev/null)" portfwd.py
+    kill_ours "$(cat "$dir/share.pid" 2>/dev/null)" share9p.py; rm -f "$dir/share.pid"
     if [ -f "$dir/share.live" ]; then
-        awk '{print $2}' "$dir/share.live" | xargs -r kill 2>/dev/null || true
+        local sp; for sp in $(awk '{print $2}' "$dir/share.live"); do kill_ours "$sp" share9p.py; done
         rm -f "$dir/share.live"
     fi
     rm -f "$dir"/vsock.sock_*
     if [ -f "$dir/ip" ]; then rm -f "$VMS_DIR/.egress/$(cat "$dir/ip").json"; fi
-    rm -f "$dir/fc.sock" "$dir/vsock.sock" "$dir/console.sock" "$dir/portfwd.pid" "$dir/pid"
+    rm -f "$dir/fc.sock" "$dir/vsock.sock" "$dir/console.sock" "$dir/portfwd.pid" "$dir/pid" "$dir/pid.id"
     if [ -L "$dir/firecracker.log" ]; then rm -f "$dir/firecracker.log"; fi
-    if [ "$(jq -r .ephemeral "$dir/vm.json")" = true ]; then rm -rf "$dir"; fi
+    if [ "$(jq -r .ephemeral "$dir/vm.json")" = true ]; then rm -rf "$dir" "$VMS_DIR/.locks/vm-$vm"; fi
 }
 
 # fcvm run IMAGE [-d] [opts] [-- CMD...]: throwaway VM, deleted when it stops.
@@ -694,6 +761,7 @@ volume_cmd() {
 # merged. A --copy VM's private disk becomes a standalone base image instead.
 commit() {
     local vm=${1:?usage: fcvm commit VM IMAGE} image=${2:?usage: fcvm commit VM IMAGE}
+    lock_vm "$vm"
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" && die "VM '$vm' is running; stop it first (fcvm stop $vm)"
     [[ $image =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid image name '$image'"
@@ -889,6 +957,7 @@ fc_api() {   # socket method path [json]
 # writable disk (consistent: taken while paused), then resume it.
 snapshot_create() {
     local vm=${1:?usage: fcvm snapshot VM NAME} name=${2:?usage: fcvm snapshot VM NAME}
+    lock_vm "$vm"
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" || die "VM '$vm' is not running (snapshots capture a running VM's memory)"
     [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid snapshot name '$name'"
@@ -932,6 +1001,7 @@ snapshot_create() {
 fork_one() {
     local snap=$1 vm=$2 sdir=$SNAPSHOTS_DIR/$1 dir disk drive mode mac="" gw="" tap="" t0 i pid
     dir=$(vm_dir "$vm")
+    lock_vm "$vm"
     vm_exists "$vm" && die "VM '$vm' already exists"
     if [ "$(jq -r '.jail // false' "$sdir/meta.json")" = true ]; then
         # Inside a jail every path is the same (/driveN.ext4, /vsock.sock, tap0 in
@@ -971,15 +1041,15 @@ fork_one() {
     setsid python3 "$FCVM_ROOT/lib/console.py" serve --sock "$dir/console.sock" --log "$dir/console.log" \
         --pidfile "$dir/pid" --on-exit "$(printf '%q _reap %q' "$FCVM_ROOT/fcvm" "$vm")" -- \
         "$FIRECRACKER" --api-sock "$dir/fc.sock" --log-path "$dir/firecracker.log" --level Warning \
-        </dev/null >"$dir/relay.log" 2>&1 &
+        </dev/null >"$dir/relay.log" 2>&1 {VM_LOCK}>&- &
     for ((i = 0; i < 100; i++)); do [ -S "$dir/fc.sock" ] && break; sleep 0.01; done
     pid=$(vm_pid "$vm")
+    [ -z "$pid" ] || record_pid_id "$vm" "$pid"
     # The snapshot records the source VM's disk path, and loading reopens it
     # before we re-point the drive at the fork's copy. If the source VM is gone,
     # stand in for that path with the snapshot's own disk while loading.
     local srcdisk stand_in=0 made_dir=0 lock
     srcdisk=$(jq -r --arg d "$VMS_DIR/$(jq -r .source "$sdir/meta.json")/$disk" '.source_disk // $d' "$sdir/meta.json")
-    mkdir -p "$VMS_DIR/.locks"
     mkdir -p "$VMS_DIR/.locks"
     exec {lock}>"$VMS_DIR/.locks/snapshot-load"; flock "$lock"
     if [ ! -e "$srcdisk" ]; then
@@ -1143,8 +1213,10 @@ inspect_json() {
         --argjson chain "$(jq -n '$ARGS.positional' --args $(image_chain "$(jq -r .image "$d/vm.json")"))" \
         '{name: $name, state: $state, pid: ($pid | tonumber? // null), ip: ($ip | select(. != "") // null),
           mem_used_bytes: ($rss | tonumber? // null),
-          exit_code: ($code | tonumber? // null), image_chain: $chain, disk_mode: $mode, disk_used_bytes: $disk} + .' \
-        "$d/vm.json"
+          exit_code: ($code | tonumber? // null), image_chain: $chain, disk_mode: $mode, disk_used_bytes: $disk,
+          stopped_by_user: $stopped, last_exit: $last} + {restart: "no"} + .' \
+        --argjson stopped "$([ -f "$d/stopped" ] && echo true || echo false)" \
+        --argjson last "$(cat "$d/last-exit" 2>/dev/null || echo null)" "$d/vm.json"
 }
 
 inspect() {
@@ -1224,7 +1296,7 @@ list_vms() {
         used=$(du -h "$d"/*.ext4 2>/dev/null | awk '{print $1; exit}')
         [ -f "$d/disk.ext4" ] && used+=" copy"
         printf "$fmt" "$vm" "$state" "$ip" "$(jq -r .image "$d/vm.json")" "$mem" "$used" \
-            "$(jq -r '[(if .jail then "jail" else empty end), (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
+            "$(jq -r '[(if .jail then "jail" else empty end), (if (.restart // "no") != "no" then "restart:\(.restart)" else empty end), (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
                 + (.ports // []) + ((.volumes // []) | map("-v " + .))
                 + ((.shares // []) | map("-v \(.host):\(.path)\(if .ro then ":ro" else "" end)")) | join(" ")' "$d/vm.json")"
     done
@@ -1259,11 +1331,49 @@ list_images() {
     done
 }
 
+# fcvm update VM --restart POLICY: change settings of an existing VM.
+update() {
+    local usage="usage: fcvm update VM --restart no|on-failure|unless-stopped|always" vm=${1:-} restart=""
+    [ -n "$vm" ] || die "$usage"; shift
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --restart) valid_restart "${2:-}"; restart=$2; shift 2 ;;
+            *)         die "unknown option $1 ($usage)" ;;
+        esac
+    done
+    [ -n "$restart" ] || die "$usage"
+    lock_vm "$vm"
+    vm_exists "$vm" || die "no VM '$vm'"
+    local f=$VMS_DIR/$vm/vm.json
+    [ "$restart" = no ] || [ "$(jq -r .ephemeral "$f")" != true ] || die "'$vm' is a throwaway VM (fcvm run); restart policies don't apply"
+    jq --arg r "$restart" '.restart = $r' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    log "'$vm': restart policy $restart$([ "$restart" = no ] || echo " (applied by fcvm serve / the fcvm service)")"
+}
+
+# fcvm _shutdown [--force]: run by fcvm.service when it stops. Only while the
+# host is shutting down (or with --force), stop every running VM cleanly, in
+# parallel, and mark it to resume at the next boot. Restarting the service
+# alone leaves VMs running.
+shutdown_all() {
+    [ "${1:-}" = --force ] || [ "$(systemctl is-system-running 2>/dev/null)" = stopping ] || return 0
+    local d vm n=0
+    for d in "$VMS_DIR"/*/; do
+        vm=$(basename "$d")
+        vm_exists "$vm" && vm_running "$vm" || continue
+        touch "$d/resume"
+        FCVM_SYSTEM_STOP=1 QUIET_STOP=1 "$FCVM_ROOT/fcvm" stop "$vm" >/dev/null 2>&1 &
+        n=$((n + 1))
+    done
+    wait
+    log "stopped $n VM(s) for shutdown; they resume at the next boot"
+}
+
 rm_vm() {
     local vm=${1:?usage: fcvm rm VM}
+    lock_vm "$vm"
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" && die "VM '$vm' is running (fcvm stop $vm first)"
-    rm -rf "$(vm_dir "$vm")"
+    rm -rf "$(vm_dir "$vm")" "$VMS_DIR/.locks/vm-$vm"
     log "removed '$vm'"
 }
 
@@ -1293,4 +1403,6 @@ case $cmd in
     mount)   mount_cmd "$@" ;;
     umount)  umount_cmd "$@" ;;
     rm)      rm_vm "$@" ;;
+    update)  update "$@" ;;
+    _shutdown) shutdown_all "$@" ;;
 esac

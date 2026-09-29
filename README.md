@@ -69,6 +69,27 @@ From a fresh clone to a shell in a microVM (x86_64 Linux with KVM):
 Once that works, `./fcvm run alpine-latest -- echo hello` boots a VM, runs the
 command and cleans up in about a second and a half.
 
+From here, pick how you want to drive it:
+
+- **A cloud-like console in your browser**: instances, images, launch forms,
+  live charts, terminals and file browsing. See [Web console](#web-console).
+
+  ```sh
+  ./fcvm serve                 # prints http://127.0.0.1:8686/?token=...  (open it)
+  ```
+
+- **Your coding agent**: sandboxes as tools, jailed when the jailer is
+  installed. It works with any MCP client. See [Agents (MCP)](#agents-mcp).
+  For Claude Code:
+
+  ```sh
+  claude mcp add fcvm -- "$PWD/fcvm" mcp
+  ```
+
+  Then ask it, for example, to "run the test suite in an fcvm sandbox".
+
+- **The CLI**: read on.
+
 ## A tour
 
 ```sh

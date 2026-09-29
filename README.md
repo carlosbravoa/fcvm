@@ -59,10 +59,11 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `kernel [stable\|mainline\|longterm\|X.Y.Z]` | builds `kernels/vmlinux-X.Y.Z`; `kernels/vmlinux` points at the newest |
 | `init` | builds `build/fc-init` (static) and `build/initramfs.cpio`, which every VM boots with |
 | `base [NAME]` | builds `images/ubuntu-26.04.ext4` |
-| `import REF [NAME]` | registry image → `images/NAME.ext4` + `NAME.json` |
-| `images [--json]`, `ls [--json]` | lists images (with what uses each) / VMs (state, exit code, disk use, ports, volumes) |
+| `import REF [NAME]` | registry image, or a local one (`docker-archive:F.tar`, `oci:DIR`, `oci-archive:F.tar`, or just a path) → `images/NAME.ext4` + `NAME.json` |
+| `build [-t NAME] [-f FILE] [--build-arg K=V] [--no-cache] [--net none\|--allow H,...] [CONTEXT]` | builds an image from a Dockerfile subset, cached per step. The result is the FROM image plus one layer |
+| `images [--all] [--json]`, `ls [--all] [--json]` | lists images (with what uses each) / VMs (state, exit code, disk use, network, ports, volumes). `--all` includes the build cache and build VMs |
 | `inspect VM` | the VM's details as JSON |
-| `create VM IMAGE [opts] [-- CMD...]` | VM on the shared image plus its own writable layer. `--vcpus N`, `--mem MiB`, `--disk SIZE` (layer size, default 8G sparse), `-p [BIND:]HOST:GUEST` (repeatable), `-v VOLUME:/PATH[:ro]` (repeatable, created on first use), `--idle` (container: run nothing, stay up for `exec`), `--copy` (private full copy instead), `-- CMD` (replaces the container command) |
+| `create VM IMAGE [opts] [-- CMD...]` | VM on the shared image plus its own writable layer. `--vcpus N`, `--mem MiB`, `--disk SIZE` (layer size, default 8G sparse), `-p [BIND:]HOST:GUEST` (repeatable), `-v VOLUME:/PATH[:ro]` (repeatable, created on first use), `--net none`, `--allow HOSTS`, `--idle` (container: run nothing, stay up for `exec`), `--copy` (private full copy instead), `-- CMD` (replaces the image's CMD and keeps its ENTRYPOINT, as `docker run` does), `--entrypoint CMD` (`""` clears it) |
 | `start [-a] VM` | boots in the background, like `docker start`. `-a` attaches the console |
 | `run IMAGE [-d] [opts] [-- CMD...]` | throwaway VM, deleted when it stops. **Container images**: attached like `docker run`: you see the output, Ctrl-C goes to the app, Ctrl-] detaches, and fcvm exits with the container's exit code. **Ubuntu images**: boots and opens `fcvm shell` (or runs CMD); when the shell or CMD ends, the VM is stopped and deleted. `-d`: background |
 | `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s |
@@ -70,6 +71,8 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `cp [-L] SRC DST` | copies files or directories into or out of a running VM (`VM:PATH` on one side), like `docker cp` |
 | `commit VM IMAGE` | saves a stopped VM's changes as a new image, a read-only layer on its image |
 | `rmi IMAGE` | deletes an image nothing depends on |
+| `squash IMAGE NEW` | merges IMAGE's committed layers into one, on the same base image |
+| `prune` | deletes the build cache and leftover build VMs |
 | `volume create NAME [SIZE]`, `volume ls [--json]`, `volume rm NAME` | named volumes: persistent ext4 disks attached with `-v` |
 | `egress VM [--allow H,...] [--deny H,...] [-n N \| -f]` | a restricted VM's allowlist and its allowed/denied requests. Changes apply live |
 | `mcp` | MCP server on stdio, for agents |
@@ -121,6 +124,21 @@ Commit is rootless and instant because nothing is merged. Per-VM settings
 aren't saved: a command given with `create -- CMD` or `--idle` stays with the
 VM, and the new image keeps its parent's command. A `--copy` VM's disk becomes
 a standalone image instead.
+
+**Squash.** Every layer is a separate virtual disk, and Firecracker on x86
+has about 19 device slots in total, shared by disks, network, vsock and
+entropy. So layer chains have to stay short. `fcvm squash` merges layers in
+a throwaway VM that boots only the initramfs: `fc-init` merge mode, with the
+layer disks attached read-only and an empty output disk. It applies each
+layer's `upper/` in order and keeps whiteouts and opaque directories, so
+deletions of files in the base image survive. Owners, modes, setuid bits,
+xattrs (such as file capabilities), hardlinks, symlinks, device nodes and
+timestamps are preserved. A three-layer chain merges in about a second.
+
+**Identity scrubbing.** Committing a VM that has booted systemd removes its
+machine-id, SSH host keys, random seed and journal from the layer. The base
+image's blank versions show through again, and every VM from the new image
+generates its own at first boot.
 
 **Volumes.** Named ext4 disks in `volumes/`, attached with `-v NAME:/PATH`
 and created on first use (`VOLUME_SIZE`, default 10G sparse). They outlive
@@ -252,6 +270,70 @@ itself. VMs on `fcbr0` can reach each other unless `NET_ISOLATE=1`.
   `.config` (renamed symbol or unmet dependency). Check this after moving to a
   new kernel series.
 
+## Building images
+
+`fcvm build` takes a Dockerfile subset, from `Fcvmfile` or `Dockerfile` in
+the build context, or `-f`:
+
+```dockerfile
+ARG PYVER=3.13
+FROM python:${PYVER}-slim          # an fcvm image, or a registry ref (imported if missing)
+ENV APP_HOME=/app PIP_ROOT_USER_ACTION=ignore
+WORKDIR $APP_HOME
+COPY requirements.txt .
+RUN pip install -q -r requirements.txt
+COPY src/ ./src/
+RUN useradd -m app && chown -R app /app
+USER app
+EXPOSE 8000
+ENTRYPOINT ["python", "-m", "src.main"]
+CMD ["--greeting", "hello"]
+```
+
+```sh
+./fcvm build -t myapp --allow @pypi ./myapp   # RUN steps get only PyPI
+./fcvm run myapp                               # python -m src.main --greeting hello
+./fcvm run myapp -- --greeting hi              # replaces CMD, keeps ENTRYPOINT
+```
+
+- **Supported:** `FROM` (a single stage), `RUN` (shell and JSON forms),
+  `COPY`/`ADD` (local sources and globs, `--chown`, `.dockerignore`, and
+  `ADD` of a local tar extracts it), `ENV`, `ARG`/`--build-arg`, `WORKDIR`,
+  `USER`, `CMD`, `ENTRYPOINT`, `EXPOSE`, `LABEL` (ignored). Variables are
+  substituted as Docker does.
+- **Not supported:** multi-stage builds, `COPY --from`, `ADD <url>`,
+  `HEALTHCHECK`, `SHELL`, `ONBUILD`, `FROM scratch`. These fail with a clear
+  error instead of being ignored. `COPY` needs `sh` and `tar` in the image.
+- **How it runs:** each filesystem step (`RUN`, `COPY`, `ADD`, `WORKDIR`)
+  runs in a VM booted from the previous step's result, which is then stopped
+  and committed as a hidden cache image, a fresh environment per step as with
+  Docker. The cache key chains the previous key, the instruction, the config
+  (ENV, USER, ...) and, for `COPY`/`ADD`, the copied files' content. An
+  unchanged prefix of the file is reused: editing application code after a
+  `pip install` re-runs only the steps from the `COPY` on. Cache chains are
+  squashed past six layers. The result is always the FROM image plus one
+  squashed layer, with ENV, WORKDIR, USER, ENTRYPOINT and CMD written to its
+  `/.fcvm` config. `USER` names are resolved at boot against the image's
+  `/etc/passwd`.
+- **Speed:** a typical first build is dominated by its `RUN` steps plus about
+  1.5 s per filesystem step. A rebuild with nothing changed takes about 2 s.
+  `--no-cache` runs everything in one VM and commits once.
+- **Build network:** full by default. `--net none` and `--allow` work as for
+  VMs. The cache lives under `images/_bc-*` (`fcvm images --all`), and
+  `fcvm prune` removes it. Built images don't depend on it.
+- **Building FROM the Ubuntu image** works too: `RUN` steps go through the
+  systemd VM's agent, and `CMD`/`ENTRYPOINT` are refused because systemd is
+  the init.
+
+**Local images.** `fcvm import` also takes `docker save` / `podman save`
+tarballs (classic and Docker 25+ OCI-style), OCI layout directories and OCI
+archives, so images never have to be pushed to a registry:
+
+```sh
+docker save myorg/tool:1.0 -o tool.tar && ./fcvm import tool.tar   # -> image tool-1.0
+./fcvm import oci:./layout:v2 mytool                               # a tag from an OCI layout
+```
+
 ## Agents (MCP)
 
 `fcvm mcp` is an MCP server on stdio (standard library only). It wraps the
@@ -270,6 +352,7 @@ claude mcp add fcvm -- /path/to/fcvm mcp
 | `write_file`, `read_file` | text files in the VM |
 | `copy_to_vm`, `copy_from_vm` | host files and directories in or out (`fcvm cp`) |
 | `commit_vm` | save a VM's state as an image; new sandboxes start from it |
+| `build_image` | build an image from a Dockerfile in a host directory (cached per step) |
 | `egress_log` | a sandbox's network policy and its allowed/denied requests |
 | `logs`, `list_vms`, `start_vm`, `stop_vm`, `remove_vm`, `volumes` | lifecycle and state |
 
@@ -304,6 +387,7 @@ lib/egress_proxy.py     egress proxy for restricted VMs (allowlists, logging)
 lib/egress-presets.conf allowlist presets (@pypi, @npm, ...)
 lib/exec_client.py      host side of fcvm exec / shell (vsock)
 lib/mcp_server.py       MCP server (fcvm mcp)
+lib/build.py            fcvm build (Dockerfile subset)
 lib/console.py          per-VM serial console relay (attach/detach, logs)
 lib/net.sh              host bridge/taps/NAT
 init/fc-init.c          init for every VM (initramfs): root assembly, container PID 1, exec agent
@@ -344,8 +428,10 @@ Windows. fcvm needs KVM and never will.
   resolvers. Still open: non-HTTP protocols in allowlists (e.g. SSH to
   github.com), and TLS inspection, which is deliberately not done.
 - **A5. exec for agents.** ✅ `--timeout`, `-e KEY=VAL`, `-w DIR`.
-- **A6. Provisioning.** A cloud-init equivalent or build recipe. Import from a
-  local `docker save` tarball or OCI layout, not only from registries.
+- **A6. Provisioning.** ✅ `fcvm build` (Dockerfile subset, per-step cache,
+  single-layer results), ✅ local `docker save`/OCI imports, ✅ `fcvm squash`.
+  Still open: multi-stage builds, and a cloud-init style first-boot hook for
+  Ubuntu VMs.
 - **A7. Concurrency.** ✅ 64 taps per network pool, and `--net none` VMs
   need none. Beyond ~240 VMs per pool, taps would have to be created on
   demand, which needs root.

@@ -59,6 +59,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -157,6 +158,7 @@ static char *karg(const char *key)
 }
 
 static int write_all(int fd, const void *p, size_t n);
+static void shutdown_vm(void);
 
 static void mkdir_p(const char *path, mode_t mode)
 {
@@ -207,6 +209,203 @@ static int is_empty_dir(const char *path)
     if (d)
         closedir(d);
     return d && empty;
+}
+
+/*
+ * Layer merge (`fcvm squash`), run from the initramfs with no root filesystem:
+ *   fcvm.merge=DEV,DEV,...  committed layers, OLDEST first (ext4, upper/)
+ *   fcvm.merge_out=DEV      empty layer disk; receives the merged upper/
+ * Applies each layer onto the output in order with overlayfs semantics, and
+ * keeps whiteouts and opaque directories, so deletions of files in the base
+ * image below survive. Writes /merge-ok on the output when there were no
+ * errors, then reboots (Firecracker exits).
+ */
+static int merge_errors;
+struct hardlink {
+    dev_t dev;
+    ino_t ino;
+    char *path;
+};
+static struct hardlink *links;
+static size_t nlinks;
+
+static void merr(const char *what, const char *path)
+{
+    msg("merge: %s %s: %s", what, path, strerror(errno));
+    merge_errors++;
+}
+
+static void remove_all(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) < 0)
+        return;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(path);
+        struct dirent *e;
+        while (d && (e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+                continue;
+            char p[4096];
+            snprintf(p, sizeof(p), "%s/%s", path, e->d_name);
+            remove_all(p);
+        }
+        if (d)
+            closedir(d);
+        rmdir(path);
+    } else {
+        unlink(path);
+    }
+}
+
+/* Owner, then mode (chown clears setuid), then xattrs (chown clears file
+ * capabilities), then times. Of overlayfs' own xattrs only "opaque" matters. */
+static void copy_meta(const char *src, const char *dst, const struct stat *st)
+{
+    if (lchown(dst, st->st_uid, st->st_gid) < 0)
+        merr("chown", dst);
+    if (!S_ISLNK(st->st_mode) && chmod(dst, st->st_mode & 07777) < 0)
+        merr("chmod", dst);
+    static char names[65536], val[65536];
+    ssize_t n = llistxattr(src, names, sizeof(names));
+    for (char *k = names; n > 0 && k < names + n; k += strlen(k) + 1) {
+        if (!strncmp(k, "trusted.overlay.", 16) && strcmp(k, "trusted.overlay.opaque"))
+            continue;
+        ssize_t vl = lgetxattr(src, k, val, sizeof(val));
+        if (vl >= 0 && lsetxattr(dst, k, val, vl, 0) < 0 && errno != ENOTSUP)
+            merr("setxattr", dst);
+    }
+    struct timespec ts[2] = {st->st_atim, st->st_mtim};
+    utimensat(AT_FDCWD, dst, ts, AT_SYMLINK_NOFOLLOW);
+}
+
+static int copy_data(const char *src, const char *dst)
+{
+    static char buf[1 << 20];
+    int in = open(src, O_RDONLY | O_CLOEXEC), out = -1, ok = 0;
+    if (in >= 0)
+        out = open(dst, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (out >= 0) {
+        ssize_t r;
+        ok = 1;
+        while ((r = read(in, buf, sizeof(buf))) > 0)
+            if (write_all(out, buf, r) < 0) {
+                ok = 0;
+                break;
+            }
+        if (r < 0)
+            ok = 0;
+    }
+    if (in >= 0)
+        close(in);
+    if (out >= 0)
+        close(out);
+    return ok ? 0 : -1;
+}
+
+static void merge_dir(const char *src, const char *dst)
+{
+    DIR *d = opendir(src);
+    struct dirent *e;
+    if (!d) {
+        merr("opendir", src);
+        return;
+    }
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+            continue;
+        char s[4096], t[4096];
+        snprintf(s, sizeof(s), "%s/%s", src, e->d_name);
+        snprintf(t, sizeof(t), "%s/%s", dst, e->d_name);
+        struct stat st, tst;
+        if (lstat(s, &st) < 0) {
+            merr("lstat", s);
+            continue;
+        }
+        int have = lstat(t, &tst) == 0;
+        if (S_ISCHR(st.st_mode) && st.st_rdev == 0) { /* whiteout: keep it */
+            remove_all(t);
+            if (mknod(t, S_IFCHR, 0) < 0)
+                merr("whiteout", t);
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            char v[4];
+            int opaque = lgetxattr(s, "trusted.overlay.opaque", v, sizeof(v)) == 1 && v[0] == 'y';
+            if (have && (!S_ISDIR(tst.st_mode) || opaque)) {
+                remove_all(t);
+                have = 0;
+            }
+            if (!have && mkdir(t, 0700) < 0) {
+                merr("mkdir", t);
+                continue;
+            }
+            merge_dir(s, t);
+            copy_meta(s, t, &st); /* after the children, so times stick */
+            continue;
+        }
+        if (have)
+            remove_all(t);
+        if (S_ISREG(st.st_mode)) {
+            size_t i;
+            for (i = 0; st.st_nlink > 1 && i < nlinks; i++)
+                if (links[i].dev == st.st_dev && links[i].ino == st.st_ino)
+                    break;
+            if (st.st_nlink > 1 && i < nlinks) {
+                if (link(links[i].path, t) < 0)
+                    merr("link", t);
+                continue;
+            }
+            if (copy_data(s, t) < 0) {
+                merr("copy", s);
+                continue;
+            }
+            if (st.st_nlink > 1) {
+                links = realloc(links, (nlinks + 1) * sizeof(*links));
+                links[nlinks++] = (struct hardlink){st.st_dev, st.st_ino, strdup(t)};
+            }
+        } else if (S_ISLNK(st.st_mode)) {
+            char target[4096];
+            ssize_t n = readlink(s, target, sizeof(target) - 1);
+            if (n < 0 || (target[n] = '\0', symlink(target, t) < 0)) {
+                merr("symlink", t);
+                continue;
+            }
+        } else if (mknod(t, st.st_mode & S_IFMT, st.st_rdev) < 0) {
+            merr("mknod", t);
+            continue;
+        }
+        copy_meta(s, t, &st);
+    }
+    closedir(d);
+}
+
+static void merge_main(void)
+{
+    char *layers = karg("fcvm.merge"), *out = karg("fcvm.merge_out"), *save;
+    int n = 0;
+    if (!out || mount_dev(out, "/mnt/out", MS_NOATIME) < 0) {
+        msg("merge: no output disk");
+        shutdown_vm();
+    }
+    mkdir("/mnt/out/upper", 0755);
+    for (char *dev = strtok_r(layers, ",", &save); dev; dev = strtok_r(NULL, ",", &save)) {
+        char dir[32], upper[48];
+        snprintf(dir, sizeof(dir), "/mnt/m%d", n++);
+        snprintf(upper, sizeof(upper), "%s/upper", dir);
+        if (mount_dev(dev, dir, MS_RDONLY) < 0) {
+            merge_errors++;
+            break;
+        }
+        nlinks = 0; /* hardlinks are per layer */
+        merge_dir(upper, "/mnt/out/upper");
+    }
+    if (!merge_errors)
+        spit("/mnt/out/merge-ok", "ok\n");
+    sync();
+    umount("/mnt/out");
+    msg("merged %d layer(s), %d error(s)", n, merge_errors);
+    shutdown_vm();
 }
 
 /*
@@ -453,6 +652,22 @@ static char *resolve_user(const char *spec, char *err, size_t errlen)
 }
 
 /*
+ * The image's default user from /.fcvm/user: "uid:gid[:gid,...]" as written
+ * by import, or a USER spec (name, name:group, uid) as written by fcvm build,
+ * resolved here against the image's own /etc/passwd.
+ */
+static char *config_user(void)
+{
+    char *u = trim(slurp(CONF "user", NULL)), why[300];
+    if (!u || !*u || strspn(u, "0123456789:,") == strlen(u))
+        return u;
+    char *r = resolve_user(u, why, sizeof(why));
+    if (!r)
+        msg("%s; running as root", why);
+    return r;
+}
+
+/*
  * Become the image's user and exec argv with the image's env and workdir.
  * Shared by the main process and by `fcvm exec` sessions. No workdir means
  * $HOME (exec sessions on systemd images). term, if set, overrides TERM.
@@ -673,7 +888,7 @@ static void agent_session(int conn)
         env[ni + i] = fields[8 + i];
 
     char *workdir = *fields[6] ? fields[6] : trim(slurp(CONF "workdir", NULL));
-    char *user = trim(slurp(CONF "user", NULL));
+    char *user = config_user();
     if (*fields[5]) { /* exec -u */
         char why[300];
         if (!(user = resolve_user(fields[5], why, sizeof(why)))) {
@@ -813,6 +1028,8 @@ int main(int argc, char **argv_)
     }
     mnt("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
     mnt("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+    if (karg("fcvm.merge"))
+        merge_main(); /* fcvm squash: never returns */
     char *exec = karg("fcvm.exec");
     if (assemble_root() < 0) {
         msg("cannot assemble the root filesystem; halting");
@@ -833,7 +1050,7 @@ int main(int argc, char **argv_)
     char *abuf = slurp(CONF "argv", &alen);
     char *ebuf = slurp(CONF "env", &elen);
     char *workdir = trim(slurp(CONF "workdir", NULL));
-    char *user = trim(slurp(CONF "user", NULL));
+    char *user = config_user();
     char *hostname = trim(slurp(CONF "hostname", NULL));
 
     setup_net(hostname);

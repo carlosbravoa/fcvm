@@ -28,7 +28,7 @@ PINNED_NETWORK = os.environ.get("FCVM_MCP_NETWORK", "").strip()
 INSTRUCTIONS = """fcvm runs Firecracker microVMs: real kernel isolation, ~1 s to boot a container
 image, ~2 s for Ubuntu. Typical loop: images (or pull_image) -> create_sandbox ->
 exec / write_file / read_file / copy_* -> commit_vm to save a prepared state ->
-remove_vm. Container sandboxes run as the image's USER; pass user="root" to exec
+remove_vm. build_image turns a Dockerfile into a reusable image. Container sandboxes run as the image's USER; pass user="root" to exec
 for installs. Network: "full" (NAT), "none", or an allowlist of hosts/@presets
 (@pypi, @npm, @github, ...) enforced by a host-side HTTP(S) proxy; the sandbox's
 http(s)_proxy variables are preset, and egress_log shows what was allowed or
@@ -79,6 +79,24 @@ def t_pull_image(ref, name=None):
     fcvm("import", ref, *([name] if name else []), timeout=1800)
     name = name or re.sub(r"[^A-Za-z0-9_.-]", "_", re.sub(r"[@:]", "-", ref.rsplit("/", 1)[-1]))
     return next((i for i in t_images() if i["name"] == name), {"name": name})
+
+
+def t_build_image(context, tag, file=None, build_args=None, network=None, no_cache=False):
+    args = ["build", "-t", tag]
+    if file:
+        args += ["-f", file]
+    for k, v in (build_args or {}).items():
+        args += ["--build-arg", f"{k}={v}"]
+    if no_cache:
+        args.append("--no-cache")
+    net = network_args(network)
+    if net[:1] == ["--net"] or net[:1] == ["--allow"]:
+        args += net
+    code, out, err = fcvm(*args, context, timeout=3600, check=False)
+    log, _ = cap(ANSI.sub("", err + out))
+    if code != 0:
+        raise ToolError(f"build failed (exit {code}):\n{log}")
+    return {"image": tag, "log": log}
 
 
 def t_list_vms():
@@ -219,8 +237,15 @@ S = {"type": "string"}
 I = {"type": "integer"}
 TOOLS = {
     "images": (t_images, "List VM images (container images imported from registries, the Ubuntu base, committed images).", {}, []),
-    "pull_image": (t_pull_image, "Import an image from Docker Hub or any OCI registry (e.g. python:3.13, ghcr.io/org/app:tag).",
+    "pull_image": (t_pull_image, "Import an image from Docker Hub or any OCI registry (e.g. python:3.13, ghcr.io/org/app:tag), or a local docker save / OCI archive path.",
                    {"ref": S, "name": {**S, "description": "image name (default: derived from ref)"}}, ["ref"]),
+    "build_image": (t_build_image,
+        "Build an image from a Dockerfile subset (FROM, RUN, COPY, ADD, ENV, ARG, WORKDIR, USER, CMD, ENTRYPOINT, EXPOSE) in a host directory. Steps are cached; the result is its FROM image plus one layer, usable with create_sandbox.",
+        {"context": {**S, "description": "host directory with the Dockerfile (or Fcvmfile) and the files it COPYs"},
+         "tag": {**S, "description": "name of the new image"}, "file": S,
+         "build_args": {"type": "object", "additionalProperties": S},
+         "network": {"description": 'network for RUN steps: full (default), "none", or an allowlist', "anyOf": [S, {"type": "array", "items": S}]},
+         "no_cache": {"type": "boolean"}}, ["context", "tag"]),
     "list_vms": (t_list_vms, "List VMs with state, IP, image, ports and volumes.", {}, []),
     "create_sandbox": (t_create_sandbox,
         "Create and boot a VM from an image. Container images stay up idle for exec unless a command is given. Returns the VM's details (name, ip).",

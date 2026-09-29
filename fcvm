@@ -15,11 +15,14 @@ Build:
   kernel [VERSION]           fetch latest $KERNEL_CHANNEL kernel from kernel.org, build a microVM vmlinux
   init                       build fc-init and the initramfs every VM boots with
   base [NAME]                build the Ubuntu 26.04 base image (default name: ubuntu-26.04)
-  import REF [NAME]          pull an image from Docker Hub / any registry and convert it to a VM image
+  import REF [NAME]          image from Docker Hub / any registry, or local: docker-archive:F.tar,
+                             oci:DIR, oci-archive:F.tar (or a path) -> VM image
+  build [-t NAME] [-f FILE] [--build-arg K=V] [--no-cache] [--allow H,...] [CONTEXT]
+                             build an image from a Dockerfile subset (cached per step)
   all                        firecracker + kernel + init + base
 
 VMs:
-  images [--json]            list images
+  images [--all] [--json]    list images (--all: include the build cache)
   create VM IMAGE [opts] [-- CMD...]
                              create a VM: IMAGE's disk is shared read-only, writes go to
                              a per-VM layer. opts: --vcpus N --mem MiB --disk SIZE
@@ -42,8 +45,10 @@ VMs:
   ssh VM [args]              ssh root@VM (base images)
   cp SRC DST                 copy files in/out of a running VM (VM:PATH on one side)
   commit VM IMAGE            save a stopped VM's changes as a new image (a layer)
+  squash IMAGE NEW           merge IMAGE's layers into one (same base image)
+  prune                      delete the build cache and leftover build VMs
   inspect VM                 VM details as JSON
-  ls [--json]                list VMs
+  ls [--all] [--json]        list VMs (--all: include build VMs)
   rm VM                      delete a VM
   rmi IMAGE                  delete an image
   egress VM [--allow H,...] [--deny H,...] [-f]
@@ -63,12 +68,13 @@ case $cmd in
     init)               exec "$FCVM_ROOT/lib/build-init.sh" "$@" ;;
     base)               exec "$FCVM_ROOT/lib/build-base.sh" "$@" ;;
     import)             exec "$FCVM_ROOT/lib/import.sh" "$@" ;;
+    build)              exec python3 "$FCVM_ROOT/lib/build.py" "$@" ;;
     all)
         "$FCVM_ROOT/lib/fetch-firecracker.sh"
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|cp|volume|egress|_reap)
+    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|_reap)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     help|-h|--help)     usage ;;

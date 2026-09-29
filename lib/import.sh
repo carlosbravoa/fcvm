@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# fcvm import REF [NAME]: registry image -> images/NAME.ext4 (+ NAME.json)
+# fcvm import REF [NAME]: registry or local image -> images/NAME.ext4 (+ NAME.json)
+#   REF: nginx:latest, ghcr.io/org/app:tag, docker-archive:img.tar[:TAG],
+#        oci:DIR[:TAG], oci-archive:img.tar[:TAG], or a path to a .tar / OCI dir
 . "$(dirname "$0")/common.sh"
 need python3 mkfs.ext4
 
 ref=${1:?usage: fcvm import REF [NAME]}
-name=${2:-$(sed -E 's|^.*/||; s|[@:]|-|g; s|[^A-Za-z0-9_.-]|_|g' <<<"$ref")}
+name=${2:-$(python3 "$FCVM_ROOT/lib/oci_import.py" --suggest-name "$ref")}
 users=$(image_users "$name" | tr "\n" " ")
 [ -z "$users" ] || die "image '$name' is the shared base of VMs: $users (remove them, or import under another name)"
 

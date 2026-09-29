@@ -61,10 +61,11 @@ exit_code() {
 }
 
 create() {
-    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [-- CMD...]"
+    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [-- CMD...]"
     local vm=${1:?$usage} image=${2:?$usage}
     shift 2
     local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() argv=() netmode=full allow=()
+    local entrypoint=() set_entrypoint=0
     while [ $# -gt 0 ]; do
         case $1 in
             --vcpus)        vcpus=$2; shift 2 ;;
@@ -72,6 +73,7 @@ create() {
             --disk)         disk=$2; shift 2 ;;
             --copy)         copy=1; shift ;;
             --idle)         idle=1; shift ;;
+            --entrypoint)   set_entrypoint=1; [ -z "${2-}" ] || entrypoint=("$2"); shift 2 ;;
             -p|--publish)   ports+=("$2"); shift 2 ;;
             -v|--volume)    vols+=("$2"); shift 2 ;;
             --net)          [[ ${2:-} =~ ^(full|none)$ ]] || die "--net wants full or none (use --allow for a restricted network)"
@@ -81,14 +83,21 @@ create() {
             *)              die "unknown option $1 ($usage)" ;;
         esac
     done
-    [[ $vm =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "invalid VM name '$vm'"
+    [[ $vm =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid VM name '$vm'"
     vm_exists "$vm" && die "VM '$vm' already exists"
     local meta type
     meta=$(image_json "$image")
     type=$(jq -r '.type // "container"' "$meta")
     if [ $idle = 1 ]; then
-        [ ${#argv[@]} -eq 0 ] || die "--idle and -- CMD are mutually exclusive"
+        [ ${#argv[@]} -eq 0 ] && [ $set_entrypoint = 0 ] || die "--idle excludes -- CMD and --entrypoint"
         argv=(/.fcvm/bin/fc-init --idle)   # stay up for exec; stop ends it cleanly
+    elif [ ${#argv[@]} -gt 0 ] || [ $set_entrypoint = 1 ]; then
+        # docker semantics: -- CMD replaces the image's CMD and keeps its
+        # ENTRYPOINT; --entrypoint replaces the entrypoint ("" clears it)
+        [ $set_entrypoint = 1 ] || mapfile -t entrypoint < <(jq -r '.entrypoint[]?' "$meta")
+        [ ${#argv[@]} -gt 0 ] || mapfile -t argv < <(jq -r '.cmd[]?' "$meta")
+        argv=("${entrypoint[@]}" "${argv[@]}")
+        [ ${#argv[@]} -gt 0 ] || die "nothing to run: empty entrypoint and command"
     fi
     [ ${#argv[@]} -eq 0 ] || [ "$type" = container ] || die "-- CMD and --idle only apply to container images"
     [ $copy = 0 ] || [ -z "$(jq -r '.parent // empty' "$meta")" ] || die "--copy needs a base image; '$image' is a committed layer"
@@ -432,8 +441,9 @@ run() {
             *)  opts+=("$1"); shift ;;
         esac
     done
-    local type vm
-    type=$(jq -r '.type // "container"' "$(image_json "$image")")
+    local type vm meta
+    meta=$(image_json "$image")
+    type=$(jq -r '.type // "container"' "$meta")
     vm=${image%%-*}-$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')
 
     if [ "$type" = container ]; then
@@ -525,7 +535,7 @@ shell_vm() {
 
 volume_create() {
     local name=${1:?usage: fcvm volume create NAME [SIZE]} size=${2:-$VOLUME_SIZE}
-    [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "invalid volume name '$name'"
+    [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid volume name '$name'"
     local f=$VOLUMES_DIR/$name.ext4
     [ ! -e "$f" ] || die "volume '$name' already exists"
     mkdir -p "$VOLUMES_DIR"
@@ -587,7 +597,7 @@ commit() {
     local vm=${1:?usage: fcvm commit VM IMAGE} image=${2:?usage: fcvm commit VM IMAGE}
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" && die "VM '$vm' is running; stop it first (fcvm stop $vm)"
-    [[ $image =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "invalid image name '$image'"
+    [[ $image =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid image name '$image'"
     [ ! -e "$IMAGES_DIR/$image.json" ] || die "image '$image' already exists"
     local dir parent src out rc=0
     dir=$(vm_dir "$vm")
@@ -605,6 +615,7 @@ commit() {
         [ "$f" = argv ] && [ -z "$pre" ] && continue   # --copy disk: argv is the image's own
         debugfs -w -R "rm $pre/.fcvm/$f" "$out" >/dev/null 2>&1 || true
     done
+    [ "$(jq -r .type "$dir/vm.json")" != systemd ] || scrub_identity "$out" "$pre"
     chmod a-w "$out"
     if [ -f "$dir/disk.ext4" ]; then
         jq --arg vm "$vm" --arg parent "$parent" 'del(.parent) + {ref: "commit of \($vm) (from \($parent))"}' \
@@ -614,6 +625,104 @@ commit() {
             "$IMAGES_DIR/$parent.json" > "$IMAGES_DIR/$image.json"
     fi
     log "committed '$vm' as image '$image' ($(du -h "$out" | cut -f1) on disk$([ -f "$dir/disk.ext4" ] || echo ", layer on $parent"))"
+}
+
+# Merge committed layers (images, OLDEST first) into one new layer disk $1,
+# in a throwaway VM that boots only the initramfs (fc-init merge mode).
+squash_layers() {
+    local out=$1; shift
+    local drives='[]' devs=() n=0 letters=abcdefghijklmnopqrstuvwxyz img bytes=0 tmp rc=0
+    for img in "$@"; do
+        drives=$(jq --arg id "l$n" --arg p "$IMAGES_DIR/$img.ext4" \
+            '. + [{drive_id: $id, path_on_host: $p, is_root_device: false, is_read_only: true}]' <<<"$drives")
+        devs+=("/dev/vd${letters:n:1}"); n=$((n + 1))
+        bytes=$((bytes + $(stat -c %b "$IMAGES_DIR/$img.ext4") * 512))
+    done
+    make_rw "$out" "$(( bytes * 13 / 10 / 1048576 + 512 ))M"
+    drives=$(jq --arg p "$out" '. + [{drive_id: "out", path_on_host: $p, is_root_device: false, is_read_only: false}]' <<<"$drives")
+    tmp=$(mktemp -d)
+    jq -n --arg kernel "$(default_kernel)" --arg initrd "$BUILD_DIR/initramfs.cpio" --argjson drives "$drives" \
+        --arg args "console=ttyS0 reboot=k panic=1 quiet fcvm.merge=$(IFS=,; echo "${devs[*]}") fcvm.merge_out=/dev/vd${letters:n:1}" '{
+        "boot-source": {kernel_image_path: $kernel, initrd_path: $initrd, boot_args: $args},
+        "drives": $drives, "machine-config": {vcpu_count: 2, mem_size_mib: 512}}' > "$tmp/fc.json"
+    timeout 1800 "$FIRECRACKER" --no-api --config-file "$tmp/fc.json" --log-path "$tmp/fc.log" \
+        </dev/null >"$tmp/console.log" 2>&1 || rc=$?
+    if [ "$(debugfs -R "cat /merge-ok" "$out" 2>/dev/null)" != ok ]; then
+        grep -a 'fc-init' "$tmp/console.log" >&2 || tail -20 "$tmp/console.log" >&2
+        rm -rf "$tmp" "$out"
+        die "layer merge failed (firecracker status $rc)"
+    fi
+    debugfs -w -R "rm /merge-ok" "$out" >/dev/null 2>&1
+    e2fsck -fy "$out" >/dev/null 2>&1 || true
+    rm -rf "$tmp"
+}
+
+# fcvm squash IMAGE NEW: IMAGE's committed layers merged into one layer on the
+# same base image (keeps layer chains, and so drive counts, small).
+squash() {
+    local image=${1:?usage: fcvm squash IMAGE NEW} new=${2:?usage: fcvm squash IMAGE NEW}
+    image_json "$image" >/dev/null
+    [[ $new =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid image name '$new'"
+    [ ! -e "$IMAGES_DIR/$new.json" ] || die "image '$new' already exists"
+    local chain=() layers=() i
+    mapfile -t chain < <(image_chain "$image")
+    [ ${#chain[@]} -gt 2 ] || die "'$image' has ${#chain[@]} level(s); nothing to squash"
+    for ((i = ${#chain[@]} - 2; i >= 0; i--)); do layers+=("${chain[i]}"); done
+    log "merging ${#layers[@]} layers of '$image' onto ${chain[-1]}"
+    squash_layers "$IMAGES_DIR/$new.ext4" "${layers[@]}"
+    chmod a-w "$IMAGES_DIR/$new.ext4"
+    jq --arg base "${chain[-1]}" --arg image "$image" '. + {parent: $base, ref: "squash of \($image)"}' \
+        "$IMAGES_DIR/$image.json" > "$IMAGES_DIR/$new.json"
+    log "image '$new': one layer ($(du -h "$IMAGES_DIR/$new.ext4" | cut -f1)) on ${chain[-1]}"
+}
+
+# fcvm prune: delete the build cache (_bc-* images) and leftover build VMs.
+# Built images don't depend on the cache (their layer is a copy), so this only
+# makes the next build of each file slower.
+prune() {
+    local vm d removed=0 freed=0 left img
+    for d in "$VMS_DIR"/_build-*/; do
+        [ -f "$d/vm.json" ] || continue
+        vm=$(basename "$d")
+        vm_running "$vm" && continue    # a build in progress
+        rm -rf "$d"
+    done
+    while :; do   # leaves first: an image can go once nothing is layered on it
+        left=0
+        for img in "$IMAGES_DIR"/_bc*.json; do
+            [ -f "$img" ] || continue
+            img=$(basename "$img" .json)
+            if [ -z "$(image_users "$img")" ]; then
+                freed=$((freed + $(stat -c %b "$IMAGES_DIR/$img.ext4") * 512))
+                rm -f "$IMAGES_DIR/$img.ext4" "$IMAGES_DIR/$img.json"
+                removed=$((removed + 1)); left=1
+            fi
+        done
+        [ $left = 1 ] || break
+    done
+    log "removed $removed build cache image(s), $((freed / 1048576)) MiB freed"
+}
+
+# Per-machine identity a booted systemd VM leaves on its disk. Removed from a
+# committed layer (the base image's blank versions show through again) so every
+# VM from the image generates its own at first boot.
+scrub_identity() {   # disk path-prefix ("/upper" for a layer, "" for a --copy disk)
+    local disk=$1 pre=$2 f d sub cmds=()
+    for f in /etc/machine-id /var/lib/dbus/machine-id /var/lib/systemd/random-seed \
+             /etc/ssh/ssh_host_{rsa,ecdsa,ed25519}_key{,.pub}; do
+        cmds+=("rm $pre$f")
+    done
+    for d in $(debugfs -R "ls -p $pre/var/log/journal" "$disk" 2>/dev/null | awk -F/ '$6 != "." && $6 != ".." && $6 != "" {print $6}'); do
+        for sub in $(debugfs -R "ls -p $pre/var/log/journal/$d" "$disk" 2>/dev/null | awk -F/ '$6 != "." && $6 != ".." && $6 != "" {print $6}'); do
+            cmds+=("rm $pre/var/log/journal/$d/$sub")
+        done
+        cmds+=("rmdir $pre/var/log/journal/$d")
+    done
+    if [ -z "$pre" ]; then   # a whole disk: leave an empty machine-id, as the base image has
+        local empty; empty=$(mktemp); cmds+=("write $empty /etc/machine-id" "sif /etc/machine-id mode 0100444")
+    fi
+    printf '%s\n' "${cmds[@]}" | debugfs -w -f - "$disk" >/dev/null 2>&1 || true
+    [ -z "${empty:-}" ] || rm -f "$empty"
 }
 
 rmi() {
@@ -732,9 +841,14 @@ egress() {
 }
 
 list_vms() {
-    local d
-    if [ "${1:-}" = --json ]; then
-        for d in "$VMS_DIR"/*/; do [ -f "$d/vm.json" ] && inspect_json "$(basename "$d")"; done | jq -s .
+    local d all=0 json=0 a
+    for a; do case $a in --all|-a) all=1 ;; --json) json=1 ;; esac; done
+    if [ $json = 1 ]; then
+        for d in "$VMS_DIR"/*/; do
+            [ -f "$d/vm.json" ] || continue
+            [ $all = 1 ] || [[ $(basename "$d") != _* ]] || continue
+            inspect_json "$(basename "$d")"
+        done | jq -s .
         return
     fi
     local fmt='%-20s %-11s %-14s %-18s %-10s %s\n'
@@ -743,6 +857,7 @@ list_vms() {
     for d in "$VMS_DIR"/*/; do
         [ -f "$d/vm.json" ] || continue
         vm=$(basename "$d")
+        [ $all = 1 ] || [[ $vm != _* ]] || continue   # internal (fcvm build)
         state=stopped ip=-
         if vm_running "$vm"; then
             state=running; ip=$(cat "$d/ip" 2>/dev/null || echo -)
@@ -758,11 +873,13 @@ list_vms() {
 }
 
 list_images() {
-    local j name
-    if [ "${1:-}" = --json ]; then
+    local j name all=0 json=0 a
+    for a; do case $a in --all|-a) all=1 ;; --json) json=1 ;; esac; done
+    if [ $json = 1 ]; then
         for j in "$IMAGES_DIR"/*.json; do
             [ -f "$j" ] || continue
             name=$(basename "$j" .json)
+            [ $all = 1 ] || [[ $name != _* ]] || continue
             jq --arg name "$name" --argjson used "$(( $(stat -c %b "${j%.json}.ext4") * 512 ))" \
                 --argjson users "$(jq -n '$ARGS.positional' --args $(image_users "$name"))" \
                 '{name: $name, type: (.type // "container"), parent: (.parent // null), ref: (.ref // null),
@@ -774,6 +891,7 @@ list_images() {
     for j in "$IMAGES_DIR"/*.json; do
         [ -f "$j" ] || continue
         name=$(basename "$j" .json)
+        [ $all = 1 ] || [[ $name != _* ]] || continue   # build cache (fcvm build)
         printf '%-28s %-10s %-8s %-8s %s\n' "$name" "$(jq -r '.type // "container"' "$j")" \
             "$(du -h "${j%.json}.ext4" | cut -f1)" "$(image_users "$name" | wc -l)" \
             "$(jq -r 'if .parent then "layer on \(.parent)" else (.ref // "-") end' "$j")"
@@ -804,6 +922,8 @@ case $cmd in
     inspect) inspect "$@" ;;
     commit)  commit "$@" ;;
     rmi)     rmi "$@" ;;
+    squash)  squash "$@" ;;
+    prune)   prune ;;
     cp)      cp_cmd "$@" ;;
     volume)  volume_cmd "$@" ;;
     egress)  egress "$@" ;;

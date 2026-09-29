@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Pull an OCI/Docker image and flatten it into a rootfs tarball for fcvm.
 
-Standard library only; needs no root and no container runtime. Speaks the
-registry v2 API (Docker Hub, ghcr.io, quay.io, ...) with anonymous bearer
-tokens, or REGISTRY_USER / REGISTRY_PASSWORD from the environment.
+Standard library only; needs no root and no container runtime. Sources:
+  - registries (Docker Hub, ghcr.io, quay.io, ...) over the v2 API, with
+    anonymous bearer tokens or REGISTRY_USER / REGISTRY_PASSWORD
+  - local images, no registry needed:
+      docker-archive:PATH[:TAG]  `docker save` / `podman save` output (.tar)
+      oci:DIR[:TAG]              OCI image layout directory
+      oci-archive:PATH[:TAG]     OCI layout as a tar
+    A bare path to an existing .tar or directory is detected automatically.
 
 Layers are applied with OCI whiteout semantics and written parent-first, the
 order `mkfs.ext4 -d <tar>` needs. The image config becomes /.fcvm/{argv,env,
@@ -19,6 +24,8 @@ import io
 import json
 import os
 import posixpath
+import shutil
+import tempfile
 import re
 import subprocess
 import sys
@@ -172,6 +179,145 @@ def resolve_image(reg, ref, arch):
 
 
 # --------------------------------------------------------------------------
+# Local images: docker save archives and OCI layouts
+# --------------------------------------------------------------------------
+
+LOCAL_PREFIXES = ("docker-archive:", "oci-archive:", "oci:")
+
+
+def parse_local(ref):
+    """'oci:/p/dir:tag' -> ('/p/dir', 'tag'); None for registry refs."""
+    for prefix in LOCAL_PREFIXES:
+        if ref.startswith(prefix):
+            path = ref[len(prefix):]
+            break
+    else:
+        if os.path.exists(ref):
+            return ref, None
+        if ref.startswith(("/", "./", "../", "~")) or ref.endswith((".tar", ".tar.gz", ".tgz")):
+            die(f"no such file or directory: {ref}")
+        return None
+    tag = None
+    head, sep, tail = path.rpartition(":")
+    if sep and "/" not in tail and not os.path.exists(path):
+        path, tag = head, tail
+    if not os.path.exists(path):
+        die(f"no such file or directory: {path}")
+    return path, tag
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def load_local(path, tag, arch, workdir):
+    """Returns (config json, [layer paths], config digest, suggested name)."""
+    if os.path.isfile(path):
+        log(f"extracting {path}")
+        with tarfile.open(path) as tf:
+            tf.extractall(workdir, filter="data")
+        root = workdir
+    else:
+        root = path
+
+    def blob(digest):
+        algo, hexd = digest.split(":", 1)
+        p = os.path.join(root, "blobs", algo, hexd)
+        if not os.path.exists(p):
+            die(f"missing blob {digest} in {path}")
+        if sha256_file(p) != digest:
+            die(f"digest mismatch for {digest} in {path}")
+        return p
+
+    if os.path.exists(os.path.join(root, "index.json")):     # OCI layout (also docker 25+ saves)
+        with open(os.path.join(root, "index.json")) as f:
+            index = json.load(f)
+        want = GOARCH.get(arch, arch)
+
+        def pick(descs, top):
+            cands = descs
+            if top and tag:
+                cands = [d for d in descs if (d.get("annotations") or {}).get("org.opencontainers.image.ref.name", "").split(":")[-1] == tag
+                         or (d.get("annotations") or {}).get("io.containerd.image.name", "").endswith(":" + tag)]
+                if not cands:
+                    die(f"no image tagged '{tag}' in {path}")
+            plat = [d for d in cands if (d.get("platform") or {}).get("architecture") in (None, want)]
+            return (plat or cands)[0]
+
+        desc = pick(index["manifests"], True)
+        name_hint = (desc.get("annotations") or {}).get("io.containerd.image.name") or \
+            (desc.get("annotations") or {}).get("org.opencontainers.image.ref.name")
+        while True:
+            with open(blob(desc["digest"])) as f:
+                doc = json.load(f)
+            if "manifests" in doc:     # nested index (multi-platform)
+                desc = pick(doc["manifests"], False)
+                continue
+            break
+        cfg_path = blob(doc["config"]["digest"])
+        layers = [blob(l["digest"]) for l in doc["layers"]]
+    elif os.path.exists(os.path.join(root, "manifest.json")):  # classic docker save
+        with open(os.path.join(root, "manifest.json")) as f:
+            entries = json.load(f)
+        entry = entries[0]
+        if tag:
+            entry = next((e for e in entries if any(t.endswith(":" + tag) for t in e.get("RepoTags") or [])), None)
+            if not entry:
+                die(f"no image tagged '{tag}' in {path}")
+        name_hint = (entry.get("RepoTags") or [None])[0]
+        cfg_path = os.path.join(root, entry["Config"])
+        layers = [os.path.join(root, l) for l in entry["Layers"]]
+    else:
+        die(f"{path}: not a docker save archive or an OCI layout (no index.json or manifest.json)")
+
+    with open(cfg_path) as f:
+        config = json.load(f)
+    if not name_hint:
+        name_hint = os.path.basename(os.path.normpath(path)).split(".")[0]
+    return config, layers, sha256_file(cfg_path), name_hint
+
+
+def default_name(ref):
+    """Image name fcvm uses when none is given."""
+    local = parse_local(ref)
+    if local:
+        path = local[0]
+
+        def read(member):
+            if os.path.isdir(path):
+                p = os.path.join(path, member)
+                if not os.path.exists(p):
+                    return None
+                with open(p) as f:
+                    return json.load(f)
+            with tarfile.open(path) as tf:
+                for m in (member, "./" + member):
+                    try:
+                        return json.load(tf.extractfile(m))
+                    except KeyError:
+                        pass
+                return None
+
+        base = os.path.basename(os.path.normpath(path)).split(".")[0]
+        hint = None
+        manifest = read("manifest.json")
+        if manifest:
+            hint = (manifest[0].get("RepoTags") or [None])[0]
+        index = None if hint else read("index.json")
+        if index and index.get("manifests"):
+            ann = index["manifests"][0].get("annotations") or {}
+            hint = ann.get("io.containerd.image.name") or ann.get("org.opencontainers.image.ref.name")
+            if hint and "/" not in hint and ":" not in hint:    # ref.name is often just a tag
+                hint = f"{base}:{hint}"
+        ref = local[1] and f"{(hint or base).split(':')[0]}:{local[1]}" or hint or base
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", re.sub(r"[@:]", "-", ref.rsplit("/", 1)[-1]))
+
+
+# --------------------------------------------------------------------------
 # Layer flattening
 # --------------------------------------------------------------------------
 
@@ -300,25 +446,44 @@ def resolve_user(spec, passwd, group):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("ref")
-    ap.add_argument("--out", required=True, help="output rootfs tar")
-    ap.add_argument("--meta", required=True, help="output image metadata json")
+    ap.add_argument("--suggest-name", action="store_true", help="print the default image name and exit")
+    ap.add_argument("--out", help="output rootfs tar")
+    ap.add_argument("--meta", help="output image metadata json")
     ap.add_argument("--hostname", default="fcvm")
     ap.add_argument("--cache", default=os.path.expanduser("~/.cache/fcvm/blobs"))
     ap.add_argument("--arch", default=os.uname().machine)
     args = ap.parse_args()
+    if args.suggest_name:
+        print(default_name(args.ref))
+        return
+    if not (args.out and args.meta):
+        ap.error("--out and --meta are required")
 
-    registry, repo, ref = parse_ref(args.ref)
-    log(f"resolving {registry}/{repo}:{ref}")
-    reg = Registry(registry, repo)
-    manifest, digest = resolve_image(reg, ref, args.arch)
-    with open(reg.blob(manifest["config"]["digest"], args.cache)) as f:
-        image_config = json.load(f)
+    workdir = tempfile.mkdtemp(prefix="fcvm-import-", dir=os.path.dirname(os.path.abspath(args.out)))
+    try:
+        convert(args, workdir)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def convert(args, workdir):
+    local = parse_local(args.ref)
+    if local:
+        log(f"reading local image {local[0]}" + (f" (tag {local[1]})" if local[1] else ""))
+        image_config, layers, digest, _ = load_local(*local, args.arch, workdir)
+        registry, repo = "local", os.path.abspath(local[0])
+    else:
+        registry, repo, ref = parse_ref(args.ref)
+        log(f"resolving {registry}/{repo}:{ref}")
+        reg = Registry(registry, repo)
+        manifest, digest = resolve_image(reg, ref, args.arch)
+        with open(reg.blob(manifest["config"]["digest"], args.cache)) as f:
+            image_config = json.load(f)
+        layers = []
+        for i, layer in enumerate(manifest["layers"], 1):
+            log(f"layer {i}/{len(manifest['layers'])} {layer['digest'][:19]} ({layer.get('size', 0) >> 20} MiB)")
+            layers.append(reg.blob(layer["digest"], args.cache))
     cfg = image_config.get("config") or {}
-
-    layers = []
-    for i, layer in enumerate(manifest["layers"], 1):
-        log(f"layer {i}/{len(manifest['layers'])} {layer['digest'][:19]} ({layer.get('size', 0) >> 20} MiB)")
-        layers.append(reg.blob(layer["digest"], args.cache))
 
     log("flattening layers")
     winners = flatten(layers)
@@ -401,6 +566,8 @@ def main():
         "resolved": f"{registry}/{repo}",
         "digest": digest,
         "argv": argv,
+        "entrypoint": entrypoint,
+        "cmd": cmd,
         "env": env,
         "workdir": cfg.get("WorkingDir") or "/",
         "user": cfg.get("User") or "root",

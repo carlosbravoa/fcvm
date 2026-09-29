@@ -129,8 +129,21 @@ def vm_tap(ip):
     if not ip:
         return None
     idx = int(ip.rsplit(".", 1)[1]) - 10
-    tap = f"fcrtap{idx}" if ip.startswith(R_PREFIX + ".") else f"fctap{idx}"
-    return tap if os.path.exists(f"/sys/class/net/{tap}") else None
+    r = "r" if ip.startswith(R_PREFIX + ".") else ""
+    for dev in (f"fc{r}v{idx}", f"fc{r}tap{idx}"):   # a jailed VM's tap is in its netns, behind a veth
+        if os.path.exists(f"/sys/class/net/{dev}"):
+            return dev
+    return None
+
+
+def cgroup_io(pid):
+    """Disk bytes from the process's cgroup (jailed VMs: /proc/PID/io is another uid's)."""
+    cg = read(f"/proc/{pid}/cgroup").strip().split("::", 1)[-1]
+    rb = wb = 0
+    for line in read(f"/sys/fs/cgroup{cg}/io.stat").splitlines():
+        kv = dict(f.split("=", 1) for f in line.split()[1:] if "=" in f)
+        rb, wb = rb + int(kv.get("rbytes", 0)), wb + int(kv.get("wbytes", 0))
+    return rb, wb
 
 
 class Stats:
@@ -166,7 +179,7 @@ class Stats:
         status = read(f"/proc/{pid}/status")
         rss = int(status.split("VmRSS:")[1].split()[0]) * 1024 if "VmRSS:" in status else 0
         io = dict(l.split(": ") for l in read(f"/proc/{pid}/io").splitlines() if ": " in l)
-        rb, wb = int(io.get("read_bytes", 0)), int(io.get("write_bytes", 0))
+        rb, wb = (int(io.get("read_bytes", 0)), int(io.get("write_bytes", 0))) if io else cgroup_io(pid)
         tap = vm_tap(read(os.path.join(d, "ip")).strip())
         # tap counters are from the host's side: the VM's outgoing traffic is the tap's rx
         tx = int(read(f"/sys/class/net/{tap}/statistics/rx_bytes", "0") or 0) if tap else 0

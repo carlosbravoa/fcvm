@@ -18,11 +18,15 @@ vm_pid()     { cat "$VMS_DIR/$1/pid" 2>/dev/null || true; }
 vm_running() { local p; p=$(vm_pid "$1"); [ -n "$p" ] && { kill -0 "$p" 2>/dev/null || [ -e "/proc/$p" ]; }; }
 vm_jailed()  { [ "$(jq -r '.jail // false' "$VMS_DIR/$1/vm.json" 2>/dev/null)" = true ]; }
 
+# jaild, printing the helper's reply only when it refuses.
+jaild_quiet() { local r; r=$(jaild "$@") || { jq -r '.error // .' <<<"$r" >&2; return 1; }; }
+
 # One request to fcvm-jaild (the root helper for jailed VMs).
 jaild() {
     python3 - "$@" <<'PY'
 import json, socket, sys
 req = {"op": sys.argv[1], "vm": sys.argv[2] if len(sys.argv) > 2 else None}
+req.update(a.split("=", 1) for a in sys.argv[3:])
 s = socket.socket(socket.AF_UNIX); s.connect("/run/fcvm/jaild.sock")
 s.sendall(json.dumps(req).encode() + b"\n")
 r = json.loads(s.makefile().readline())
@@ -379,7 +383,8 @@ start() {
             --argjson vcpus "$vcpus" --argjson mem "$mem" \
             --arg tap "$(jq -r '.[0].host_dev_name // empty' <<<"$net")" --arg mac "$(jq -r '.[0].guest_mac // empty' <<<"$net")" \
             '{op: "launch", vm: $vm, kernel: $kernel, initrd: $initrd, drives: $drives, boot_args: $args,
-              vcpus: $vcpus, mem_mib: $mem, tap: (if $tap == "" then null else $tap end), mac: $mac}' > "$DIR/jail-request.json"
+              vcpus: $vcpus, mem_mib: $mem, tap: (if $tap == "" then null else $tap end), mac: $mac}
+              + (if $restore == "" then {} else {restore: $restore} end)' --arg restore "${RESTORE:-}" > "$DIR/jail-request.json"
     fi
     rm -f "$DIR/fc.sock" "$DIR/vsock.sock" "$DIR/console.sock" "$DIR/pid" "$DIR/waiter" "$DIR/firecracker.log"
     [ $jailed = 1 ] || : > "$DIR/firecracker.log"
@@ -420,6 +425,17 @@ start() {
     if ! start_portfwd "$pid"; then
         if [ $jailed = 1 ]; then jaild kill "$vm" >/dev/null || true; else kill "$pid" 2>/dev/null || true; fi
         die "cannot publish ports; VM not started"
+    fi
+    if [ -n "${RESTORE:-}" ]; then   # fork of a jailed snapshot: same chroot paths, same tap0
+        if ! fc_api "$DIR/fc.sock" PUT /snapshot/load '{"snapshot_path": "/snap.vmstate",
+                "mem_backend": {"backend_type": "File", "backend_path": "/snap.mem"},
+                "clock_realtime": true, "resume_vm": true}'; then
+            jaild kill "$vm" >/dev/null || true
+            die "restore of '$RESTORE' failed"
+        fi
+        local gw=""; [ -z "$IP" ] || gw=${IP%.*}.1
+        python3 "$FCVM_ROOT/lib/exec_client.py" --netconf "${IP:+$IP/24},$gw,$(jq -r '.[0].guest_mac // empty' <<<"$net"),$vm" \
+            "$DIR/vsock.sock" || warn "'$vm' could not be re-addressed"
     fi
     sleep 0.2
     if ! vm_running "$vm"; then
@@ -884,13 +900,17 @@ snapshot_create() {
     fi
     [ "$(jq '.shares // [] | length' "$vdir/vm.json")" = 0 ] ||
         die "VM '$vm' has live host directories mounted; their connections can't be cloned into a fork"
-    vm_jailed "$vm" && die "snapshots of jailed VMs aren't supported yet"
+    local jailed=false vmstate=$dir/vmstate memf=$dir/mem
+    if vm_jailed "$vm"; then   # Firecracker writes inside its chroot; the helper moves the files out
+        jailed=true vmstate=/snap.vmstate memf=/snap.mem
+    fi
     if [ -f "$vdir/disk.ext4" ]; then disk=disk.ext4 drive=root; else disk=rw.ext4 drive=rw; fi
     mkdir -p "$dir"
     t0=$(date +%s%N)
     fc_api "$vdir/fc.sock" PATCH /vm '{"state": "Paused"}' || { rm -rf "$dir"; die "cannot pause '$vm'"; }
-    if ! fc_api "$vdir/fc.sock" PUT /snapshot/create "$(jq -n --arg s "$dir/vmstate" --arg m "$dir/mem" \
+    if ! fc_api "$vdir/fc.sock" PUT /snapshot/create "$(jq -n --arg s "$vmstate" --arg m "$memf" \
             '{snapshot_type: "Full", snapshot_path: $s, mem_file_path: $m, sync_snapshot_files: false}')" ||
+       ! { [ $jailed = false ] || jaild_quiet snapshot_collect "$vm" "name=$name"; } ||
        ! cp --sparse=always "$vdir/$disk" "$dir/$disk"; then
         fc_api "$vdir/fc.sock" PATCH /vm '{"state": "Resumed"}' || true
         rm -rf "$dir"; die "snapshot failed; '$vm' resumed"
@@ -901,8 +921,9 @@ snapshot_create() {
     cp "$vdir/vm.json" "$dir/vm.json"
     jq -n --arg src "$vm" --arg disk "$disk" --arg drive "$drive" --argjson ms "$ms" \
         --arg fc "$("$FIRECRACKER" --version | head -1)" --arg srcdisk "$vdir/$disk" \
+        --argjson jail "$jailed" \
         '{source: $src, disk: $disk, drive_id: $drive, source_disk: $srcdisk, paused_ms: $ms,
-          firecracker: $fc, created: (now | todate)}' > "$dir/meta.json"
+          firecracker: $fc, jail: $jail, created: (now | todate)}' > "$dir/meta.json"
     log "snapshot '$name' of '$vm' (paused ${ms} ms; memory $(du -h "$dir/mem" | cut -f1) on disk). Fork it: fcvm fork $name"
 }
 
@@ -912,6 +933,19 @@ fork_one() {
     local snap=$1 vm=$2 sdir=$SNAPSHOTS_DIR/$1 dir disk drive mode mac="" gw="" tap="" t0 i pid
     dir=$(vm_dir "$vm")
     vm_exists "$vm" && die "VM '$vm' already exists"
+    if [ "$(jq -r '.jail // false' "$sdir/meta.json")" = true ]; then
+        # Inside a jail every path is the same (/driveN.ext4, /vsock.sock, tap0 in
+        # its own netns), so a fresh jail with this VM's own disk restores as is.
+        t0=$(date +%s%N)
+        disk=$(jq -r .disk "$sdir/meta.json")
+        mkdir -p "$dir"
+        jq --arg snap "$snap" '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate)}' \
+            "$sdir/vm.json" > "$dir/vm.json"
+        cp --sparse=always "$sdir/$disk" "$dir/$disk"
+        RESTORE=$snap QUIET_START=1 start "$vm"
+        log "forked '$vm' from '$snap' in $(( ($(date +%s%N) - t0) / 1000000 )) ms (jailed$([ -f "$dir/ip" ] && echo ", ip $(cat "$dir/ip")"))"
+        return
+    fi
     disk=$(jq -r .disk "$sdir/meta.json"); drive=$(jq -r .drive_id "$sdir/meta.json")
     t0=$(date +%s%N)
     mkdir -p "$dir"

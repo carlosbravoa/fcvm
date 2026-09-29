@@ -369,7 +369,19 @@ Presets live in `lib/egress-presets.conf` (`@pypi`, `@npm`, `@github`,
 mirrors there. Only HTTP(S) and proxy-aware traffic can be allowed. Anything
 else (raw TCP, UDP, ICMP, direct DNS) is refused, which is the point.
 Wildcards follow the usual rule: `*.github.com` doesn't match `github.com`
-itself. VMs on `fcbr0` can reach each other unless `NET_ISOLATE=1`.
+itself.
+
+**Isolation** (set up by `fcvm net-up`):
+- VMs can't reach each other, neither across the bridge (isolated ports) nor
+  routed through the host. `NET_ISOLATE=0` lets VMs on `fcbr0` talk.
+- VMs can't reach services on the host (`172.30.0.1`, or any other host
+  address): only replies and ping are let in. `NET_HOST_ACCESS=1` opens them.
+- Anti-spoofing: each tap (and each jailed VM's veth) passes only IPv4 and ARP
+  from its own MAC and address (`nft list table bridge fcvm`).
+- No IPv6 for guests: it's disabled on the bridges and taps and dropped at
+  the ports.
+- Published ports (`-p 8080:80`) listen on `127.0.0.1`. Use
+  `-p 0.0.0.0:8080:80` to publish on every interface.
 
 **Kernel config notes** (learned the hard way on 7.2 + Firecracker 1.17):
 - `CONFIG_PCI=y` is required even for virtio-mmio guests. Firecracker's ACPI
@@ -403,7 +415,7 @@ AWS uses:
 | Firecracker runs as | you | its own uid/gid (900000 + slot), `NoNewPrivs`, seccomp |
 | can see | everything you can | its chroot `/srv/jailer/firecracker/<id>/root`: its disks, `/dev/kvm`, `/dev/net/tun`, its sockets |
 | limits | none | cgroup v2: `cpu.max` = vCPUs, `memory.max` = memory + 256 MiB VMM overhead, `pids.max` = 128, `no-file` = 4096 |
-| tap | shared pool, owned by you | the same pool tap, re-created owned by the VM's uid while it runs |
+| network | pool tap on the bridge, owned by you | own network namespace: `tap0` (owned by the VM's uid) and a veth pair whose host end, `fcv<i>` / `fcrv<i>`, joins the bridge |
 
 How it works:
 - **The helper.** The jailer has to start as root, so `fcvm jail-setup`
@@ -430,14 +442,33 @@ How it works:
   link into the chroot, so every command works unchanged: exec, shell,
   console, stop, ports, egress, host directories (live mounts too), the
   web console.
+- **Network namespace.** The jailer enters `fcvm-<id>`, which holds only
+  `lo`, `tap0`, `veth0` and a bridge. The VMM can't see or touch the host's
+  interfaces, and the veth's host end gets the same isolation and
+  anti-spoofing rules as a tap.
+- **Snapshots and fork** work as for rootless VMs. Firecracker writes the
+  snapshot inside its chroot, and the helper moves it into `snapshots/`,
+  owned by you. A fork is a fresh jail whose paths (`/drive0.ext4`,
+  `/vsock.sock`, `tap0`) are the same as the source's, so the snapshot
+  loads without overrides. A snapshot of a jailed VM forks jailed.
+- **Stats.** The web console reads a jailed VM's disk I/O from its cgroup's
+  `io.stat` (`/proc/<pid>/io` of another uid isn't readable) and its traffic
+  from the veth.
 - **Cleanup.** When Firecracker exits, the helper unmounts, drops the ACLs,
-  gives the tap back and deletes the chroot. Stopping or restarting the
-  service stops its jailed VMs.
+  deletes the network namespace (tap and veth go with it) and deletes the
+  chroot. Stopping or restarting the service stops its jailed VMs; on
+  start, it sweeps whatever a previous run (or a crash) left behind.
+- **Defaults.** Sandboxes the MCP server creates are jailed whenever
+  fcvm-jaild is installed (`FCVM_MCP_JAIL=0` opts out). The web console's
+  create form has the box checked. The CLI stays opt-in (`--jail` / `JAIL=1`),
+  because jailing needs the root helper.
 
-Not yet: snapshots/fork of jailed VMs (refused with a message), per-VM
-network namespaces, and disk I/O in the web console's stats for jailed VMs.
-`/proc/<pid>/io` of another uid isn't readable; cgroup `io.stat` would be
-the source.
+No PID namespace (`--new-pid-ns`): Firecracker would run as pid 1 of a
+namespace the helper can only reach through the jailer's fork, so fcvm would
+lose the real pid it uses for liveness, stats and `stop`. The jail already
+runs as its own uid, so the VMM can't signal or ptrace your processes or
+other VMs, and `/proc` isn't mounted in the chroot. A PID namespace would add
+little on top of that.
 
 ## Snapshots and fork
 
@@ -775,13 +806,14 @@ What is solid: a minimal monolithic guest kernel, digest-verified pulls with
 `@sha256:` pinning, shared read-only images with per-VM layers, rootless
 operation, and a small auditable code base. What blocks adoption, in order:
 
-#### E1. Run VMs under the Firecracker jailer ✅ (first version)
+#### E1. Run VMs under the Firecracker jailer ✅
 
 Done: `fcvm create --jail` / `JAIL=1` and `fcvm jail-setup` (see "Jailed
-VMs"): a per-VM uid, chroot, cgroup v2 limits and tap ownership, through a
-root helper that validates every path. Still open from the plan below:
-per-VM network namespaces (`--netns`, veth), `--new-pid-ns`, snapshots/fork
-of jailed VMs, cgroup-based I/O stats, and making jailed the default.
+VMs"): a per-VM uid, chroot, cgroup v2 limits and a per-VM network namespace
+(tap inside, veth to the bridge), through a root helper that validates every
+path. Snapshots and fork of jailed VMs, cgroup-based I/O stats, and jailed by
+default for MCP sandboxes and the web console. `--new-pid-ns` was left out on
+purpose (see "Jailed VMs" for why). The original plan follows.
 
 Before this, Firecracker always ran as your user. KVM and Firecracker's own seccomp filters
 are the only boundary between a guest and the host, and every VM can reach the
@@ -808,12 +840,18 @@ is Firecracker's production wrapper. Plan:
   `stop`, `exec`/`shell` and the port forwarder need group access to them, so
   the helper would create them with a shared `fcvm` group.
 
-#### E2. Network isolation and policy
+#### E2. Network isolation and policy ✅
 
-VMs can reach each other on the flat bridge, and every host service on
-172.30.0.1. Published ports bind to `0.0.0.0` by default. Needed: VMs
-isolated from each other, `127.0.0.1` as the default bind address for
-published ports, egress allowlists (shared with A4), and IPv6.
+Done (see "Isolation" under networking):
+- VMs are isolated from each other, both bridged and routed through the host.
+- VMs are cut off from host services.
+- Anti-spoofing pins each port to its MAC and IPv4 address.
+- Guests get no IPv6.
+- Published ports bind to `127.0.0.1` by default.
+- Egress allowlists came with A4.
+
+Still open: full IPv6 for guests (addressing, NAT66 or routed, and the same
+rules for v6).
 
 #### E3. Supply chain
 

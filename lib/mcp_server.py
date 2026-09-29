@@ -24,6 +24,8 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 # "none", or a comma-separated allowlist. Agents can then only narrow it to
 # "none"; there is deliberately no tool to widen an allowlist.
 PINNED_NETWORK = os.environ.get("FCVM_MCP_NETWORK", "").strip()
+# Sandboxes run under the jailer whenever fcvm-jaild is installed (FCVM_MCP_JAIL=0 opts out).
+JAIL = os.environ.get("FCVM_MCP_JAIL", "1") != "0" and os.path.exists("/run/fcvm/jaild.sock")
 
 INSTRUCTIONS = """fcvm runs Firecracker microVMs: real kernel isolation, ~1 s to boot a container
 image, ~2 s for Ubuntu. Typical loop: images (or pull_image) -> create_sandbox ->
@@ -136,6 +138,7 @@ def t_create_sandbox(image, name=None, command=None, vcpus=None, mem_mib=None, p
     for v in volumes or []:
         args += ["-v", v]
     args += network_args(network)
+    args.append("--jail" if JAIL else "--no-jail")
     if img["type"] == "app":
         args += ["--", *command] if command else ["--idle"]
     fcvm(*args)

@@ -17,12 +17,22 @@ and only the VM's own disk and volumes may be writable. Then, per VM:
     ACL, not ownership, so the owner's tools keep working
   - cgroup v2 limits: cpu.max from vCPUs, memory.max from memory + VMM
     overhead, pids.max
-  - its tap re-created owned by the jail uid while it runs
+  - its own network namespace holding only tap0 (owned by the jail uid) and a
+    bridge, joined to the host bridge by a veth pair (fcv<i> / fcrv<i>)
   - a default ACL on the chroot so the owner can reach the VM's sockets
   - jailer --> firecracker with the console pty the caller passed over
     SCM_RIGHTS as stdin/stdout/stderr
 
-When Firecracker exits: unmount, drop ACLs, give the tap back, delete the chroot.
+Restores also work: with "restore": SNAPSHOT the chroot gets the snapshot's
+vmstate/mem instead of a config, and fcvm loads it through the API. Paths
+inside a jail are the same for every VM (/drive0.ext4, /vsock.sock, tap0),
+so a snapshot of one jailed VM restores into another's jail unchanged.
+
+No separate PID namespace: the chroot has no /proc, the VMM runs as a unique
+unprivileged uid, and Firecracker's seccomp filter doesn't allow signalling
+other processes.
+
+When Firecracker exits: unmount, drop ACLs, delete the namespace and chroot.
 """
 import argparse
 import array
@@ -79,6 +89,7 @@ class Jaild:
         self.running = {}            # vm -> {pid, slot, id, mounts, acls, tap}
         self.lock = threading.Lock()
         self.cgroup_parent = self.setup_cgroup()
+        self.sweep_stale()
 
     # --- setup ------------------------------------------------------------------------
     def setup_cgroup(self):
@@ -100,7 +111,7 @@ class Jaild:
     # --- validation -------------------------------------------------------------------
     def checked_file(self, path, vm, writable):
         real = os.path.realpath(path)
-        allowed_ro = [os.path.join(self.root, d) for d in ("images", "kernels", "build", "volumes", f"vms/{vm}")]
+        allowed_ro = [os.path.join(self.root, d) for d in ("images", "kernels", "build", "volumes", "snapshots", f"vms/{vm}")]
         allowed_rw = [os.path.join(self.root, d) for d in ("volumes", f"vms/{vm}")]
         if not any(real.startswith(d + os.sep) for d in (allowed_rw if writable else allowed_ro)):
             raise Refused(f"not an fcvm file this VM may use{' writably' if writable else ''}: {path}")
@@ -174,15 +185,16 @@ class Jaild:
             os.chown(path, uid, gid)
             run("setfacl", "-m", f"u:{self.owner}:r", path)
 
-        # Network: the pool tap, re-created owned by the jail uid for the VM's lifetime.
-        net = []
+        # Network: a namespace of its own with tap0 + br0, and a veth pair to the
+        # host bridge. The pool tap only lends its index (and so the VM's IP).
+        net, netns = [], None
         if req.get("tap"):
             m = TAP.match(req["tap"])
             if not m:
                 raise Refused("invalid tap")
-            self.own_tap(req["tap"], uid)
-            state["tap"] = req["tap"]
-            net = [{"iface_id": "eth0", "guest_mac": req["mac"], "host_dev_name": req["tap"]}]
+            netns = self.netns_setup(jid, m.group(1), int(m.group(2)), uid)
+            state["netns"] = netns
+            net = [{"iface_id": "eth0", "guest_mac": req["mac"], "host_dev_name": "tap0"}]
 
         config = {
             "boot-source": {"kernel_image_path": "/vmlinux", "initrd_path": "/initramfs.cpio",
@@ -195,6 +207,19 @@ class Jaild:
         }
         with open(os.path.join(chroot, "fc.json"), "w") as f:
             json.dump(config, f)
+        restore = req.get("restore")
+        if restore:
+            if not NAME.match(restore):
+                raise Refused("invalid snapshot name")
+            for name, fname in (("snap.vmstate", "vmstate"), ("snap.mem", "mem")):
+                src = self.checked_file(os.path.join(self.root, "snapshots", restore, fname), vm, False)
+                dst = os.path.join(chroot, name)
+                open(dst, "w").close()
+                run("mount", "--bind", src, dst)
+                run("mount", "-o", "remount,bind,ro", dst)
+                state["mounts"].append(dst)
+                run("setfacl", "-m", f"u:{uid}:r", src)   # 0600: guest memory; read access while it runs
+                state["acls"].append(src)
 
         vcpus, mem = int(req["vcpus"]), int(req["mem_mib"])
         cmd = [f"{LIB}/jailer", "--id", jid, "--exec-file", f"{LIB}/firecracker", "--uid", str(uid), "--gid", str(gid),
@@ -202,8 +227,12 @@ class Jaild:
                "--cgroup", f"cpu.max={vcpus * 100000} 100000",
                "--cgroup", f"memory.max={(mem + VMM_OVERHEAD_MIB) << 20}",
                "--cgroup", "pids.max=128",
-               "--resource-limit", "no-file=4096", "--",
-               "--api-sock", "/fc.sock", "--config-file", "/fc.json", "--log-path", "/firecracker.log", "--level", "Warning"]
+               "--resource-limit", "no-file=4096"]
+        if netns:
+            cmd += ["--netns", netns]
+        cmd += ["--", "--api-sock", "/fc.sock", "--log-path", "/firecracker.log", "--level", "Warning"]
+        if not restore:      # a restore is configured by fcvm through the API (snapshot load)
+            cmd += ["--config-file", "/fc.json"]
         proc = subprocess.Popen(cmd, stdin=fd, stdout=fd, stderr=fd, start_new_session=True, close_fds=True)
         os.close(fd)
         state["pid"] = proc.pid
@@ -221,35 +250,82 @@ class Jaild:
         # Firecracker creates its API and vsock sockets with mode 0755, which on
         # a file with ACLs caps the mask at r-x; connecting needs w. Fix both
         # once they exist (within milliseconds of start).
-        pending = {os.path.join(chroot, n) for n in ("fc.sock", "vsock.sock")}
-        for _ in range(250):
-            for sock in [p for p in pending if os.path.exists(p)]:
-                run("setfacl", "-m", "m::rwx", sock)
-                pending.discard(sock)
-            if not pending or proc.poll() is not None:
+        def fix_masks():
+            pending = {os.path.join(chroot, n) for n in ("fc.sock", "vsock.sock")}
+            for _ in range(3000):                   # up to a minute: restores create vsock.sock on load
+                for sock in [p for p in pending if os.path.exists(p)]:
+                    subprocess.run(["setfacl", "-m", "m::rwx", sock], capture_output=True)
+                    pending.discard(sock)
+                if not pending or proc.poll() is not None:
+                    return
+                time.sleep(0.02)
+        fixer = threading.Thread(target=fix_masks, daemon=True)
+        fixer.start()
+        api = os.path.join(chroot, "fc.sock")
+        for _ in range(250):                        # the API socket is usable before we reply
+            if os.path.exists(api):
+                subprocess.run(["setfacl", "-m", "m::rwx", api], capture_output=True)
+                break
+            if proc.poll() is not None:
                 break
             time.sleep(0.02)
         threading.Thread(target=self.watch, args=(vm, proc), daemon=True).start()
         log(f"launched {vm} (jail {jid}, uid {uid}, pid {proc.pid})")
         return {"pid": proc.pid, "uid": uid, "chroot": chroot}
 
-    def own_tap(self, tap, uid):
-        prefix = TAP.match(tap).group(1)
-        run("ip", "tuntap", "del", tap, "mode", "tap")
-        run("ip", "tuntap", "add", tap, "mode", "tap", "user", str(uid))
-        run("ip", "link", "set", tap, "master", self.bridges[prefix], "up")
-        run("bridge", "link", "set", "dev", tap, "isolated", "on" if self.isolate.get(prefix) else "off")
+    def netns_setup(self, jid, prefix, idx, uid):
+        """netns fcvm-<id>: lo, tap0 (owned by the VM uid) and veth0 on br0; the
+        veth's host end (fcv<i> / fcrv<i>) joins the pool's bridge."""
+        ns = f"fcvm-{jid}"
+        veth = ("fcv" if prefix == "fctap" else "fcrv") + str(idx)
+        subprocess.run(["ip", "netns", "del", ns], capture_output=True)
+        subprocess.run(["ip", "link", "del", veth], capture_output=True)
+        run("ip", "netns", "add", ns)
+        run("ip", "link", "add", veth, "type", "veth", "peer", "name", "veth0", "netns", ns)
+        with open(f"/proc/sys/net/ipv6/conf/{veth}/disable_ipv6", "w") as f:   # guests are IPv4-only
+            f.write("1")
+        run("ip", "link", "set", veth, "master", self.bridges[prefix], "up")
+        run("bridge", "link", "set", "dev", veth, "isolated", "on" if self.isolate.get(prefix) else "off")
+        inside = ["ip", "netns", "exec", ns]
+        for conf in ("all", "default"):
+            run(*inside, "sysctl", "-q", "-w", f"net.ipv6.conf.{conf}.disable_ipv6=1")
+        run(*inside, "ip", "link", "set", "lo", "up")
+        run(*inside, "ip", "link", "add", "br0", "type", "bridge")
+        run(*inside, "ip", "tuntap", "add", "tap0", "mode", "tap", "user", str(uid))
+        for dev in ("veth0", "tap0"):
+            run(*inside, "ip", "link", "set", dev, "master", "br0", "up")
+        run(*inside, "ip", "link", "set", "br0", "up")
+        return f"/run/netns/{ns}"
 
     # --- teardown --------------------------------------------------------------------
+    def sweep_stale(self):
+        """Jails left by a previous run (a restart or crash kills the VMs before
+        their teardown): chroots, network namespaces, ACLs for jail uids."""
+        jails = os.path.join(self.base, "firecracker")
+        for jid in os.listdir(jails) if os.path.isdir(jails) else []:
+            self.teardown_dir(os.path.join(jails, jid))
+        for ns in os.listdir("/run/netns") if os.path.isdir("/run/netns") else []:
+            if ns.startswith("fcvm-"):
+                subprocess.run(["ip", "netns", "del", ns], capture_output=True)
+        for sub in ("vms", "snapshots"):
+            for dirpath, _, files in os.walk(os.path.join(self.root, sub)):
+                for f in files:
+                    path = os.path.join(dirpath, f)
+                    if os.path.islink(path) or not os.path.isfile(path):
+                        continue
+                    acl = subprocess.run(["getfacl", "-n", "--omit-header", path],
+                                         capture_output=True, text=True).stdout
+                    for line in acl.splitlines():
+                        uid = line.split(":")[1] if line.startswith("user:") else ""
+                        if uid.isdigit() and self.uid_base <= int(uid) < self.uid_base + self.slots:
+                            subprocess.run(["setfacl", "-x", f"u:{uid}", path], capture_output=True)
+
     def watch(self, vm, proc):
         proc.wait()
         state = self.running.get(vm, {})
         log(f"{vm} exited ({proc.returncode})")
-        try:
-            if state.get("tap"):
-                self.own_tap(state["tap"], self.owner)
-        except Refused as e:
-            log(f"{vm}: giving the tap back failed: {e}")
+        if state.get("netns"):   # deleting it takes tap0, br0 and the veth pair along
+            subprocess.run(["ip", "netns", "del", os.path.basename(state["netns"])], capture_output=True)
         for src in state.get("acls", []):
             subprocess.run(["setfacl", "-x", f"u:{self.uid_base + state['slot']}", src], capture_output=True)
         if state.get("chroot"):
@@ -272,6 +348,25 @@ class Jaild:
         # jailer execs firecracker, so the launch pid is Firecracker's
         os.kill(state["pid"], signal.SIGKILL)
         return {"killed": req["vm"]}
+
+    def snapshot_collect(self, req):
+        """Move a jailed VM's snapshot files (written by Firecracker inside the
+        chroot, owned by the VM uid) into the owner's snapshots/<name>/."""
+        state = self.running.get(req["vm"])
+        name = req.get("name", "")
+        if not state or not NAME.match(name):
+            raise Refused("unknown VM or bad snapshot name")
+        dst = os.path.realpath(os.path.join(self.root, "snapshots", name))
+        if not dst.startswith(os.path.join(self.root, "snapshots") + os.sep) or not os.path.isdir(dst) \
+                or os.lstat(dst).st_uid != self.owner:
+            raise Refused("the snapshot directory must exist and belong to the fcvm owner")
+        for src, fname in (("snap.vmstate", "vmstate"), ("snap.mem", "mem")):
+            s_path, d_path = os.path.join(state["chroot"], src), os.path.join(dst, fname)
+            run("cp", "--sparse=always", "--no-preserve=all", s_path, d_path)
+            os.chown(d_path, self.owner, self.owner)
+            os.chmod(d_path, 0o600)
+            os.unlink(s_path)
+        return {"collected": name}
 
     def status(self, _req):
         return {vm: {k: v for k, v in s.items() if k in ("pid", "slot", "id", "tap")} for vm, s in self.running.items()}
@@ -326,6 +421,8 @@ def serve(jd):
                     reply = jd.kill(req)
                 elif op == "status":
                     reply = jd.status(req)
+                elif op == "snapshot_collect":
+                    reply = jd.snapshot_collect(req)
                 else:
                     raise Refused(f"unknown op {op!r}")
                 conn.sendall(json.dumps({"ok": True, **reply}).encode() + b"\n")

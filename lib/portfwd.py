@@ -3,7 +3,7 @@
 
   portfwd.py --watch PID --target IP [BIND:]HOSTPORT:GUESTPORT ...
 
-Listens on each host port and relays TCP connections to TARGET:GUESTPORT.
+Listens on each host port (on 127.0.0.1 unless BIND is given) and relays TCP connections to TARGET:GUESTPORT.
 Exits when process PID (the VM's firecracker) is gone. The guest sees
 connections coming from the host bridge address, not the original client.
 """
@@ -19,7 +19,7 @@ def parse(spec):
         sys.exit(f"portfwd: {spec}: only TCP is supported")
     parts = spec.split(":")
     if len(parts) == 2:
-        parts.insert(0, "0.0.0.0")
+        parts.insert(0, "127.0.0.1")   # host-local unless an address is given (0.0.0.0 = everywhere)
     if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
         sys.exit(f"portfwd: bad port spec '{spec}' (want [BIND:]HOSTPORT:GUESTPORT)")
     return parts[0], int(parts[1]), int(parts[2])

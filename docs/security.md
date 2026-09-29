@@ -360,8 +360,9 @@ between are dropped, which is harmless.
 - Guests still configure link-local addresses on their own `eth0`. That
   traffic goes nowhere.
 - Full IPv6 support (addresses, NAT66 or routing, equivalent rules) is on
-  the roadmap. Until then, no IPv6 at all is the safe choice: rules
-  written for IPv4 can't be bypassed over v6.
+  the [roadmap](roadmap.md#e2-network-isolation-and-policy-). Until then,
+  no IPv6 at all is the safe choice: rules written for IPv4 can't be
+  bypassed over v6.
 
 **Outbound.**
 - Full-network VMs reach the internet through NAT (masquerade) on the
@@ -567,7 +568,7 @@ showing `fcvm-*`). Restart the helper; it sweeps them on startup:
 - **Only jailed VMs have resource limits.** A rootless VM can take all of
   its configured memory, and its vCPUs can compete freely.
 - **Disk and network rate limits** (Firecracker's rate limiters) aren't
-  set yet. That's roadmap item E6.
+  set yet. That's [roadmap item E6](roadmap.md#e6-resource-governance).
 - **Side channels** between VMs sharing a CPU are the host kernel's and
   hardware's business. Keep your host kernel and microcode up to date.
 - **IPv6** for guests is off, not supported.

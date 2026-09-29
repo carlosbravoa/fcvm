@@ -200,7 +200,7 @@ Firecracker's prebuilt CI kernels:
 2. Downloads the official source tarball from `cdn.kernel.org` into `cache/`.
 3. Checks its SHA-256 against kernel.org's `sha256sums.asc`. That catches
    corruption, but it isn't a proof of origin, because the PGP signature isn't
-   verified yet (roadmap E3).
+   verified yet ([roadmap E3](docs/roadmap.md#e3-supply-chain)).
 4. Extracts it to `build/linux-X.Y.Z/`, runs `make allnoconfig`, applies
    `kernel/microvm-x86_64.config`, and reports any requested option that
    didn't make it into the final `.config`.
@@ -711,7 +711,8 @@ works offline. Light and dark themes follow the OS, with a toggle.
 - Static files can't escape `static/`, and a strict Content-Security-Policy
   allows only the app's own scripts.
 - Treat the URL like a password: the browser shell is a root shell in your
-  VMs. Remote access with real authentication is roadmap item W2.
+  VMs. Remote access with real authentication is
+  [roadmap item W2](docs/roadmap.md#web-console).
 
 ## Agents (MCP)
 
@@ -778,209 +779,13 @@ lib/net.sh              host bridges, taps, NAT, isolation and anti-spoofing rul
 init/fc-init.c          init for every VM (initramfs): root assembly, container PID 1, exec agent
 kernel/microvm-*.config kernel fragment
 docs/security.md        security and isolation reference (jailer, network, verification)
+docs/roadmap.md         planned work
 bin/ kernels/ images/ vms/ volumes/ snapshots/ cache/ build/   generated
 ```
 
 ## Roadmap
 
-Priorities come from a review of fcvm from two angles: as a sandbox for
-agentic development (compared with Multipass), and as something an enterprise
-could adopt. Orchestration is out of scope for now. Items marked ✅ are done.
-
-### Agentic development
-
-Where fcvm already fits: many short-lived, disposable, isolated sandboxes.
-`create` takes 0.1 s, an app VM runs in about 1 s, and Ubuntu boots in
-2.3 s. Docker Hub works as the toolchain catalogue, behind a real kernel
-boundary. `exec` has real exit codes and separate stdout/stderr, which maps
-directly onto an agent's "run command" tool. Multipass is still better for
-long-lived dev machines with mounted source trees, and it runs on macOS and
-Windows. fcvm needs KVM and never will.
-
-- **A1. Getting code in and out.** ✅ `fcvm cp` (both directions), ✅ named
-  volumes (`-v NAME:/path`, persistent ext4 disks), ✅ live host directories
-  (`-v /host/dir:/path`): the guest kernel's 9P client over a vsock
-  connection to a host-side 9P server, since Firecracker has no virtio-fs.
-  Still open: faster many-small-file workloads (a multi-threaded or native
-  server, or opt-in client caching).
-- **A2. Snapshots and commit.** ✅ `fcvm commit VM IMAGE` saves a VM's
-  writable layer as a new image layer (Docker-style stacking, instant,
-  rootless). ✅ `fcvm snapshot` / `fcvm fork`: Firecracker memory snapshots,
-  forked into running VMs in ~120 ms, each with its own disk, IP, MAC and
-  hostname, and RNG reseeding through VMGenID. Still open: diff snapshots
-  (only dirty pages) to cut the ~0.75 s/GB pause, and snapshots of VMs with
-  read-write volumes.
-- **A3. Machine interface.** ✅ `--json` for `ls`/`images`, `fcvm inspect`,
-  and ✅ an MCP server (`fcvm mcp`) that exposes sandbox tools to agents.
-- **A4. Egress control.** ✅ `--net none`, ✅ `--allow` allowlists enforced by
-  a host-side proxy with an audit log, ✅ DNS from the host's upstream
-  resolvers. Still open: non-HTTP protocols in allowlists (e.g. SSH to
-  github.com), and TLS inspection, which is deliberately not done.
-- **A5. exec for agents.** ✅ `--timeout`, `-e KEY=VAL`, `-w DIR`.
-- **A6. Provisioning.** ✅ `fcvm build` (Dockerfile subset, per-step cache,
-  single-layer results), ✅ local `docker save`/OCI imports, ✅ `fcvm squash`.
-  Still open: multi-stage builds, and a cloud-init style first-boot hook for
-  Ubuntu VMs.
-- **A7. Concurrency.** ✅ 64 taps per network pool, and `--net none` VMs
-  need none. Beyond ~240 VMs per pool, taps would have to be created on
-  demand, which needs root.
-- Not planned: macOS/Windows, GPUs, nested virtualization, desktop GUIs.
-
-### Web console
-
-A cloud-console-like web UI for one host: browse images, launch and manage
-instances, see resource use, with a console and shell in the browser. It
-lives in this project (`fcvm serve`) because it is a client of the same
-operations as the CLI and MCP server, and it ships with them. A multi-host
-fleet view would be a separate control-plane product built on this API.
-
-- **W1. Local web console v1.** ✅ `fcvm serve`, bound to 127.0.0.1 with a
-  token cookie. A dashboard of host and VM resource use; images (list,
-  import, delete); a launch form (image, vCPU/memory, network mode and
-  allowlist, ports, volumes and host directories); instances
-  (start/stop/delete, snapshot, fork); an instance page with live stats,
-  logs, egress log, and browser terminals (serial console and shell over
-  WebSockets); snapshots and volumes. Standard library only, no build step,
-  with xterm.js vendored.
-- **W2. Remote access.** Serve on a LAN or tailnet: TLS, real
-  authentication (local users, or OIDC/SSO), roles (viewer, operator,
-  admin). Shares work with enterprise items E1/E4/E5.
-- **W3. Builds from the UI.** ✅ Edit a Dockerfile and upload a build context,
-  with streamed build logs and the per-step cache made visible.
-- **W4. Files.** ✅ A file browser for a running VM (upload, download, edit,
-  rename, delete) using the exec agent's native file operations, so it works
-  in any image, even without a shell, and management of host-directory
-  mounts, live on running VMs.
-- **W5. Activity and audit.** A timeline of who did what (launch, exec,
-  console sessions, egress denials), feeding E5.
-- **W6. Service mode.** Run `fcvm serve` as a systemd user service; VMs
-  marked "start on boot" come back after a host reboot (with E4).
-- **W7. Metrics.** Guest-level metrics through the agent (CPU, memory, disk
-  and processes inside the VM), longer history, and a Prometheus endpoint.
-- **W8. Templates.** Saved launch presets, e.g. "Python sandbox, @pypi only,
-  2 GB", shared with the MCP server's defaults.
-- **W9. Fleet view.** Several fcvm hosts in one console: a separate
-  control-plane product using `fcvm serve` as the per-host agent.
-
-### Enterprise
-
-Prior art to position against: Weave Ignite (Docker image → Firecracker VM,
-archived 2023), Fly.io (the same idea as a platform), E2B (Firecracker
-sandboxes for AI agents, as a service), Kata Containers and
-firecracker-containerd (microVMs behind the container runtime interface).
-fcvm's niche is self-hosted, simple and auditable: closer to Multipass than
-to Kubernetes.
-
-What is solid: a minimal monolithic guest kernel, digest-verified pulls with
-`@sha256:` pinning, shared read-only images with per-VM layers, rootless
-operation, and a small auditable code base. What blocks adoption, in order:
-
-#### E1. Run VMs under the Firecracker jailer ✅
-
-Done: `fcvm create --jail` / `JAIL=1` and `fcvm jail-setup` (see "Jailed
-VMs"): a per-VM uid, chroot, cgroup v2 limits and a per-VM network namespace
-(tap inside, veth to the bridge), through a root helper that validates every
-path. Snapshots and fork of jailed VMs, cgroup-based I/O stats, and jailed by
-default for MCP sandboxes and the web console. `--new-pid-ns` was left out on
-purpose (see "Jailed VMs" for why). The original plan follows.
-
-Before this, Firecracker always ran as your user. KVM and Firecracker's own seccomp filters
-are the only boundary between a guest and the host, and every VM can reach the
-files of every other VM. `bin/jailer` (already downloaded by `fcvm firecracker`)
-is Firecracker's production wrapper. Plan:
-
-- **Opt-in mode**: `fcvm start --jail VM` / `JAIL=1`, with the rootless mode
-  staying the default for development. The jailer has to start as root (chroot,
-  mknod, cgroups, namespaces, then drop privileges). That means either `sudo`
-  per start or a small root helper (a systemd service owning `/srv/jailer`)
-  that `fcvm` asks to launch VMs. The helper keeps the CLI password-free.
-- **Chroot per VM** under `/srv/jailer/firecracker/<vm>/root`. The kernel, the
-  shared image (read-only) and the VM's `rw.ext4` are hard-linked or
-  bind-mounted in. `fc.json` paths become chroot-relative.
-- **Dedicated uid/gid per VM** from a reserved range, owning only that VM's
-  `rw.ext4` and sockets, so one compromised VMM can't read or write another
-  VM's disk.
-- **cgroup v2 limits** (`--cgroup-version 2`, `cpu.max`, `memory.max`, pids)
-  derived from `--vcpus`/`--mem`, plus `--resource-limit no-file=...`.
-- **Namespaces**: `--new-pid-ns`, and `--netns` with the VM's tap inside a
-  per-VM network namespace, joined to `fcbr0` through a veth pair. `net.sh`
-  would create those instead of the flat tap pool.
-- **Keep the CLI working**: the API socket and vsock socket live in the chroot.
-  `stop`, `exec`/`shell` and the port forwarder need group access to them, so
-  the helper would create them with a shared `fcvm` group.
-
-#### E2. Network isolation and policy ✅
-
-Done (see "Isolation" under networking):
-- VMs are isolated from each other, both bridged and routed through the host.
-- VMs are cut off from host services.
-- Anti-spoofing pins each port to its MAC and IPv4 address.
-- Guests get no IPv6.
-- Published ports bind to `127.0.0.1` by default.
-- Egress allowlists came with A4.
-
-Still open:
-- Full IPv6 for guests (addressing, NAT66 or routed, and the same rules for
-  v6).
-- An option to keep full-network VMs off private ranges: today NAT reaches
-  your LAN and other bridges on the host (LXD, Multipass, Docker).
-
-#### E3. Supply chain
-
-- Firecracker and the kernel are checked against checksums from the same
-  place they're downloaded from. kernel.org's signed `sha256sums.asc` is not
-  signature-verified yet (GPG).
-- Container images: signature verification (cosign/notation), registry
-  allowlists, mirrors/proxies (Artifactory), `~/.docker/config.json` and
-  credential helpers.
-- Reproducibility: "latest stable" is good for patches but not reproducible,
-  and Firecracker upstream validates 5.10, 6.1 and 6.18 guests. Enterprise
-  default: a pinned LTS kernel (`KERNEL_CHANNEL=longterm`), SBOMs, and
-  reproducible image builds.
-
-#### E4. Daemon and API
-
-State lives in JSON files, pid files and file locks. After a host reboot,
-nothing is recovered: taps are gone and VMs aren't restarted. There is only
-light protection against two `fcvm` commands running at once, and no API.
-Needed: a daemon with an API and a state store that reconciles after reboot.
-Orchestration would build on it later. The control plane likely moves to Go
-or Rust at that point, while `fc-init` stays small and static.
-
-#### E5. Audit and observability
-
-Log `exec`/`shell`/`console` sessions (who ran what, and when). Export
-Firecracker metrics (`--metrics-path`), and ship console logs somewhere
-central.
-
-#### E6. Resource governance
-
-Host-side cgroup limits (with E1), Firecracker rate limiters for block and
-network I/O, quotas on writable layers and volumes (today they are sparse
-files that can fill the host disk), and disk encryption at rest.
-
-#### E7. Credentials in images
-
-The Ubuntu base image contains the project SSH key and the builder's public
-keys, and `fcvm ssh` skips host-key checking. That is fine on a laptop, not in
-shared images. Keys should be injected per VM at boot instead.
-
-#### E8. Engineering maturity
-
-- ✅ `fc-init` boots from an initramfs instead of living in every image, so
-  upgrading the init or agent no longer means rebuilding images.
-- A test suite and CI, covering failure paths, concurrency and host reboots.
-  The bash `set -e` pitfalls hit during development show why.
-- Exec agent protocol: ◐ requests carry a version tag (`fcvm2`), and a
-  mismatch fails with a clear error. Still open: version negotiation and a
-  compatibility policy, so newer hosts can talk to VMs booted with an older
-  initramfs.
-- aarch64 (Graviton): needs `kernel/microvm-aarch64.config` and testing.
-
-#### Smaller items
-
-- Published ports are TCP only and don't preserve the client address. An
-  nftables DNAT mode in `net.sh` (root) would fix both.
-- `exec` via the agent has no auth beyond access to the VM's vsock socket.
-  That is fine for a single user; the jailer's per-VM uids are the natural
-  place to tighten it.
+Planned work lives in [docs/roadmap.md](docs/roadmap.md), in three tracks:
+agentic development, the web console, and what an enterprise would need
+(the jailer, network policy, supply chain, a daemon and API, audit,
+resource governance).

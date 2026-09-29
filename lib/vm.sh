@@ -14,7 +14,21 @@ cmd=$1; shift
 vm_dir()     { echo "$VMS_DIR/$1"; }
 vm_exists()  { [ -f "$VMS_DIR/$1/vm.json" ]; }
 vm_pid()     { cat "$VMS_DIR/$1/pid" 2>/dev/null || true; }
-vm_running() { local p; p=$(vm_pid "$1"); [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+# jailed VMs run as another uid, where kill -0 says EPERM: check /proc too
+vm_running() { local p; p=$(vm_pid "$1"); [ -n "$p" ] && { kill -0 "$p" 2>/dev/null || [ -e "/proc/$p" ]; }; }
+vm_jailed()  { [ "$(jq -r '.jail // false' "$VMS_DIR/$1/vm.json" 2>/dev/null)" = true ]; }
+
+# One request to fcvm-jaild (the root helper for jailed VMs).
+jaild() {
+    python3 - "$@" <<'PY'
+import json, socket, sys
+req = {"op": sys.argv[1], "vm": sys.argv[2] if len(sys.argv) > 2 else None}
+s = socket.socket(socket.AF_UNIX); s.connect("/run/fcvm/jaild.sock")
+s.sendall(json.dumps(req).encode() + b"\n")
+r = json.loads(s.makefile().readline())
+print(json.dumps(r)); sys.exit(0 if r.get("ok") else 1)
+PY
+}
 image_json() { local f=$IMAGES_DIR/$1.json; [ -f "$f" ] || die "no image '$1' (see: ./fcvm images)"; echo "$f"; }
 
 # Writable layer: sparse ext4 holding overlay upper/ and work/ (root-owned via
@@ -65,7 +79,7 @@ create() {
     local vm=${1:?$usage} image=${2:?$usage}
     shift 2
     local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full allow=()
-    local entrypoint=() set_entrypoint=0
+    local entrypoint=() set_entrypoint=0 jail=${JAIL:-0}
     while [ $# -gt 0 ]; do
         case $1 in
             --vcpus)        vcpus=$2; shift 2 ;;
@@ -73,6 +87,8 @@ create() {
             --disk)         disk=$2; shift 2 ;;
             --copy)         copy=1; shift ;;
             --idle)         idle=1; shift ;;
+            --jail)         jail=1; shift ;;
+            --no-jail)      jail=0; shift ;;
             --entrypoint)   set_entrypoint=1; [ -z "${2-}" ] || entrypoint=("$2"); shift 2 ;;
             -p|--publish)   ports+=("$2"); shift 2 ;;
             -v|--volume)    case $2 in
@@ -146,9 +162,10 @@ create() {
         --argjson ephemeral "${EPHEMERAL:-false}" \
         --argjson ports "$(jq -n '$ARGS.positional' --args "${ports[@]}")" \
         --argjson volumes "$(jq -n '$ARGS.positional' --args "${vols[@]}")" --argjson shares "$sharejson" \
+        --argjson jail "$([ "$jail" = 1 ] && echo true || echo false)" \
         --argjson net "$(jq -n --arg mode "$netmode" '{mode: $mode, allow: $ARGS.positional}' --args "${allow[@]}")" \
         '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
-          shares: $shares, net: $net, ephemeral: $ephemeral, created: (now | todate)}' > "$dir/vm.json"
+          shares: $shares, net: $net, jail: $jail, ephemeral: $ephemeral, created: (now | todate)}' > "$dir/vm.json"
     [ -n "${EPHEMERAL:-}" ] || log "created VM '$vm' from $image ($([ $copy = 1 ] && echo 'private copy' || echo 'shared image + writable layer'))"
 }
 
@@ -350,8 +367,22 @@ start() {
         "entropy": {}
     }' > "$DIR/fc.json"
 
-    rm -f "$DIR/fc.sock" "$DIR/vsock.sock" "$DIR/console.sock" "$DIR/pid" "$DIR/waiter"
-    : > "$DIR/firecracker.log"
+    local jailed=0
+    if vm_jailed "$vm"; then
+        jailed=1
+        [ -S /run/fcvm/jaild.sock ] || die "'$vm' runs jailed, but fcvm-jaild isn't running (run: ./fcvm jail-setup)"
+        [ "$(/usr/local/lib/fcvm/firecracker --version 2>/dev/null | head -1)" = "$("$FIRECRACKER" --version | head -1)" ] ||
+            warn "fcvm-jaild has a different Firecracker than bin/ (re-run ./fcvm jail-setup)"
+        # The helper re-validates everything in this request (paths, ownership, writability).
+        jq -n --arg vm "$vm" --arg kernel "$kernel" --arg initrd "$BUILD_DIR/initramfs.cpio" --arg args "$args" \
+            --argjson drives "$(jq '[.[] | {drive_id, path: .path_on_host, read_only: .is_read_only}]' <<<"$drives")" \
+            --argjson vcpus "$vcpus" --argjson mem "$mem" \
+            --arg tap "$(jq -r '.[0].host_dev_name // empty' <<<"$net")" --arg mac "$(jq -r '.[0].guest_mac // empty' <<<"$net")" \
+            '{op: "launch", vm: $vm, kernel: $kernel, initrd: $initrd, drives: $drives, boot_args: $args,
+              vcpus: $vcpus, mem_mib: $mem, tap: (if $tap == "" then null else $tap end), mac: $mac}' > "$DIR/jail-request.json"
+    fi
+    rm -f "$DIR/fc.sock" "$DIR/vsock.sock" "$DIR/console.sock" "$DIR/pid" "$DIR/waiter" "$DIR/firecracker.log"
+    [ $jailed = 1 ] || : > "$DIR/firecracker.log"
     : > "$DIR/console.log"
     local fc=("$FIRECRACKER" --api-sock "$DIR/fc.sock" --config-file "$DIR/fc.json"
               --log-path "$DIR/firecracker.log" --level Warning)
@@ -363,23 +394,33 @@ start() {
     [ ${#PORTS[@]} -eq 0 ] || info+=", ports ${PORTS[*]}"
     log "starting '$vm' ($info)"
 
-    if [ ${#exports[@]} -gt 0 ]; then
-        (   # listening before the guest connects at boot; exits with the VM
+    # Host directories: a 9P server listening at <vsock uds>_<port>. Unjailed it
+    # starts before the VM; jailed, once the helper has made the chroot (the
+    # guest retries its connection for a few seconds).
+    start_shares() {   # uds-prefix
+        (   # exits with the VM
             if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
-            exec setsid python3 "$FCVM_ROOT/lib/share9p.py" --uds-prefix "$DIR/vsock.sock" --pidfile "$DIR/pid" \
+            exec setsid python3 "$FCVM_ROOT/lib/share9p.py" --uds-prefix "$1" --pidfile "$DIR/pid" \
                 "${exports[@]}" </dev/null >"$DIR/share.log" 2>&1
         ) &
         echo $! > "$DIR/share.pid"
-        for ((i = 0; i < 50; i++)); do [ -S "$DIR/vsock.sock_10000" ] && break; sleep 0.02; done
-        [ -S "$DIR/vsock.sock_10000" ] || { cat "$DIR/share.log" >&2; die "host directory server failed to start"; }
-    fi
+        for ((i = 0; i < 50; i++)); do [ -S "${1}_10000" ] && break; sleep 0.02; done
+        [ -S "${1}_10000" ] || { cat "$DIR/share.log" >&2; die "host directory server failed to start"; }
+    }
+    if [ ${#exports[@]} -gt 0 ] && [ $jailed = 0 ]; then start_shares "$DIR/vsock.sock"; fi
+    local launch=(-- "${fc[@]}")
+    [ $jailed = 0 ] || launch=(--jail "$DIR/jail-request.json" --link-dir "$DIR")
     setsid python3 "$FCVM_ROOT/lib/console.py" serve --sock "$DIR/console.sock" --log "$DIR/console.log" \
-        --pidfile "$DIR/pid" --on-exit "$(printf '%q _reap %q' "$FCVM_ROOT/fcvm" "$vm")" -- "${fc[@]}" \
+        --pidfile "$DIR/pid" --on-exit "$(printf '%q _reap %q' "$FCVM_ROOT/fcvm" "$vm")" "${launch[@]}" \
         </dev/null >"$DIR/relay.log" 2>&1 &
     local i pid=""
-    for ((i = 0; i < 50; i++)); do pid=$(vm_pid "$vm"); [ -n "$pid" ] && break; sleep 0.02; done
+    for ((i = 0; i < 100; i++)); do pid=$(vm_pid "$vm"); [ -n "$pid" ] && break; sleep 0.02; done
     [ -n "$pid" ] || { cat "$DIR/relay.log" >&2; die "console relay failed to start"; }
-    start_portfwd "$pid" || { kill "$pid"; die "cannot publish ports; VM not started"; }
+    if [ ${#exports[@]} -gt 0 ] && [ $jailed = 1 ]; then start_shares "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi
+    if ! start_portfwd "$pid"; then
+        if [ $jailed = 1 ]; then jaild kill "$vm" >/dev/null || true; else kill "$pid" 2>/dev/null || true; fi
+        die "cannot publish ports; VM not started"
+    fi
     sleep 0.2
     if ! vm_running "$vm"; then
         cat "$DIR/console.log" "$DIR/firecracker.log" >&2
@@ -423,14 +464,17 @@ stop() {
         pid=$(vm_pid "$vm")
         # Resent every 2 s: during early boot the guest's keyboard driver isn't listening yet.
         for ((i = 0; i < 100; i++)); do
-            kill -0 "$pid" 2>/dev/null || break
+            [ -e "/proc/$pid" ] || break
             if ((i % 10 == 0)); then
                 curl -fsS --unix-socket "$dir/fc.sock" -X PUT http://localhost/actions \
                     -H 'Content-Type: application/json' -d '{"action_type": "SendCtrlAltDel"}' >/dev/null 2>&1 || true
             fi
             sleep 0.2
         done
-        if kill -0 "$pid" 2>/dev/null; then warn "guest did not shut down; killing"; kill -9 "$pid"; fi
+        if vm_running "$vm"; then
+            warn "guest did not shut down; killing"
+            if vm_jailed "$vm"; then jaild kill "$vm" >/dev/null || true; else kill -9 "$pid"; fi
+        fi
         for ((i = 0; i < 50; i++)); do [ -f "$dir/pid" ] || break; sleep 0.1; done   # relay reaps
         [ -n "${QUIET_STOP:-}" ] || log "stopped '$vm'"
     fi
@@ -459,6 +503,7 @@ reap() {
     rm -f "$dir"/vsock.sock_*
     if [ -f "$dir/ip" ]; then rm -f "$VMS_DIR/.egress/$(cat "$dir/ip").json"; fi
     rm -f "$dir/fc.sock" "$dir/vsock.sock" "$dir/console.sock" "$dir/portfwd.pid" "$dir/pid"
+    if [ -L "$dir/firecracker.log" ]; then rm -f "$dir/firecracker.log"; fi
     if [ "$(jq -r .ephemeral "$dir/vm.json")" = true ]; then rm -rf "$dir"; fi
 }
 
@@ -839,6 +884,7 @@ snapshot_create() {
     fi
     [ "$(jq '.shares // [] | length' "$vdir/vm.json")" = 0 ] ||
         die "VM '$vm' has live host directories mounted; their connections can't be cloned into a fork"
+    vm_jailed "$vm" && die "snapshots of jailed VMs aren't supported yet"
     if [ -f "$vdir/disk.ext4" ]; then disk=disk.ext4 drive=root; else disk=rw.ext4 drive=rw; fi
     mkdir -p "$dir"
     t0=$(date +%s%N)
@@ -976,6 +1022,12 @@ snapshot_cmd() {
 
 # --- live host directories: fcvm mount / umount ---------------------------------------
 
+# Where Firecracker looks for <vsock uds>_<port> listeners: the VM dir, or the
+# jail's chroot (vms/<vm>/vsock.sock is then a link into it).
+vsock_prefix() {
+    if [ -L "$1/vsock.sock" ]; then echo "$(dirname "$(readlink "$1/vsock.sock")")/vsock.sock"; else echo "$1/vsock.sock"; fi
+}
+
 # fcvm mount VM /host/dir:/path[:ro]: add a host directory to a VM. On a running
 # VM it's mounted live (a new share9p server + the agent's mount op); on a
 # stopped one it's mounted at the next start.
@@ -991,16 +1043,17 @@ mount_cmd() {
     jq -e --arg g "$gpath" '(.shares // []) | any(.path == $g)' "$dir/vm.json" >/dev/null &&
         die "'$vm' already has something mounted at $gpath (fcvm umount $vm $gpath first)"
     if vm_running "$vm"; then
-        for ((port = 10000; port < 10100; port++)); do [ -e "$dir/vsock.sock_$port" ] || break; done
+        local uds; uds=$(vsock_prefix "$dir")
+        for ((port = 10000; port < 10100; port++)); do [ -e "${uds}_$port" ] || break; done
         (
             if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
-            exec setsid python3 "$FCVM_ROOT/lib/share9p.py" --uds-prefix "$dir/vsock.sock" --pidfile "$dir/pid" \
+            exec setsid python3 "$FCVM_ROOT/lib/share9p.py" --uds-prefix "$uds" --pidfile "$dir/pid" \
                 "$port=$hdir${ro:+:ro}" </dev/null >>"$dir/share.log" 2>&1
         ) &
         pid=$!
-        for ((i = 0; i < 50; i++)); do [ -S "$dir/vsock.sock_$port" ] && break; sleep 0.02; done
+        for ((i = 0; i < 50; i++)); do [ -S "${uds}_$port" ] && break; sleep 0.02; done
         if ! python3 "$FCVM_ROOT/lib/exec_client.py" --fileop "$dir/vsock.sock" -- mount "$port" "$gpath" "${ro:+ro}${ro:-rw}"; then
-            kill "$pid" 2>/dev/null || true; rm -f "$dir/vsock.sock_$port"
+            kill "$pid" 2>/dev/null || true; rm -f "${uds}_$port"
             die "could not mount $gpath in '$vm' (is it running a current fcvm initramfs?)"
         fi
         echo "$port $pid $gpath" >> "$dir/share.live"
@@ -1023,7 +1076,7 @@ umount_cmd() {
         if [ -f "$dir/share.live" ]; then   # a live mount has its own server; boot-time ones share one
             while read -r line; do
                 set -- $line
-                if [ "$3" = "$gpath" ]; then kill "$2" 2>/dev/null || true; rm -f "$dir/vsock.sock_$1"; fi
+                if [ "$3" = "$gpath" ]; then kill "$2" 2>/dev/null || true; rm -f "$(vsock_prefix "$dir")_$1"; fi
             done < "$dir/share.live"
             awk -v g="$gpath" '$3 != g' "$dir/share.live" > "$dir/share.live.tmp"; mv "$dir/share.live.tmp" "$dir/share.live"
         fi
@@ -1137,7 +1190,7 @@ list_vms() {
         used=$(du -h "$d"/*.ext4 2>/dev/null | awk '{print $1; exit}')
         [ -f "$d/disk.ext4" ] && used+=" copy"
         printf "$fmt" "$vm" "$state" "$ip" "$(jq -r .image "$d/vm.json")" "$mem" "$used" \
-            "$(jq -r '[(if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
+            "$(jq -r '[(if .jail then "jail" else empty end), (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
                 + (.ports // []) + ((.volumes // []) | map("-v " + .))
                 + ((.shares // []) | map("-v \(.host):\(.path)\(if .ro then ":ro" else "" end)")) | join(" ")' "$d/vm.json")"
     done

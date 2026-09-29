@@ -423,8 +423,17 @@ static void merge_main(void)
 static int mount_share(unsigned port, const char *path, int ro, const char *owner)
 {
     struct sockaddr_vm addr = {.svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST, .svm_port = port};
-    int s = socket(AF_VSOCK, SOCK_STREAM, 0); /* no CLOEXEC: the kernel takes it over */
-    if (s < 0 || connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    int s = -1, ok = 0;
+    /* The host's server may still be starting (jailed VMs get it after launch): retry ~3 s. */
+    for (int i = 0; i < 30 && !ok; i++) {
+        if (s >= 0)
+            close(s);
+        s = socket(AF_VSOCK, SOCK_STREAM, 0); /* no CLOEXEC: the kernel takes it over */
+        ok = s >= 0 && connect(s, (struct sockaddr *)&addr, sizeof(addr)) == 0;
+        if (!ok)
+            usleep(100000);
+    }
+    if (!ok) {
         int e = errno;
         msg("share %s: cannot reach the host (vsock port %u): %s", path, port, strerror(e));
         if (s >= 0)

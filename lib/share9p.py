@@ -442,7 +442,8 @@ async def watch(pidfile):
     for _ in range(3000):
         try:
             pid = int(open(pidfile).read().strip())
-            os.kill(pid, 0)
+            if not os.path.exists(f"/proc/{pid}"):     # works for jailed VMs (another uid)
+                raise ProcessLookupError
             seen = True
         except (OSError, ValueError):
             if seen:
@@ -471,8 +472,14 @@ async def main():
             os.unlink(path)
         except FileNotFoundError:
             pass
-        servers.append(await asyncio.start_unix_server(
-            lambda r, w, s=share: Session(s, r, w).run(), path, limit=1 << 21))
+        # Sockets get the umask applied even under a default ACL; with 007 a jailed
+        # VM's ACL entry keeps write access (needed to connect) and "other" has none.
+        old = os.umask(0o007)
+        try:
+            servers.append(await asyncio.start_unix_server(
+                lambda r, w, s=share: Session(s, r, w).run(), path, limit=1 << 21))
+        finally:
+            os.umask(old)
         print(f"share9p: port {port} -> {d}{' (read-only)' if ro else ''}", file=sys.stderr, flush=True)
     await watch(args.pidfile)
 

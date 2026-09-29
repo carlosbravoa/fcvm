@@ -735,6 +735,7 @@ class App:
             "kernel": os.path.basename(os.path.realpath(os.path.join(ROOT, "kernels", "vmlinux"))),
             "disk_total": st.f_blocks * st.f_frsize, "disk_free": st.f_bavail * st.f_frsize,
             "taps_full": taps("fctap"), "taps_restricted": taps("fcrtap"),
+            "jail_available": os.path.exists("/run/fcvm/jaild.sock"),
             "history": list(self.stats.host),
             "vm_history": {n: list(s)[-1:] for n, s in self.stats.vms.items()},
         }
@@ -760,6 +761,8 @@ class App:
                 args += ["-v", v.strip()]
         if d.get("idle"):
             args.append("--idle")
+        if d.get("jail"):
+            args.append("--jail")
         cmd = d.get("command", "").strip()
         if cmd and not d.get("idle"):
             args += ["--", "sh", "-c", cmd]

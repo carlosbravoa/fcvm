@@ -8,7 +8,8 @@ usage: fcvm <command> [args]
 
 Host (need sudo):
   host-setup                 install build/runtime packages, check KVM access
-  net-up | net-down          create/remove bridge $NET_BRIDGE, $NET_TAPS tap devices and NAT
+  net-up | net-down          create/remove bridges, $NET_TAPS tap devices each, NAT and egress rules
+  jail-setup [--remove]      install fcvm-jaild, the root helper for jailed VMs (create --jail)
 
 Build:
   firecracker                download the Firecracker release ($FC_VERSION) into bin/
@@ -33,6 +34,7 @@ VMs:
                              (live host directory) --idle (app images: no
                              command, stays up for exec) --net none (no network)
                              --allow HOST,*.DOMAIN,@PRESET (egress allowlist via proxy)
+                             --jail (run under the Firecracker jailer; see jail-setup)
   start [-a] VM              boot a VM in the background; -a attaches its console
   run IMAGE [-d] [opts] [-- CMD...]
                              throwaway VM, deleted when it stops. App images: attached
@@ -73,6 +75,7 @@ cmd=${1:-help}; shift || true
 case $cmd in
     host-setup)         exec "$FCVM_ROOT/lib/host-setup.sh" "$@" ;;
     net-up|net-down)    exec "$FCVM_ROOT/lib/net.sh" "${cmd#net-}" "$@" ;;
+    jail-setup)         exec "$FCVM_ROOT/lib/jail-setup.sh" "$@" ;;
     firecracker)        exec "$FCVM_ROOT/lib/fetch-firecracker.sh" "$@" ;;
     kernel)             exec "$FCVM_ROOT/lib/build-kernel.sh" "$@" ;;
     init)               exec "$FCVM_ROOT/lib/build-init.sh" "$@" ;;

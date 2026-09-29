@@ -64,11 +64,7 @@ async def main():
             sys.exit(f"portfwd: cannot listen on {bind}:{hport}: {e.strerror}")
         print(f"portfwd: {bind}:{hport} -> {args.target}:{gport}", file=sys.stderr, flush=True)
 
-    while True:
-        try:
-            os.kill(args.watch, 0)
-        except ProcessLookupError:
-            return
+    while os.path.exists(f"/proc/{args.watch}"):   # works for jailed VMs (another uid)
         await asyncio.sleep(1)
 
 

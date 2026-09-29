@@ -54,6 +54,7 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | command | what it does |
 |---|---|
 | `host-setup` | installs build/runtime packages, checks `/dev/kvm` access |
+| `jail-setup [--remove]` | installs (or removes) `fcvm-jaild`, the root helper that runs VMs under the Firecracker jailer (sudo) |
 | `net-up` / `net-down` | bridges `fcbr0` (172.30.0.1/24, NAT) and `fcbr1` (172.30.1.1/24, restricted), 64 taps each, nftables rules, ufw rules |
 | `firecracker` | downloads the latest Firecracker release into `bin/` (checksum-verified) |
 | `kernel [stable\|mainline\|longterm\|X.Y.Z]` | builds `kernels/vmlinux-X.Y.Z`; `kernels/vmlinux` points at the newest |
@@ -384,6 +385,60 @@ itself. VMs on `fcbr0` can reach each other unless `NET_ISOLATE=1`.
   `.config` (renamed symbol or unmet dependency). Check this after moving to a
   new kernel series.
 
+## Jailed VMs
+
+```sh
+./fcvm jail-setup                            # once, with sudo; re-run after updating fcvm or `fcvm firecracker`
+./fcvm create box alpine-latest --idle --jail   # or JAIL=1 for every new VM; the web console has a checkbox
+./fcvm start box && ./fcvm exec box id
+```
+
+Without `--jail`, Firecracker runs as you. KVM and Firecracker's seccomp
+filters are then the only barrier between a guest and your files. With
+`--jail`, each VM runs under Firecracker's own jailer, the production setup
+AWS uses:
+
+| | rootless (default) | jailed |
+|---|---|---|
+| Firecracker runs as | you | its own uid/gid (900000 + slot), `NoNewPrivs`, seccomp |
+| can see | everything you can | its chroot `/srv/jailer/firecracker/<id>/root`: its disks, `/dev/kvm`, `/dev/net/tun`, its sockets |
+| limits | none | cgroup v2: `cpu.max` = vCPUs, `memory.max` = memory + 256 MiB VMM overhead, `pids.max` = 128, `no-file` = 4096 |
+| tap | shared pool, owned by you | the same pool tap, re-created owned by the VM's uid while it runs |
+
+How it works:
+- **The helper.** The jailer has to start as root, so `fcvm jail-setup`
+  installs `fcvm-jaild`, a small systemd service. It listens on
+  `/run/fcvm/jaild.sock`, and only your uid may connect (socket mode 0600 plus
+  a peer-credential check).
+- **Validation.** A launch request names the VM's files, and the helper
+  re-validates all of them. Each must resolve inside your fcvm tree
+  (`images/`, `vms/<vm>/`, `volumes/`, `kernels/`, `build/`) and be a
+  regular file you own. Only the VM's own disk and volumes can be writable.
+- **Root-owned binaries.** The helper runs root-owned copies of itself,
+  `jailer` and `firecracker` from `/usr/local/lib/fcvm`, never the
+  user-writable files in this tree. `start` warns if the installed
+  Firecracker differs from `bin/`.
+- **Disks.** They're bind-mounted into the chroot, images read-only. The
+  fcvm tree may be on a `nodev` filesystem, where the jailer's device nodes
+  wouldn't work, so hard links can't be used. The helper's private mount
+  namespace keeps these mounts out of the host's mount table.
+- **Access by ACL.** The VM's uid gets its writable files through ACLs, and
+  you keep ownership, so exit codes, `commit` and `cp` work as before. A
+  default ACL on the chroot, plus mask fixes after the jailer's `chmod` and
+  Firecracker's socket creation, lets both you and the VM use the API,
+  vsock and host-directory sockets. `vms/<vm>/fc.sock` and `vsock.sock`
+  link into the chroot, so every command works unchanged: exec, shell,
+  console, stop, ports, egress, host directories (live mounts too), the
+  web console.
+- **Cleanup.** When Firecracker exits, the helper unmounts, drops the ACLs,
+  gives the tap back and deletes the chroot. Stopping or restarting the
+  service stops its jailed VMs.
+
+Not yet: snapshots/fork of jailed VMs (refused with a message), per-VM
+network namespaces, and disk I/O in the web console's stats for jailed VMs.
+`/proc/<pid>/io` of another uid isn't readable; cgroup `io.stat` would be
+the source.
+
 ## Snapshots and fork
 
 `fcvm snapshot` captures a running VM whole: its memory (processes, page
@@ -611,6 +666,8 @@ lib/vm.sh               VM lifecycle
 lib/portfwd.py          rootless TCP port publishing
 lib/egress_proxy.py     egress proxy for restricted VMs (allowlists, logging)
 lib/share9p.py          9P server for live host directories (-v /host:/path)
+lib/jaild.py            fcvm-jaild, the root helper for jailed VMs (installed by jail-setup)
+lib/jail-setup.sh       installs/removes fcvm-jaild (sudo)
 lib/egress-presets.conf allowlist presets (@pypi, @npm, ...)
 lib/exec_client.py      host side of fcvm exec / shell (vsock)
 lib/mcp_server.py       MCP server (fcvm mcp)
@@ -718,9 +775,15 @@ What is solid: a minimal monolithic guest kernel, digest-verified pulls with
 `@sha256:` pinning, shared read-only images with per-VM layers, rootless
 operation, and a small auditable code base. What blocks adoption, in order:
 
-#### E1. Run VMs under the Firecracker jailer
+#### E1. Run VMs under the Firecracker jailer ✅ (first version)
 
-Today Firecracker runs as your user. KVM and Firecracker's own seccomp filters
+Done: `fcvm create --jail` / `JAIL=1` and `fcvm jail-setup` (see "Jailed
+VMs"): a per-VM uid, chroot, cgroup v2 limits and tap ownership, through a
+root helper that validates every path. Still open from the plan below:
+per-VM network namespaces (`--netns`, veth), `--new-pid-ns`, snapshots/fork
+of jailed VMs, cgroup-based I/O stats, and making jailed the default.
+
+Before this, Firecracker always ran as your user. KVM and Firecracker's own seccomp filters
 are the only boundary between a guest and the host, and every VM can reach the
 files of every other VM. `bin/jailer` (already downloaded by `fcvm firecracker`)
 is Firecracker's production wrapper. Plan:

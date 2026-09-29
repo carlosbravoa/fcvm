@@ -14,6 +14,8 @@ attach: connects this terminal to a console. Ctrl-] detaches, leaving the VM
 running. Exit status: 0 when the VM went away, 2 when detached.
 """
 import argparse
+import array
+import json
 import os
 import pty
 import select
@@ -29,13 +31,48 @@ SCROLLBACK = 1 << 20
 TAIL = 4096
 
 
+def jail_launch(args, slave):
+    """Ask fcvm-jaild to start the VM under the jailer with our pty as its console."""
+    with open(args.jail) as f:
+        req = json.load(f)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect("/run/fcvm/jaild.sock")
+    s.sendmsg([json.dumps(req).encode() + b"\n"],
+              [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [slave]))])
+    reply = b""
+    while not reply.endswith(b"\n"):
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        reply += chunk
+    s.close()
+    r = json.loads(reply or b'{"ok": false, "error": "no reply from fcvm-jaild"}')
+    if not r.get("ok"):
+        sys.exit(f"fcvm-jaild: {r.get('error')}")
+    # The VM's sockets and log live in the chroot; link them where fcvm looks.
+    for name in ("fc.sock", "vsock.sock", "firecracker.log"):
+        link = os.path.join(args.link_dir, name)
+        if os.path.lexists(link):
+            os.unlink(link)
+        os.symlink(os.path.join(r["chroot"], name), link)
+    return r["pid"]
+
+
+def alive(pid):
+    return os.path.exists(f"/proc/{pid}")
+
+
 def serve(args):
     master, slave = pty.openpty()
     tty.setraw(slave)   # the guest already sends \r\n; no output processing
-    proc = subprocess.Popen(args.cmd, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+    if args.jail:
+        proc, pid = None, jail_launch(args, slave)
+    else:
+        proc = subprocess.Popen(args.cmd, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+        pid = proc.pid
     os.close(slave)
     with open(args.pidfile, "w") as f:
-        f.write(f"{proc.pid}\n")
+        f.write(f"{pid}\n")
 
     log = open(args.log, "ab", buffering=0)
     try:
@@ -96,10 +133,14 @@ def serve(args):
                 os.write(master, data)
             else:
                 drop(c)
-        if proc.poll() is not None and master not in ready:
+        if (proc.poll() is not None if proc else not alive(pid)) and master not in ready:
             break
 
-    proc.wait()
+    if proc:
+        proc.wait()
+    else:
+        while alive(pid):
+            time.sleep(0.05)
     if args.on_exit:
         subprocess.run(args.on_exit, shell=True)
     for c in list(clients):
@@ -161,6 +202,8 @@ def main():
     sv.add_argument("--log", required=True)
     sv.add_argument("--pidfile", required=True)
     sv.add_argument("--on-exit")
+    sv.add_argument("--jail", help="launch request for fcvm-jaild (instead of CMD)")
+    sv.add_argument("--link-dir", help="where to link the jailed VM's sockets and log")
     sv.add_argument("cmd", nargs=argparse.REMAINDER)
     at = sub.add_parser("attach")
     at.add_argument("sock")

@@ -451,7 +451,12 @@ reap() {
         echo "${code}" > "$VMS_DIR/.exit/$vm"
     fi
     if [ -f "$dir/portfwd.pid" ]; then kill "$(cat "$dir/portfwd.pid")" 2>/dev/null || true; fi
-    if [ -f "$dir/share.pid" ]; then kill "$(cat "$dir/share.pid")" 2>/dev/null || true; rm -f "$dir/share.pid" "$dir"/vsock.sock_*; fi
+    if [ -f "$dir/share.pid" ]; then kill "$(cat "$dir/share.pid")" 2>/dev/null || true; rm -f "$dir/share.pid"; fi
+    if [ -f "$dir/share.live" ]; then
+        awk '{print $2}' "$dir/share.live" | xargs -r kill 2>/dev/null || true
+        rm -f "$dir/share.live"
+    fi
+    rm -f "$dir"/vsock.sock_*
     if [ -f "$dir/ip" ]; then rm -f "$VMS_DIR/.egress/$(cat "$dir/ip").json"; fi
     rm -f "$dir/fc.sock" "$dir/vsock.sock" "$dir/console.sock" "$dir/portfwd.pid" "$dir/pid"
     if [ "$(jq -r .ephemeral "$dir/vm.json")" = true ]; then rm -rf "$dir"; fi
@@ -969,6 +974,65 @@ snapshot_cmd() {
     esac
 }
 
+# --- live host directories: fcvm mount / umount ---------------------------------------
+
+# fcvm mount VM /host/dir:/path[:ro]: add a host directory to a VM. On a running
+# VM it's mounted live (a new share9p server + the agent's mount op); on a
+# stopped one it's mounted at the next start.
+mount_cmd() {
+    local usage="usage: fcvm mount VM /HOST/DIR:/GUEST/PATH[:ro]"
+    local vm=${1:?$usage} spec=${2:?$usage} dir hdir gpath ro port pid i
+    vm_exists "$vm" || die "no VM '$vm'"
+    [[ $spec =~ ^([^:]+):(/[^:,]*)(:ro)?$ ]] || die "$usage"
+    hdir=${BASH_REMATCH[1]/#\~/$HOME} gpath=${BASH_REMATCH[2]} ro=${BASH_REMATCH[3]:+true}
+    [ -d "$hdir" ] || die "not a directory: $hdir"
+    hdir=$(realpath "$hdir")
+    dir=$(vm_dir "$vm")
+    jq -e --arg g "$gpath" '(.shares // []) | any(.path == $g)' "$dir/vm.json" >/dev/null &&
+        die "'$vm' already has something mounted at $gpath (fcvm umount $vm $gpath first)"
+    if vm_running "$vm"; then
+        for ((port = 10000; port < 10100; port++)); do [ -e "$dir/vsock.sock_$port" ] || break; done
+        (
+            if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
+            exec setsid python3 "$FCVM_ROOT/lib/share9p.py" --uds-prefix "$dir/vsock.sock" --pidfile "$dir/pid" \
+                "$port=$hdir${ro:+:ro}" </dev/null >>"$dir/share.log" 2>&1
+        ) &
+        pid=$!
+        for ((i = 0; i < 50; i++)); do [ -S "$dir/vsock.sock_$port" ] && break; sleep 0.02; done
+        if ! python3 "$FCVM_ROOT/lib/exec_client.py" --fileop "$dir/vsock.sock" -- mount "$port" "$gpath" "${ro:+ro}${ro:-rw}"; then
+            kill "$pid" 2>/dev/null || true; rm -f "$dir/vsock.sock_$port"
+            die "could not mount $gpath in '$vm' (is it running a current fcvm initramfs?)"
+        fi
+        echo "$port $pid $gpath" >> "$dir/share.live"
+    fi
+    jq --arg h "$hdir" --arg g "$gpath" --argjson ro "${ro:-false}" '.shares = ((.shares // []) + [{host: $h, path: $g, ro: $ro}])' \
+        "$dir/vm.json" > "$dir/vm.json.tmp" && mv "$dir/vm.json.tmp" "$dir/vm.json"
+    log "mounted $hdir at $gpath in '$vm'$(vm_running "$vm" && echo " (live)" || echo " (from its next start)")"
+}
+
+# fcvm umount VM /path
+umount_cmd() {
+    local vm=${1:?usage: fcvm umount VM /GUEST/PATH} gpath=${2:?usage: fcvm umount VM /GUEST/PATH} dir line
+    vm_exists "$vm" || die "no VM '$vm'"
+    dir=$(vm_dir "$vm")
+    jq -e --arg g "$gpath" '(.shares // []) | any(.path == $g)' "$dir/vm.json" >/dev/null ||
+        die "nothing from the host is mounted at $gpath in '$vm'"
+    if vm_running "$vm"; then
+        python3 "$FCVM_ROOT/lib/exec_client.py" --fileop "$dir/vsock.sock" -- umount "$gpath" ||
+            warn "the guest could not unmount $gpath"
+        if [ -f "$dir/share.live" ]; then   # a live mount has its own server; boot-time ones share one
+            while read -r line; do
+                set -- $line
+                if [ "$3" = "$gpath" ]; then kill "$2" 2>/dev/null || true; rm -f "$dir/vsock.sock_$1"; fi
+            done < "$dir/share.live"
+            awk -v g="$gpath" '$3 != g' "$dir/share.live" > "$dir/share.live.tmp"; mv "$dir/share.live.tmp" "$dir/share.live"
+        fi
+    fi
+    jq --arg g "$gpath" '.shares = [(.shares // [])[] | select(.path != $g)]' "$dir/vm.json" > "$dir/vm.json.tmp" &&
+        mv "$dir/vm.json.tmp" "$dir/vm.json"
+    log "unmounted $gpath from '$vm'"
+}
+
 # --- machine-readable state ------------------------------------------------------
 
 # Host memory a running VM actually uses: its Firecracker process's resident
@@ -1139,5 +1203,7 @@ case $cmd in
     egress)  egress "$@" ;;
     snapshot) snapshot_cmd "$@" ;;
     fork)    fork_cmd "$@" ;;
+    mount)   mount_cmd "$@" ;;
+    umount)  umount_cmd "$@" ;;
     rm)      rm_vm "$@" ;;
 esac

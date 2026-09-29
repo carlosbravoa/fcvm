@@ -73,6 +73,7 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `rmi IMAGE` | deletes an image nothing depends on |
 | `squash IMAGE NEW` | merges IMAGE's committed layers into one, on the same base image |
 | `prune` | deletes the build cache and leftover build VMs |
+| `mount VM /HOST/DIR:/PATH[:ro]`, `umount VM /PATH` | adds or removes a live host directory: immediately on a running VM, from the next start on a stopped one |
 | `snapshot VM NAME` | saves a running VM's memory, device state and disk. The VM keeps running (paused ~0.75 s per GB of RAM) |
 | `snapshot ls [--json]`, `snapshot rm NAME` | lists / deletes snapshots |
 | `fork SNAPSHOT [NAME] [-n N]` | starts running VM(s) from a snapshot in ~120 ms each, with their own disk, IP, MAC and hostname |
@@ -251,6 +252,12 @@ There's no FUSE and no extra binary in the image, and it works with
   or a named volume.
 - **Snapshots:** VMs with host directories can't be snapshotted, because the
   live connection can't be cloned into a fork.
+
+Host directories can also be added to or removed from a **running** VM:
+`fcvm mount VM /host/dir:/path[:ro]` starts a server for the new directory
+and asks the agent to mount it, and `fcvm umount VM /path` reverses it. Both
+are saved to the VM's configuration, so they apply at the next start too.
+The web console's Files tab does the same.
 
 `fcvm cp` remains the way to copy things in or out of a running VM without
 a mount.
@@ -516,6 +523,19 @@ A cloud-console-like UI for this host:
   the shell, or run a custom command.
 - **Images:** import from a registry or a local archive (runs as a
   background job with progress), launch from an image, delete.
+- **Files** (instance tab): browse the VM's filesystem, upload files (with
+  progress), download, edit text files in place, create folders, rename,
+  delete. It also manages host directories: add or remove them, live on a
+  running VM. File operations are native to the exec agent (list, stat,
+  read, write, mkdir, remove, rename), so they work in any image, even
+  distroless ones. Uploads and edits are written atomically; edited files
+  keep their owner and mode, and new ones take their folder's owner.
+- **Builds:** projects under `builds/<name>/` (from a Python, Alpine, Ubuntu
+  or blank template), or an existing host directory. Edit the Dockerfile and
+  files in the browser, upload files or whole folders, then build with an
+  image name, build args, network (full, allowlist or none) and no-cache.
+  The log streams live, next to a step list showing which steps ran and
+  which came from cache. "Launch it" opens the launch dialog on the result.
 - **Snapshots:** fork, delete. **Volumes:** list, delete.
 
 How it's built: `lib/web/server.py` is standard-library Python. It
@@ -668,9 +688,9 @@ fleet view would be a separate control-plane product built on this API.
 - **W2. Remote access.** Serve on a LAN or tailnet: TLS, real
   authentication (local users, or OIDC/SSO), roles (viewer, operator,
   admin). Shares work with enterprise items E1/E4/E5.
-- **W3. Builds from the UI.** Edit a Dockerfile and upload a build context,
+- **W3. Builds from the UI.** ✅ Edit a Dockerfile and upload a build context,
   with streamed build logs and the per-step cache made visible.
-- **W4. Files.** A file browser for a running VM (upload, download, edit)
+- **W4. Files.** ✅ A file browser for a running VM (upload, download, edit)
   over `fcvm cp`, and management of host-directory mounts.
 - **W5. Activity and audit.** A timeline of who did what (launch, exec,
   console sessions, egress denials), feeding E5.

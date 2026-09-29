@@ -51,6 +51,33 @@ def connect(path, timeout=15):
             time.sleep(0.2)
 
 
+def fileop(sock, fields):
+    """Run one agent file operation; data goes to stdout, errors to stderr."""
+    sock.sendall(frame(b"F", b"\0".join(f.encode() for f in ["fcvm2", *fields]) + b"\0"))
+    if fields[:1] == ["write"]:
+        while chunk := sys.stdin.buffer.read(65536):
+            sock.sendall(frame(b"D", chunk))
+        sock.sendall(frame(b"C"))
+    buf, out = b"", sys.stdout.buffer
+    while True:
+        chunk = sock.recv(65536)
+        if not chunk:
+            return 1
+        buf += chunk
+        while len(buf) >= 5:
+            kind, n = buf[:1], struct.unpack(">I", buf[1:5])[0]
+            if len(buf) < 5 + n:
+                break
+            payload, buf = buf[5:5 + n], buf[5 + n:]
+            if kind == b"D":
+                out.write(payload)
+            elif kind == b"E":
+                sys.stderr.write(payload.decode(errors="replace"))
+            elif kind == b"X":
+                out.flush()
+                return min(struct.unpack(">i", payload)[0], 255)
+
+
 def winsize():
     try:
         rows, cols, _, _ = struct.unpack("HHHH", fcntl.ioctl(sys.stdin.fileno(), termios.TIOCGWINSZ, b"\0" * 8))
@@ -68,6 +95,9 @@ def main():
     ap.add_argument("-w", "--workdir", default="", help="working directory (default: the image's)")
     ap.add_argument("-e", "--env", action="append", default=[], help="extra KEY=VALUE (repeatable)")
     ap.add_argument("--timeout", type=float, help="kill the command after this many seconds (exit 124)")
+    ap.add_argument("--fileop", action="store_true",
+                    help="CMD is a file operation (list|stat|read|write|mkdir|remove|rename|mount|umount ARGS); "
+                         "write takes the content on stdin")
     ap.add_argument("--netconf", metavar="IP/PREFIX,GW,MAC,HOSTNAME",
                     help="re-identify a VM restored from a snapshot instead of running a command")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
@@ -76,6 +106,8 @@ def main():
     use_tty = args.tty and sys.stdin.isatty()
 
     sock = connect(args.uds)
+    if args.fileop:
+        return fileop(sock, cmd)
     if args.netconf:
         addr, gw, mac, host = (args.netconf.split(",") + ["", "", "", ""])[:4]
         ip, _, prefix = addr.partition("/")

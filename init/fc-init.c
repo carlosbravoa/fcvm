@@ -419,6 +419,30 @@ static void merge_main(void)
  * client with trans=fd. `owner` ("uid:gid") is who the files appear to belong
  * to, passed to the server as the attach name.
  */
+/* Mount one host directory: vsock port -> 9P mount at path. 0 or -errno. */
+static int mount_share(unsigned port, const char *path, int ro, const char *owner)
+{
+    struct sockaddr_vm addr = {.svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST, .svm_port = port};
+    int s = socket(AF_VSOCK, SOCK_STREAM, 0); /* no CLOEXEC: the kernel takes it over */
+    if (s < 0 || connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        int e = errno;
+        msg("share %s: cannot reach the host (vsock port %u): %s", path, port, strerror(e));
+        if (s >= 0)
+            close(s);
+        return -e;
+    }
+    char opts[256];
+    snprintf(opts, sizeof(opts),
+             "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=524288,cache=mmap,access=client,aname=%s",
+             s, s, owner);
+    mkdir_p(path, 0755);
+    int rc = mount("fcvm-share", path, "9p", ro ? MS_RDONLY : 0, opts) < 0 ? -errno : 0;
+    if (rc)
+        msg("share %s: mount: %s", path, strerror(-rc));
+    close(s); /* the mount holds its own reference */
+    return rc;
+}
+
 static void mount_shares(const char *owner)
 {
     char *shares = karg("fcvm.shares"), *save;
@@ -430,24 +454,7 @@ static void mount_shares(const char *owner)
         char *opt = strchr(path, ':');
         if (opt)
             *opt++ = '\0';
-        int ro = opt && strcmp(opt, "ro") == 0;
-        struct sockaddr_vm addr = {.svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST,
-                                   .svm_port = (unsigned)atoi(sh)};
-        int s = socket(AF_VSOCK, SOCK_STREAM, 0); /* no CLOEXEC: the kernel takes it over */
-        if (s < 0 || connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-            msg("share %s: cannot reach the host (vsock port %s): %s", path, sh, strerror(errno));
-            if (s >= 0)
-                close(s);
-            continue;
-        }
-        char opts[256];
-        snprintf(opts, sizeof(opts),
-                 "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=524288,cache=mmap,access=client,aname=%s",
-                 s, s, owner);
-        mkdir_p(path, 0755);
-        if (mount("fcvm-share", path, "9p", ro ? MS_RDONLY : 0, opts) < 0)
-            msg("share %s: mount: %s", path, strerror(errno));
-        close(s); /* the mount holds its own reference */
+        mount_share((unsigned)atoi(sh), path, opt && strcmp(opt, "ro") == 0, owner);
     }
 }
 
@@ -959,6 +966,194 @@ static int netconf(char **f, char *err, size_t errlen)
     return 0;
 }
 
+/*
+ * File operations for fcvm's file browser and live mounts (request type 'F'),
+ * done natively so they work in any image, even ones without sh or ls.
+ * Fields: "fcvm2", op, args...  Replies: 'D' data, 'E' error text, 'X' status
+ * (0 or an errno value).
+ *   list DIR | stat PATH   one line per entry:
+ *                          type mode uid gid size mtime name linktarget (tab-separated)
+ *   read PATH              the file's bytes as 'D' frames
+ *   write PATH MODE        'D' frames, then 'C': written to a temp file and
+ *                          renamed into place; keeps an existing file's owner
+ *                          and mode, new files take their directory's owner
+ *   mkdir PATH | remove PATH (recursive) | rename FROM TO
+ *   mount PORT PATH ro|rw  live host directory (see mount_share)
+ *   umount PATH
+ */
+static void entry_line(char *out, size_t cap, const char *dir, const char *name)
+{
+    char full[4096], target[1024] = "", clean[512];
+    struct stat st;
+    snprintf(full, sizeof(full), "%s/%s", strcmp(dir, "/") ? dir : "", name);
+    if (lstat(full, &st) < 0) {
+        *out = '\0';
+        return;
+    }
+    if (S_ISLNK(st.st_mode)) {
+        ssize_t n = readlink(full, target, sizeof(target) - 1);
+        target[n > 0 ? n : 0] = '\0';
+    }
+    snprintf(clean, sizeof(clean), "%s", name);
+    for (char *c = clean; *c; c++)
+        if (*c == '\t' || *c == '\n')
+            *c = '?';
+    for (char *c = target; *c; c++)
+        if (*c == '\t' || *c == '\n')
+            *c = '?';
+    char t = S_ISDIR(st.st_mode) ? 'd' : S_ISLNK(st.st_mode) ? 'l' : S_ISREG(st.st_mode) ? 'f' :
+             S_ISCHR(st.st_mode) ? 'c' : S_ISBLK(st.st_mode) ? 'b' : S_ISFIFO(st.st_mode) ? 'p' : 's';
+    snprintf(out, cap, "%c\t%o\t%u\t%u\t%lld\t%lld\t%s\t%s\n", t, st.st_mode & 07777, st.st_uid, st.st_gid,
+             (long long)st.st_size, (long long)st.st_mtime, clean, target);
+}
+
+static int file_op(int conn, struct buf *b, char **f, int nf)
+{
+    const char *op = f[1], *path = nf > 2 ? f[2] : "";
+    if (*(strcmp(op, "mount") ? path : nf > 3 ? f[3] : "") != '/')   /* mount: PORT PATH ro|rw */
+        return EINVAL;
+    if (!strcmp(op, "list")) {
+        DIR *d = opendir(path);
+        struct dirent *e;
+        if (!d)
+            return errno;
+        char out[65536], line[5000];
+        size_t n = 0;
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+                continue;
+            entry_line(line, sizeof(line), path, e->d_name);
+            size_t l = strlen(line);
+            if (n + l > sizeof(out)) {
+                send_frame(conn, 'D', out, n);
+                n = 0;
+            }
+            memcpy(out + n, line, l);
+            n += l;
+        }
+        closedir(d);
+        if (n)
+            send_frame(conn, 'D', out, n);
+        return 0;
+    }
+    if (!strcmp(op, "stat")) {
+        char line[5000], dir[4096];
+        snprintf(dir, sizeof(dir), "%s", path);
+        char *slash = strrchr(dir, '/');
+        const char *name = slash[1] ? slash + 1 : "";
+        if (!*name) { /* "/" itself */
+            struct stat st;
+            if (stat("/", &st) < 0)
+                return errno;
+            snprintf(line, sizeof(line), "d\t%o\t%u\t%u\t%lld\t%lld\t/\t\n", st.st_mode & 07777, st.st_uid,
+                     st.st_gid, (long long)st.st_size, (long long)st.st_mtime);
+        } else {
+            *slash = '\0';
+            entry_line(line, sizeof(line), *dir ? dir : "/", name);
+            if (!*line)
+                return ENOENT;
+        }
+        send_frame(conn, 'D', line, strlen(line));
+        return 0;
+    }
+    if (!strcmp(op, "read")) {
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        struct stat st;
+        if (fd < 0)
+            return errno;
+        if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
+            close(fd);
+            return EISDIR;
+        }
+        char data[65536];
+        ssize_t n;
+        while ((n = read(fd, data, sizeof(data))) > 0)
+            if (send_frame(conn, 'D', data, n) < 0)
+                break;
+        int e = n < 0 ? errno : 0;
+        close(fd);
+        return e;
+    }
+    if (!strcmp(op, "write")) {
+        char tmp[4200], dir[4096];
+        snprintf(dir, sizeof(dir), "%s", path);
+        char *slash = strrchr(dir, '/');
+        *slash = '\0';
+        struct stat old, parent;
+        int existed = stat(path, &old) == 0;
+        if (existed && S_ISDIR(old.st_mode))
+            return EISDIR;
+        if (stat(*dir ? dir : "/", &parent) < 0)
+            return errno;
+        snprintf(tmp, sizeof(tmp), "%s/.fcvm-upload-%d", *dir ? dir : "", getpid());
+        mode_t mode = nf > 3 ? (mode_t)strtoul(f[3], NULL, 8) : 0644;
+        int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, existed ? old.st_mode & 07777 : mode);
+        if (fd < 0)
+            return errno;
+        int done = 0, e = 0;
+        while (!done) {
+            size_t flen;
+            while (!done && (flen = frame_ready(b))) {
+                if (b->d[0] == 'D' && write_all(fd, b->d + 5, flen - 5) < 0)
+                    e = errno;
+                else if (b->d[0] == 'C')
+                    done = 1;
+                consume(b, flen);
+            }
+            if (!done && fill(b, conn) <= 0) { /* host gave up: leave nothing behind */
+                close(fd);
+                unlink(tmp);
+                return ECONNRESET;
+            }
+        }
+        if (!e) {
+            fchown(fd, existed ? old.st_uid : parent.st_uid, existed ? old.st_gid : parent.st_gid);
+            fchmod(fd, existed ? old.st_mode & 07777 : mode);
+            if (fsync(fd) < 0)
+                e = errno;
+        }
+        close(fd);
+        if (!e && rename(tmp, path) < 0)
+            e = errno;
+        if (e)
+            unlink(tmp);
+        return e;
+    }
+    if (!strcmp(op, "mkdir")) {
+        char dir[4096];
+        struct stat parent;
+        snprintf(dir, sizeof(dir), "%s", path);
+        *strrchr(dir, '/') = '\0';
+        if (mkdir(path, 0755) < 0)
+            return errno;
+        if (stat(*dir ? dir : "/", &parent) == 0)
+            chown(path, parent.st_uid, parent.st_gid);
+        return 0;
+    }
+    if (!strcmp(op, "remove")) {
+        struct stat st;
+        if (lstat(path, &st) < 0)
+            return errno;
+        if (!strcmp(path, "/"))
+            return EPERM;
+        remove_all(path);
+        return lstat(path, &st) == 0 ? EBUSY : 0;
+    }
+    if (!strcmp(op, "rename") && nf > 3)
+        return rename(path, f[3]) < 0 ? errno : 0;
+    if (!strcmp(op, "mount") && nf > 4) {
+        char *u = config_user(), owner[64] = "0:0";
+        if (u && *u) {
+            unsigned long uid = strtoul(u, &u, 10), gid = *u == ':' ? strtoul(u + 1, NULL, 10) : 0;
+            snprintf(owner, sizeof(owner), "%lu:%lu", uid, gid);
+        }
+        return -mount_share((unsigned)atoi(f[2]), f[3], strcmp(f[4], "ro") == 0, owner);
+    }
+    if (!strcmp(op, "umount"))
+        return umount2(path, MNT_DETACH) < 0 ? errno : 0;
+    return ENOSYS;
+}
+
 static void agent_session(int conn)
 {
     struct buf b = {0};
@@ -966,6 +1161,22 @@ static void agent_session(int conn)
     while (!(flen = frame_ready(&b)))
         if (fill(&b, conn) <= 0)
             _exit(0);
+    if (b.d[0] == 'F') { /* file operations */
+        char *f[8] = {0};
+        int nf = 0;
+        for (size_t i = 5; i < flen && nf < 7; i += strlen(b.d + i) + 1)
+            f[nf++] = strndup(b.d + i, flen - i);
+        consume(&b, flen);
+        int e = nf >= 2 && strcmp(f[0], "fcvm2") == 0 ? file_op(conn, &b, f, nf) : EINVAL;
+        if (e) {
+            char why[300];
+            snprintf(why, sizeof(why), "%s\n", strerror(e));
+            send_frame(conn, 'E', why, strlen(why));
+        }
+        unsigned char x[4] = {e >> 24, e >> 16, e >> 8, e};
+        send_frame(conn, 'X', x, 4);
+        _exit(0);
+    }
     if (b.d[0] == 'N') { /* netconf: re-identify after a snapshot restore */
         char *f[8] = {0}, err[300] = "";
         int nf = 0;

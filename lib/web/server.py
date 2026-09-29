@@ -16,12 +16,14 @@ same-origin Origin (against cross-site requests).
 import argparse
 import asyncio
 import base64
+import errno
 import hashlib
 import json
 import mimetypes
 import os
 import re
 import secrets
+import shutil
 import struct
 import sys
 import time
@@ -33,6 +35,8 @@ FCVM = os.path.join(ROOT, "fcvm")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 VMS = os.path.join(ROOT, "vms")
 IMAGES = os.path.join(ROOT, "images")
+BUILDS = os.path.join(ROOT, "builds")
+MAX_UPLOAD = 4 << 30
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"   # RFC 6455
@@ -82,7 +86,7 @@ class Jobs:
 
     def start(self, kind, title, args):
         self.seq += 1
-        job = {"id": self.seq, "kind": kind, "title": title, "status": "running", "log": [],
+        job = {"id": self.seq, "kind": kind, "title": title, "status": "running", "log": [], "base": 0,
                "started": time.time(), "ended": None}
         self.jobs[self.seq] = job
         asyncio.get_running_loop().create_task(self._run(job, args))
@@ -93,12 +97,21 @@ class Jobs:
                                                  stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         async for line in p.stdout:
             job["log"].append(ANSI.sub("", line.decode(errors="replace")).rstrip())
-            del job["log"][:-400]
+            if len(job["log"]) > 2000:              # keep the tail; offsets stay absolute
+                job["base"] += len(job["log"]) - 2000
+                del job["log"][:-2000]
         job["status"] = "done" if await p.wait() == 0 else "failed"
         job["ended"] = time.time()
 
     def list(self):
-        return sorted(self.jobs.values(), key=lambda j: -j["id"])[:20]
+        return [{**j, "log": j["log"][-3:]} for j in sorted(self.jobs.values(), key=lambda j: -j["id"])[:20]]
+
+    def get(self, jid, since):
+        j = self.jobs.get(jid)
+        if not j:
+            raise HTTPError(404, "no such job")
+        start = max(since - j["base"], 0)
+        return {**{k: v for k, v in j.items() if k != "log"}, "lines": j["log"][start:], "next": j["base"] + len(j["log"])}
 
 
 # --- stats ----------------------------------------------------------------------------
@@ -272,6 +285,120 @@ async def pump_ws(ws, sock_r, sock_w, on_text=None):
     await ws.close()
 
 
+# --- the exec agent's file operations (over the VM's vsock socket) -------------------
+
+def frame(kind, payload=b""):
+    return kind + struct.pack(">I", len(payload)) + payload
+
+
+async def read_frame(r):
+    hdr = await r.readexactly(5)
+    return hdr[:1], await r.readexactly(struct.unpack(">I", hdr[1:])[0])
+
+
+async def agent_open(vmdir, *fields):
+    """Connect to the VM's agent and send a file-operation request."""
+    if not os.path.exists(os.path.join(vmdir, "vsock.sock")):
+        raise HTTPError(409, "the instance is not running")
+    try:
+        r, w = await asyncio.open_unix_connection(os.path.join(vmdir, "vsock.sock"))
+    except OSError:
+        raise HTTPError(409, "the instance is not running")
+    w.write(b"CONNECT 1024\n")
+    await w.drain()
+    if not (await r.readline()).startswith(b"OK "):
+        w.close()
+        raise HTTPError(502, "the VM's exec agent is not answering")
+    w.write(frame(b"F", b"\0".join(f.encode() for f in ("fcvm2", *fields)) + b"\0"))
+    await w.drain()
+    return r, w
+
+
+async def agent_result(r, w, collect=True):
+    out, err = b"", ""
+    try:
+        while True:
+            kind, p = await read_frame(r)
+            if kind == b"D" and collect:
+                out += p
+            elif kind == b"E":
+                err += p.decode(errors="replace")
+            elif kind == b"X":
+                code = struct.unpack(">i", p)[0]
+                if code:
+                    raise HTTPError(404 if code == errno.ENOENT else 400, err.strip() or os.strerror(code))
+                return out
+    except asyncio.IncompleteReadError:
+        raise HTTPError(502, "the VM's exec agent closed the connection (restart the VM to update it?)")
+    finally:
+        w.close()
+
+
+async def agent_op(vmdir, *fields):
+    r, w = await agent_open(vmdir, *fields)
+    return await agent_result(r, w)
+
+
+def parse_entries(raw):
+    out = []
+    for line in raw.decode(errors="replace").splitlines():
+        p = line.split("\t")
+        if len(p) >= 7:
+            out.append({"type": p[0], "mode": int(p[1], 8), "uid": int(p[2]), "gid": int(p[3]), "size": int(p[4]),
+                        "mtime": int(p[5]), "name": p[6], "target": p[7] if len(p) > 7 else ""})
+    return out
+
+
+def guest_path(q):
+    path = q.get("path", "")
+    if not path.startswith("/") or "\0" in path:
+        raise HTTPError(400, "an absolute path is required")
+    return os.path.normpath(path)
+
+
+# --- build projects (builds/<name>/, or builds/<name>.json pointing at a host dir) -----
+
+TEMPLATES = {
+    "python": {
+        "Dockerfile": 'FROM python:3.13-slim\nENV PIP_ROOT_USER_ACTION=ignore\nWORKDIR /app\nCOPY requirements.txt .\n'
+                      'RUN pip install -q -r requirements.txt\nCOPY . .\nCMD ["python", "main.py"]\n',
+        "requirements.txt": "requests\n",
+        "main.py": 'import requests\nprint("hello from fcvm, requests", requests.__version__)\n',
+    },
+    "alpine": {
+        "Dockerfile": 'FROM alpine:latest\nRUN apk add --no-cache curl jq\nWORKDIR /work\nCOPY . .\nCMD ["sh"]\n',
+    },
+    "ubuntu": {
+        "Dockerfile": 'FROM ubuntu-26.04\nENV DEBIAN_FRONTEND=noninteractive\n'
+                      'RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends git curl \\\n'
+                      '    && rm -rf /var/lib/apt/lists/*\n',
+    },
+    "blank": {"Dockerfile": "FROM alpine:latest\n"},
+}
+
+
+def project_root(name):
+    if not NAME.match(name) or name.startswith("."):
+        raise HTTPError(400, "invalid project name")
+    link = os.path.join(BUILDS, f"{name}.json")
+    if os.path.exists(link):
+        with open(link) as f:
+            return json.load(f)["path"], True
+    d = os.path.join(BUILDS, name)
+    if not os.path.isdir(d):
+        raise HTTPError(404, f"no build project '{name}'")
+    return d, False
+
+
+def project_file(root, rel):
+    rel = (rel or "").lstrip("/")
+    full = os.path.realpath(os.path.join(root, rel))
+    real = os.path.realpath(root)
+    if not rel or "\0" in rel or not full.startswith(real + os.sep):
+        raise HTTPError(400, "the path must stay inside the project")
+    return full
+
+
 # --- the application -----------------------------------------------------------------
 
 class App:
@@ -280,6 +407,7 @@ class App:
         self.token = secrets.token_urlsafe(24)
         self.jobs = Jobs()
         self.stats = Stats()
+        self.last_builds = {}
 
     # auth -------------------------------------------------------------------------
     def check(self, method, path, query, headers):
@@ -310,6 +438,16 @@ class App:
             return await self.websocket(path, headers, reader, writer)
         if not path.startswith("/api/"):
             raise HTTPError(404, "not found")
+        m = re.fullmatch(r"/api/(vms|builds)/([A-Za-z0-9_][A-Za-z0-9_.-]*)/file", path)
+        if m and method == "GET" and m.group(1) == "vms":
+            return await self.download(m.group(2), query, writer)
+        if m and method == "PUT":
+            length = int(headers.get("content-length") or 0)
+            if length > MAX_UPLOAD:
+                raise HTTPError(413, "file too large")
+            fn = self.upload if m.group(1) == "vms" else self.project_upload
+            result = await fn(m.group(2), query, reader, length)
+            return 200, {"Content-Type": "application/json"}, json.dumps(result).encode()
         data = json.loads(body or b"{}") if body else {}
         result = await self.api(method, path[5:].strip("/").split("/"), query, data)
         return 200, {"Content-Type": "application/json"}, json.dumps(result).encode()
@@ -338,7 +476,7 @@ class App:
                 return await fcvm_json("inspect", name)
             case ("POST", "vms", 1):
                 return await self.launch(d)
-            case ("POST", "vms", 3):
+            case ("POST", "vms", 3) if parts[2] not in ("files", "mounts"):
                 return await self.vm_action(name, parts[2], d)
             case ("DELETE", "vms", 2):
                 await fcvm("stop", name, timeout=60)
@@ -381,6 +519,62 @@ class App:
                 return {"removed": name}
             case ("GET", "jobs", 1):
                 return self.jobs.list()
+            case ("GET", "jobs", 2):
+                return self.jobs.get(int(parts[1]), int(q.get("from", 0)))
+            # --- files in a running VM (W4)
+            case ("GET", "vms", 3) if parts[2] == "files":
+                path = guest_path(q)
+                entries = parse_entries(await agent_op(os.path.join(VMS, name), "list", path))
+                entries.sort(key=lambda e: (e["type"] != "d", e["name"].lower()))
+                return {"path": path, "entries": entries}
+            case ("POST", "vms", 3) if parts[2] == "files":
+                op, path = d.get("op"), guest_path(d)
+                if op in ("mkdir", "remove"):
+                    await agent_op(os.path.join(VMS, name), op, path)
+                elif op == "rename":
+                    await agent_op(os.path.join(VMS, name), "rename", path, guest_path({"path": d.get("to", "")}))
+                else:
+                    raise HTTPError(400, "op must be mkdir, remove or rename")
+                return {"ok": True}
+            case ("POST", "vms", 3) if parts[2] == "mounts":
+                host, path = os.path.expanduser(d.get("host", "").strip()), guest_path(d)
+                if not os.path.isabs(host):
+                    raise HTTPError(400, "the host directory must be an absolute path")
+                await fcvm_ok("mount", name, f"{host}:{path}" + (":ro" if d.get("ro") else ""))
+                return await fcvm_json("inspect", name)
+            case ("DELETE", "vms", 3) if parts[2] == "mounts":
+                await fcvm_ok("umount", name, guest_path(q))
+                return await fcvm_json("inspect", name)
+            # --- build projects (W3)
+            case ("GET", "builds", 1):
+                return self.projects()
+            case ("POST", "builds", 1):
+                return self.new_project(d)
+            case ("DELETE", "builds", 2):
+                root, external = project_root(name)
+                if external:
+                    os.unlink(os.path.join(BUILDS, f"{name}.json"))
+                else:
+                    shutil.rmtree(root)
+                return {"removed": name}
+            case ("GET", "builds", 3) if parts[2] == "files":
+                return self.project_files(name)
+            case ("GET", "builds", 3) if parts[2] == "file":
+                full = project_file(project_root(name)[0], q.get("path"))
+                if os.path.getsize(full) > 2 << 20:
+                    raise HTTPError(400, "too large to edit here")
+                with open(full, "rb") as f:
+                    data = f.read()
+                try:
+                    return {"path": q["path"], "content": data.decode()}
+                except UnicodeDecodeError:
+                    raise HTTPError(400, "not a text file")
+            case ("DELETE", "builds", 3) if parts[2] == "file":
+                full = project_file(project_root(name)[0], q.get("path"))
+                shutil.rmtree(full) if os.path.isdir(full) else os.unlink(full)
+                return {"removed": q["path"]}
+            case ("POST", "builds", 3) if parts[2] == "build":
+                return self.start_build(name, d)
             case ("GET", "presets", 1):
                 return self.presets()
         raise HTTPError(404, "unknown API endpoint")
@@ -392,6 +586,144 @@ class App:
                 name, *hosts = line.split()
                 out.append({"name": name, "hosts": hosts})
         return out
+
+    # build projects -----------------------------------------------------------------------
+    def projects(self):
+        out = []
+        os.makedirs(BUILDS, exist_ok=True)
+        names = sorted({n[:-5] if n.endswith(".json") else n for n in os.listdir(BUILDS)
+                        if not n.startswith(".") and (n.endswith(".json") or os.path.isdir(os.path.join(BUILDS, n)))})
+        for n in names:
+            try:
+                root, external = project_root(n)
+            except (HTTPError, OSError, ValueError, KeyError):
+                continue
+            last = self.last_builds.get(n)
+            job = self.jobs.jobs.get(last["job"]) if last else None
+            out.append({"name": n, "path": root, "external": external,
+                        "dockerfile": next((f for f in ("Fcvmfile", "Dockerfile") if os.path.exists(os.path.join(root, f))), None),
+                        "last": {**last, "status": job["status"] if job else "unknown"} if last else None})
+        return out
+
+    def new_project(self, d):
+        name = d.get("name", "").strip()
+        if not NAME.match(name) or name.startswith("."):
+            raise HTTPError(400, "a project name is required (letters, digits, . _ -)")
+        os.makedirs(BUILDS, exist_ok=True)
+        if os.path.exists(os.path.join(BUILDS, name)) or os.path.exists(os.path.join(BUILDS, f"{name}.json")):
+            raise HTTPError(400, f"project '{name}' already exists")
+        path = d.get("path", "").strip()
+        if path:                              # an existing directory on this host
+            path = os.path.realpath(os.path.expanduser(path))
+            if not os.path.isdir(path):
+                raise HTTPError(400, f"not a directory: {path}")
+            with open(os.path.join(BUILDS, f"{name}.json"), "w") as f:
+                json.dump({"path": path}, f)
+        else:
+            root = os.path.join(BUILDS, name)
+            os.makedirs(root)
+            for fname, content in TEMPLATES.get(d.get("template") or "blank", TEMPLATES["blank"]).items():
+                with open(os.path.join(root, fname), "w") as f:
+                    f.write(content)
+        return {"name": name}
+
+    def project_files(self, name):
+        root, _ = project_root(name)
+        files = []
+        for dp, dns, fns in os.walk(root):
+            dns[:] = sorted(x for x in dns if x not in (".git", "node_modules", "__pycache__", ".venv"))
+            for fn in sorted(fns):
+                full = os.path.join(dp, fn)
+                try:
+                    st = os.lstat(full)
+                except OSError:
+                    continue
+                files.append({"path": os.path.relpath(full, root), "size": st.st_size, "mtime": int(st.st_mtime)})
+                if len(files) >= 3000:
+                    return {"root": root, "files": files, "truncated": True}
+        return {"root": root, "files": files, "truncated": False}
+
+    def start_build(self, name, d):
+        root, _ = project_root(name)
+        tag = (d.get("tag") or name).strip()
+        if not NAME.match(tag):
+            raise HTTPError(400, "invalid image name")
+        args = ["build", "-t", tag]
+        for k, v in (d.get("build_args") or {}).items():
+            if k.strip():
+                args += ["--build-arg", f"{k.strip()}={v}"]
+        if d.get("no_cache"):
+            args.append("--no-cache")
+        if d.get("network") == "none":
+            args += ["--net", "none"]
+        elif d.get("network") == "restricted":
+            allow = [a.strip() for a in d.get("allow", []) if a.strip()]
+            if not allow:
+                raise HTTPError(400, "a restricted build network needs at least one allowed host or preset")
+            args += ["--allow", ",".join(allow)]
+        job = self.jobs.start("build", f"build {name} → {tag}", args + [root])
+        self.last_builds[name] = {"job": job["id"], "tag": tag, "started": job["started"]}
+        return job
+
+    # streamed file transfer (VM files and project uploads) ---------------------------------
+    async def download(self, name, q, writer):
+        vmdir = os.path.join(VMS, name)
+        path = guest_path(q)
+        st = parse_entries(await agent_op(vmdir, "stat", path))
+        if not st or st[0]["type"] != "f":
+            raise HTTPError(400, "not a regular file")
+        r, w = await agent_open(vmdir, "read", path)
+        fname = os.path.basename(path).replace('"', "")
+        disp = f'attachment; filename="{fname}"' if q.get("download") else "inline"
+        writer.write(("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n"
+                      f"Content-Disposition: {disp}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n").encode())
+        try:
+            while True:
+                kind, p = await read_frame(r)
+                if kind == b"D":
+                    writer.write(f"{len(p):x}\r\n".encode() + p + b"\r\n")
+                    await writer.drain()
+                elif kind == b"X":
+                    break
+            writer.write(b"0\r\n\r\n")
+            await writer.drain()
+        finally:
+            w.close()
+        return None
+
+    async def upload(self, name, q, reader, length):
+        vmdir = os.path.join(VMS, name)
+        r, w = await agent_open(vmdir, "write", guest_path(q), q.get("mode", "644"))
+        left = length
+        while left:
+            chunk = await reader.read(min(left, 1 << 16))
+            if not chunk:
+                break
+            left -= len(chunk)
+            w.write(frame(b"D", chunk))
+            await w.drain()
+        w.write(frame(b"C"))
+        await w.drain()
+        await agent_result(r, w)
+        return {"written": q["path"], "bytes": length - left}
+
+    async def project_upload(self, name, q, reader, length):
+        full = project_file(project_root(name)[0], q.get("path"))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        left = length
+        tmp = full + ".fcvm-upload"
+        with open(tmp, "wb") as f:
+            while left:
+                chunk = await reader.read(min(left, 1 << 16))
+                if not chunk:
+                    break
+                left -= len(chunk)
+                f.write(chunk)
+        if left:
+            os.unlink(tmp)
+            raise HTTPError(400, "upload interrupted")
+        os.replace(tmp, full)
+        return {"written": q["path"], "bytes": length}
 
     async def host_info(self):
         st = os.statvfs(ROOT)
@@ -549,10 +881,13 @@ class App:
             url = urllib.parse.urlsplit(target)
             query = dict(urllib.parse.parse_qsl(url.query))
             n = int(headers.get("content-length") or 0)
-            if n > 1 << 20:
-                raise HTTPError(413, "request too large")
-            body = await reader.readexactly(n) if n else b""
             try:
+                if method == "PUT":                 # uploads stream from the socket
+                    body = b""
+                elif n > 1 << 20:
+                    raise HTTPError(413, "request too large")
+                else:
+                    body = await reader.readexactly(n) if n else b""
                 result = await self.route(method, url.path, query, headers, body, reader, writer)
             except HTTPError as e:
                 result = e.status, {"Content-Type": "application/json"}, json.dumps({"error": e.message}).encode()
@@ -562,7 +897,8 @@ class App:
                 return
             status, hdrs, data = result
             reason = {200: "OK", 302: "Found", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
-                      404: "Not Found", 413: "Payload Too Large", 504: "Gateway Timeout"}.get(status, "Error")
+                      404: "Not Found", 409: "Conflict", 413: "Payload Too Large", 502: "Bad Gateway",
+                      504: "Gateway Timeout"}.get(status, "Error")
             hdrs = {**hdrs, "Content-Length": str(len(data)), "Connection": "close",
                     "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
                     "Content-Security-Policy": "default-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'"}

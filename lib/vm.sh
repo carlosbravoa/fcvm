@@ -777,6 +777,12 @@ cp_cmd() {
 
 # --- machine-readable state ------------------------------------------------------
 
+# Host memory a running VM actually uses: its Firecracker process's resident
+# set (guest RAM is only backed once the guest touches it), in bytes.
+vm_rss() {
+    awk '/^VmRSS:/ {print $2 * 1024}' "/proc/$1/status" 2>/dev/null || true
+}
+
 inspect_json() {
     local vm=$1 d state=stopped pid="" ip="" code=""
     d=$(vm_dir "$vm")
@@ -785,11 +791,13 @@ inspect_json() {
     elif [ "$(jq -r .type "$d/vm.json")" = container ]; then
         code=$(exit_code "$vm"); [ -z "$code" ] || state=exited
     fi
-    jq --arg name "$vm" --arg state "$state" --arg pid "$pid" --arg ip "$ip" --arg code "$code" \
+    local rss=""; [ -z "$pid" ] || rss=$(vm_rss "$pid")
+    jq --arg name "$vm" --arg state "$state" --arg pid "$pid" --arg ip "$ip" --arg code "$code" --arg rss "$rss" \
         --argjson disk "$(( $(stat -c %b "$d"/*.ext4 | head -1) * 512 ))" \
         --arg mode "$([ -f "$d/disk.ext4" ] && echo copy || echo overlay)" \
         --argjson chain "$(jq -n '$ARGS.positional' --args $(image_chain "$(jq -r .image "$d/vm.json")"))" \
         '{name: $name, state: $state, pid: ($pid | tonumber? // null), ip: ($ip | select(. != "") // null),
+          mem_used_bytes: ($rss | tonumber? // null),
           exit_code: ($code | tonumber? // null), image_chain: $chain, disk_mode: $mode, disk_used_bytes: $disk} + .' \
         "$d/vm.json"
 }
@@ -851,25 +859,32 @@ list_vms() {
         done | jq -s .
         return
     fi
-    local fmt='%-20s %-11s %-14s %-18s %-10s %s\n'
-    printf "$fmt" NAME STATE IP IMAGE DISK "NETWORK/PORTS/VOLUMES"
-    local vm state ip code used
+    local fmt='%-20s %-11s %-14s %-18s %-12s %-8s %s\n'
+    printf "$fmt" NAME STATE IP IMAGE "MEM" DISK "NETWORK/PORTS/VOLUMES"
+    local vm state ip code used mem alloc rss nrun=0 tot_alloc=0 tot_rss=0
     for d in "$VMS_DIR"/*/; do
         [ -f "$d/vm.json" ] || continue
         vm=$(basename "$d")
         [ $all = 1 ] || [[ $vm != _* ]] || continue   # internal (fcvm build)
         state=stopped ip=-
+        alloc=$(jq -r .mem_mib "$d/vm.json"); mem="${alloc}M"
         if vm_running "$vm"; then
             state=running; ip=$(cat "$d/ip" 2>/dev/null || echo -)
+            rss=$(( $(vm_rss "$(vm_pid "$vm")") / 1048576 ))
+            mem="${rss}M/${alloc}M"   # used / allocated
+            nrun=$((nrun + 1)); tot_alloc=$((tot_alloc + alloc)); tot_rss=$((tot_rss + rss))
         elif [ "$(jq -r .type "$d/vm.json")" = container ]; then
             code=$(exit_code "$vm"); [ -z "$code" ] || state="exited($code)"
         fi
         used=$(du -h "$d"/*.ext4 2>/dev/null | awk '{print $1; exit}')
         [ -f "$d/disk.ext4" ] && used+=" copy"
-        printf "$fmt" "$vm" "$state" "$ip" "$(jq -r .image "$d/vm.json")" "$used" \
+        printf "$fmt" "$vm" "$state" "$ip" "$(jq -r .image "$d/vm.json")" "$mem" "$used" \
             "$(jq -r '[(if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
                 + (.ports // []) + ((.volumes // []) | map("-v " + .)) | join(" ")' "$d/vm.json")"
     done
+    if [ $nrun -gt 0 ]; then
+        printf '\n%d running: %dM allocated, %dM used on the host (MEM = used/allocated)\n' "$nrun" "$tot_alloc" "$tot_rss"
+    fi
 }
 
 list_images() {

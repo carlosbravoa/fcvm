@@ -61,7 +61,7 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `base [NAME]` | builds `images/ubuntu-26.04.ext4` |
 | `import REF [NAME]` | registry image, or a local one (`docker-archive:F.tar`, `oci:DIR`, `oci-archive:F.tar`, or just a path) → `images/NAME.ext4` + `NAME.json` |
 | `build [-t NAME] [-f FILE] [--build-arg K=V] [--no-cache] [--net none\|--allow H,...] [CONTEXT]` | builds an image from a Dockerfile subset, cached per step. The result is the FROM image plus one layer |
-| `images [--all] [--json]`, `ls [--all] [--json]` | lists images (with what uses each) / VMs (state, exit code, disk use, network, ports, volumes). `--all` includes the build cache and build VMs |
+| `images [--all] [--json]`, `ls [--all] [--json]` | lists images (with what uses each) / VMs (state, exit code, memory used/allocated, disk use, network, ports, volumes). `--all` includes the build cache and build VMs |
 | `inspect VM` | the VM's details as JSON |
 | `create VM IMAGE [opts] [-- CMD...]` | VM on the shared image plus its own writable layer. `--vcpus N`, `--mem MiB`, `--disk SIZE` (layer size, default 8G sparse), `-p [BIND:]HOST:GUEST` (repeatable), `-v VOLUME:/PATH[:ro]` (repeatable, created on first use), `--net none`, `--allow HOSTS`, `--idle` (container: run nothing, stay up for `exec`), `--copy` (private full copy instead), `-- CMD` (replaces the image's CMD and keeps its ENTRYPOINT, as `docker run` does), `--entrypoint CMD` (`""` clears it) |
 | `start [-a] VM` | boots in the background, like `docker start`. `-a` attaches the console |

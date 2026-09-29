@@ -52,8 +52,8 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `start VM [-d]` | boots in the foreground (serial console) or in the background. In the foreground, a container VM's exit code becomes fcvm's |
 | `run IMAGE [-d] [opts] [-- CMD...]` | `create` + `start` for a throwaway VM, deleted when it stops |
 | `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s |
-| `exec [-i] [-t] VM CMD...` | runs a command in a running VM, like `docker exec`. Exits with its status |
-| `shell VM` | interactive shell in a running VM (bash, else sh). Same as `exec -it VM` |
+| `exec [-i] [-t] [-u USER] VM CMD...` | runs a command in a running VM, like `docker exec`. Exits with its status |
+| `shell [-u USER] VM` | interactive shell in a running VM (bash, else sh). Same as `exec -it VM` |
 | `console VM`, `ssh VM`, `rm VM` | follows the console log, connects with ssh, deletes |
 
 Settings (kernel channel, Ubuntu suite, packages, subnet, default vCPU/memory,
@@ -107,8 +107,19 @@ needed, so it works for any image, including distroless ones (as long as the
 command exists). Images built before this feature need a re-import or
 rebuild, because `fc-init` is baked into each image.
 
+`-u USER` works as in `docker exec -u`: `name`, `uid`, `name:group` or
+`uid:gid`. It is resolved inside the guest from its own `/etc/passwd` and
+`/etc/group`, so users created in the VM after import work too, along with
+their supplementary groups. An unknown name fails with Docker's message and
+exit code 126. `HOME` comes from the user's passwd entry. The working
+directory is the image's `WORKDIR`, or the user's home when there is none
+(Ubuntu images). The session's PTY is handed to the user, as `login` does,
+so `sudo`, `less` and the like can open `/dev/tty`.
+
 ```sh
 ./fcvm shell web                       # root@nginx:/#
+./fcvm shell -u root unpriv            # root shell in an image whose USER is non-root
+./fcvm exec -u postgres db psql        # as another user
 ./fcvm exec web nginx -t               # one-off command
 tar c ./site | ./fcvm exec -i web tar x -C /usr/share/nginx/html
 ```

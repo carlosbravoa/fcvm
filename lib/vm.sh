@@ -271,25 +271,35 @@ ssh_vm() {
         -o LogLevel=ERROR "root@$ip" "$@"
 }
 
-# fcvm exec [-i] [-t] VM [CMD...]: like `docker exec`, over vsock (no network or sshd needed).
+# fcvm exec [-i] [-t] [-u USER] VM [CMD...]: like `docker exec`, over vsock
+# (no network or sshd needed). USER is name|uid[:group|gid], resolved in the guest.
 exec_vm() {
-    local flags=()
+    local usage="usage: fcvm exec [-i] [-t] [-u USER] VM [CMD...]" flags=()
     while [[ ${1:-} == -* ]]; do
         case $1 in
+            -u|--user)     flags+=(-u "${2:?$usage}"); shift 2 ;;
             -i|-t|-it|-ti) [[ $1 == *i* ]] && flags+=(-i); [[ $1 == *t* ]] && flags+=(-t); shift ;;
-            *) die "unknown option $1 (usage: fcvm exec [-i] [-t] VM [CMD...])" ;;
+            *)             die "unknown option $1 ($usage)" ;;
         esac
     done
-    local vm=${1:?usage: fcvm exec [-i] [-t] VM [CMD...]}; shift
+    local vm=${1:?$usage}; shift
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" || die "VM '$vm' is not running"
     exec python3 "$FCVM_ROOT/lib/exec_client.py" "${flags[@]}" "$(vm_dir "$vm")/vsock.sock" -- "$@"
 }
 
-# fcvm shell VM: interactive shell (bash, else sh) in the VM, as the image's user.
+# fcvm shell [-u USER] VM: interactive shell (bash, else sh), as the image's user by default.
 shell_vm() {
-    local vm=${1:?usage: fcvm shell VM}
-    if [ -t 0 ]; then exec_vm -it "$vm"; else exec_vm -i "$vm"; fi
+    local usage="usage: fcvm shell [-u USER] VM" user=() vm=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -u|--user) user=(-u "${2:?$usage}"); shift 2 ;;
+            -*)        die "unknown option $1 ($usage)" ;;
+            *)         vm=$1; shift ;;
+        esac
+    done
+    [ -n "$vm" ] || die "$usage"
+    if [ -t 0 ]; then exec_vm -it "${user[@]}" "$vm"; else exec_vm -i "${user[@]}" "$vm"; fi
 }
 
 list_vms() {

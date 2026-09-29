@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run a command in a VM through the fc-init exec agent (fcvm exec / shell).
 
-  exec_client.py [-i] [-t] VSOCK_UDS [--] [CMD ARGS...]
+  exec_client.py [-i] [-t] [-u USER] VSOCK_UDS [--] [CMD ARGS...]
 
 Talks to Firecracker's vsock Unix socket: "CONNECT <port>\\n" and then the
 agent's frames (see agent_session in init/fc-init.c). No CMD means the guest's
@@ -63,6 +63,7 @@ def main():
     ap.add_argument("uds")
     ap.add_argument("-i", "--interactive", action="store_true", help="keep stdin open")
     ap.add_argument("-t", "--tty", action="store_true", help="allocate a pseudo-terminal")
+    ap.add_argument("-u", "--user", default="", help="name|uid[:group|gid], resolved in the guest")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     args = ap.parse_args()
     cmd = args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd
@@ -70,7 +71,7 @@ def main():
 
     sock = connect(args.uds)
     rows, cols = winsize()
-    fields = ["1" if use_tty else "0", str(rows), str(cols), os.environ.get("TERM", "xterm")] + cmd
+    fields = ["1" if use_tty else "0", str(rows), str(cols), os.environ.get("TERM", "xterm"), args.user] + cmd
     sock.sendall(frame(b"R", b"\0".join(f.encode() for f in fields) + b"\0"))
 
     stdin = sys.stdin.fileno() if args.interactive else None

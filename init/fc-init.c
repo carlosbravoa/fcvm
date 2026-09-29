@@ -232,6 +232,83 @@ static void setup_net(const char *hostname)
     free(pnp);
 }
 
+static int isnum(const char *s)
+{
+    return *s && strspn(s, "0123456789") == strlen(s);
+}
+
+/*
+ * Find the /etc/passwd or /etc/group entry whose name is `name` (or, with
+ * name NULL, whose id is `id`) and split it into f[]. Returns the number of
+ * fields, 0 if not found. The strings stay allocated.
+ */
+static int db_find(const char *path, const char *name, long id, char *f[7])
+{
+    char *db = slurp(path, NULL), *save;
+    for (char *line = db ? strtok_r(db, "\n", &save) : NULL; line; line = strtok_r(NULL, "\n", &save)) {
+        char *p = line;
+        int n = 0;
+        while (n < 7 && (f[n] = strsep(&p, ":")))
+            n++;
+        if (n >= 4 && (name ? strcmp(f[0], name) == 0 : strtol(f[2], NULL, 10) == id))
+            return n;
+    }
+    free(db);
+    return 0;
+}
+
+/*
+ * Docker-style USER spec (name, uid, name:group, uid:gid) -> "uid:gid[:g,g...]"
+ * with supplementary groups from /etc/group, resolved inside the guest.
+ * Returns NULL and fills err if a name is unknown.
+ */
+static char *resolve_user(const char *spec, char *err, size_t errlen)
+{
+    char *u = strdupa(spec), *g = strchr(u, ':'), *pw[7], *gr[7], *name = NULL;
+    long uid, gid = 0;
+    if (g)
+        *g++ = '\0';
+    if (db_find("/etc/passwd", isnum(u) ? NULL : u, atol(u), pw)) {
+        name = pw[0], uid = atol(pw[2]), gid = atol(pw[3]);
+    } else if (isnum(u)) {
+        uid = atol(u); /* like docker: unknown numeric uid is fine, gid 0 */
+    } else {
+        snprintf(err, errlen, "unable to find user %s: no matching entries in passwd file", u);
+        return NULL;
+    }
+    if (g && *g) {
+        if (isnum(g))
+            gid = atol(g);
+        else if (db_find("/etc/group", g, 0, gr))
+            gid = atol(gr[2]);
+        else {
+            snprintf(err, errlen, "unable to find group %s: no matching entries in group file", g);
+            return NULL;
+        }
+    }
+
+    size_t cap = 1024;
+    char *out = malloc(cap), sep = ':';
+    int n = snprintf(out, cap, "%ld:%ld", uid, gid);
+    char *db = name ? slurp("/etc/group", NULL) : NULL, *save, *msave;
+    for (char *line = db ? strtok_r(db, "\n", &save) : NULL; line; line = strtok_r(NULL, "\n", &save)) {
+        char *f[4], *p = line;
+        int k = 0;
+        while (k < 4 && (f[k] = strsep(&p, ":")))
+            k++;
+        if (k < 4 || atol(f[2]) == gid)
+            continue;
+        for (char *m = strtok_r(f[3], ",", &msave); m; m = strtok_r(NULL, ",", &msave))
+            if (strcmp(m, name) == 0 && n < (int)cap - 24) {
+                n += snprintf(out + n, cap - n, "%c%s", sep, f[2]);
+                sep = ',';
+                break;
+            }
+    }
+    free(db);
+    return out;
+}
+
 /*
  * Become the image's user and exec argv with the image's env and workdir.
  * Shared by the main process and by `fcvm exec` sessions. No workdir means
@@ -261,20 +338,36 @@ static void exec_as(char **argv, char **env, const char *workdir, char *user,
         putenv(*e);
     if (!getenv("PATH"))
         setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
-    if (!getenv("HOME"))
-        setenv("HOME", getuid() == 0 ? "/root" : "/", 1);
+    if (!getenv("HOME")) { /* from passwd, as docker does */
+        char *pw[7];
+        int n = db_find("/etc/passwd", NULL, getuid(), pw);
+        setenv("HOME", n >= 6 && *pw[5] ? pw[5] : getuid() == 0 ? "/root" : "/", 1);
+    }
     if (term && *term)
         setenv("TERM", term, 1);
 
-    if (!workdir || !*workdir)
-        workdir = getenv("HOME");
-    mkdir(workdir, 0755);
-    if (chdir(workdir) < 0)
-        msg("chdir %s: %s", workdir, strerror(errno));
+    if (workdir && *workdir) { /* image WORKDIR: created if missing, like docker */
+        mkdir(workdir, 0755);
+        if (chdir(workdir) < 0)
+            msg("chdir %s: %s", workdir, strerror(errno));
+    } else if (chdir(getenv("HOME")) < 0) { /* no WORKDIR: home, if it exists */
+        chdir("/");
+    }
 
     execvp(argv[0], argv);
     msg("exec %s: %s", argv[0], strerror(errno));
     _exit(127);
+}
+
+/* Make the terminal on fd owned by the "uid:gid..." user, as login/sshd do. */
+static void give_tty(int fd, const char *user)
+{
+    if (!user || !*user)
+        return;
+    char *end;
+    uid_t uid = strtoul(user, &end, 10);
+    fchown(fd, uid, *end == ':' ? strtoul(end + 1, NULL, 10) : 0);
+    fchmod(fd, 0620);
 }
 
 static pid_t start_main(char **argv, char **env, const char *workdir,
@@ -287,6 +380,9 @@ static pid_t start_main(char **argv, char **env, const char *workdir,
     sigprocmask(SIG_SETMASK, oldmask, NULL);
     setsid();
     ioctl(0, TIOCSCTTY, 1); /* so Ctrl-C on the serial console reaches it */
+    /* Apps that reopen the console via /dev/stdout -> /proc/self/fd/1
+     * (nginx logs, etc.) need the image user to own it. */
+    give_tty(0, user);
     exec_as(argv, env, workdir ? workdir : "/", user, NULL);
     return -1;
 }
@@ -306,7 +402,8 @@ static void shutdown_vm(void)
  * and runs one command per connection, like `docker exec`.
  *
  * Frames in both directions: 1 type byte, 4-byte big-endian length, payload.
- *   host -> guest  R request: NUL-separated tty("0"/"1"), rows, cols, TERM, argv...
+ *   host -> guest  R request: NUL-separated tty("0"/"1"), rows, cols, TERM,
+ *                    user ("" = image default; name|uid[:group|gid]), argv...
  *                  D stdin data    C stdin closed    W window size (u16 rows, u16 cols)
  *   guest -> host  D stdout data   E stderr data     X exit status (be32)
  */
@@ -390,21 +487,21 @@ static void agent_session(int conn)
     if (b.d[0] != 'R')
         _exit(0);
 
-    /* Request: tty, rows, cols, TERM, argv... */
+    /* Request: tty, rows, cols, TERM, user, argv... */
     char *fields[260];
     int nf = 0;
     for (size_t i = 5; i < flen && nf < 259; i += strlen(b.d + i) + 1)
         fields[nf++] = strndup(b.d + i, flen - i);
     consume(&b, flen);
-    if (nf < 4)
+    if (nf < 5)
         _exit(0);
     int tty = fields[0][0] == '1';
     struct winsize ws = {.ws_row = atoi(fields[1]), .ws_col = atoi(fields[2])};
     char *term = fields[3];
-    char **argv = &fields[4];
+    char **argv = &fields[5];
     fields[nf] = NULL;
     static char *bash[] = {"/bin/bash", NULL}, *sh[] = {"/bin/sh", NULL};
-    if (nf == 4)
+    if (nf == 5)
         argv = access("/bin/bash", X_OK) == 0 ? bash : sh;
 
     size_t elen = 0;
@@ -412,6 +509,16 @@ static void agent_session(int conn)
     char **env = ebuf && elen ? split0(ebuf, elen) : NULL;
     char *workdir = trim(slurp(CONF "workdir", NULL));
     char *user = trim(slurp(CONF "user", NULL));
+    if (*fields[4]) { /* exec -u */
+        char why[300];
+        if (!(user = resolve_user(fields[4], why, sizeof(why)))) {
+            unsigned char x[4] = {0, 0, 0, 126};
+            strcat(why, "\n");
+            send_frame(conn, 'E', why, strlen(why));
+            send_frame(conn, 'X', x, 4);
+            _exit(0);
+        }
+    }
 
     int in = -1, out = -1, err = -1;
     pid_t pid;
@@ -425,6 +532,7 @@ static void agent_session(int conn)
             setsid();
             int s = open(slave, O_RDWR);
             ioctl(s, TIOCSCTTY, 0);
+            give_tty(s, user);
             dup2(s, 0), dup2(s, 1), dup2(s, 2);
             if (s > 2)
                 close(s);

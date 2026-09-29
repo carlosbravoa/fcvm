@@ -30,8 +30,10 @@ VMs:
                              create + start a throwaway VM (deleted when it stops)
   stop VM                    ask the guest to shut down (Ctrl-Alt-Del), kill after a timeout
   console VM                 tail the console log of a background VM
-  exec [-i] [-t] VM CMD...   run a command in a running VM, like docker exec (over vsock)
-  shell VM                   interactive shell in a running VM (= exec -it VM bash|sh)
+  exec [-i] [-t] [-u USER] VM CMD...
+                             run a command in a running VM, like docker exec (over vsock);
+                             USER is name|uid[:group|gid], default: the image's USER
+  shell [-u USER] VM         interactive shell in a running VM (= exec -it VM bash|sh)
   ssh VM [args]              ssh root@VM (base images)
   ls                         list VMs
   rm VM                      delete a VM

@@ -86,3 +86,14 @@ vm_dns() {
     done
     echo 1.1.1.1
 }
+
+# One-time migration: image/VM types were named "container" and "systemd"
+# before they became "app" and "system". Cheap no-op once nothing old is left.
+migrate_types() {
+    local f
+    for f in $(grep -l -E '"type": *"(container|systemd)"' "$IMAGES_DIR"/*.json "$VMS_DIR"/*/vm.json 2>/dev/null); do
+        jq '.type |= (if . == "container" then "app" elif . == "systemd" then "system" else . end)' "$f" > "$f.tmp" &&
+            mv "$f.tmp" "$f"
+    done
+}
+migrate_types

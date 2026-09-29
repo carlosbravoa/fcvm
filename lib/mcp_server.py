@@ -28,7 +28,7 @@ PINNED_NETWORK = os.environ.get("FCVM_MCP_NETWORK", "").strip()
 INSTRUCTIONS = """fcvm runs Firecracker microVMs: real kernel isolation, ~1 s to boot a container
 image, ~2 s for Ubuntu. Typical loop: images (or pull_image) -> create_sandbox ->
 exec / write_file / read_file / copy_* -> commit_vm to save a prepared state ->
-remove_vm. build_image turns a Dockerfile into a reusable image. Container sandboxes run as the image's USER; pass user="root" to exec
+remove_vm. build_image turns a Dockerfile into a reusable image. App sandboxes run as the image's USER; pass user="root" to exec
 for installs. Network: "full" (NAT), "none", or an allowlist of hosts/@presets
 (@pypi, @npm, @github, ...) enforced by a host-side HTTP(S) proxy; the sandbox's
 http(s)_proxy variables are preset, and egress_log shows what was allowed or
@@ -134,7 +134,7 @@ def t_create_sandbox(image, name=None, command=None, vcpus=None, mem_mib=None, p
     for v in volumes or []:
         args += ["-v", v]
     args += network_args(network)
-    if img["type"] == "container":
+    if img["type"] == "app":
         args += ["--", *command] if command else ["--idle"]
     fcvm(*args)
     fcvm("start", name)
@@ -236,7 +236,7 @@ def t_volumes():
 S = {"type": "string"}
 I = {"type": "integer"}
 TOOLS = {
-    "images": (t_images, "List VM images (container images imported from registries, the Ubuntu base, committed images).", {}, []),
+    "images": (t_images, "List VM images. type 'app': runs the image's command as the VM's single process (imported container images); type 'system': boots systemd like a full machine (the Ubuntu base).", {}, []),
     "pull_image": (t_pull_image, "Import an image from Docker Hub or any OCI registry (e.g. python:3.13, ghcr.io/org/app:tag), or a local docker save / OCI archive path.",
                    {"ref": S, "name": {**S, "description": "image name (default: derived from ref)"}}, ["ref"]),
     "build_image": (t_build_image,
@@ -250,7 +250,7 @@ TOOLS = {
     "create_sandbox": (t_create_sandbox,
         "Create and boot a VM from an image. Container images stay up idle for exec unless a command is given. Returns the VM's details (name, ip).",
         {"image": S, "name": S,
-         "command": {"type": "array", "items": S, "description": "run this instead of staying idle (container images)"},
+         "command": {"type": "array", "items": S, "description": "run this instead of staying idle (app images)"},
          "vcpus": I, "mem_mib": I,
          "ports": {"type": "array", "items": S, "description": "publish TCP ports, [BIND:]HOST:GUEST"},
          "volumes": {"type": "array", "items": S, "description": "named volumes, NAME:/PATH[:ro] (created on first use)"},

@@ -22,19 +22,21 @@ Build:
   all                        firecracker + kernel + init + base
 
 VMs:
-  images [--all] [--json]    list images (--all: include the build cache)
+  images [--all] [--json]    list images (--all: include the build cache). Types: app = runs
+                             the image's command as the VM's single process; system =
+                             boots systemd like a full machine
   create VM IMAGE [opts] [-- CMD...]
                              create a VM: IMAGE's disk is shared read-only, writes go to
                              a per-VM layer. opts: --vcpus N --mem MiB --disk SIZE
                              --copy (private full copy) -p [BIND:]HOST:GUEST (publish TCP)
-                             -v VOLUME:/PATH[:ro] (named volume) --idle (container: no
+                             -v VOLUME:/PATH[:ro] (named volume) --idle (app images: no
                              command, stays up for exec) --net none (no network)
                              --allow HOST,*.DOMAIN,@PRESET (egress allowlist via proxy)
   start [-a] VM              boot a VM in the background; -a attaches its console
   run IMAGE [-d] [opts] [-- CMD...]
-                             throwaway VM, deleted when it stops. Container images: attached
+                             throwaway VM, deleted when it stops. App images: attached
                              like docker run (exit code passed through; Ctrl-] detaches).
-                             Ubuntu images: drops into a shell; exit stops and deletes it
+                             System images: drops into a shell; exit stops and deletes it
   stop VM                    ask the guest to shut down (Ctrl-Alt-Del), kill after a timeout
   console VM                 attach to the serial console (Ctrl-] detaches)
   logs [-f] VM               console output of the current or last boot

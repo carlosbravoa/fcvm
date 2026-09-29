@@ -244,7 +244,7 @@ class Builder:
             return
         self.drop_vm()
         self.vm = f"_build-{os.getpid()}"
-        idle = ["--idle"] if image_json(base).get("type", "container") == "container" else []   # systemd stays up
+        idle = ["--idle"] if image_json(base).get("type", "app") == "app" else []   # system images stay up
         fcvm("create", self.vm, base, *idle, *self.net_flags())
         fcvm("start", self.vm)
         self.vm_base = base
@@ -312,7 +312,7 @@ class Builder:
             die("FROM scratch is not supported (a VM needs a base filesystem)")
         base = self.resolve_from(from_words[0])
         base_meta = image_json(base)
-        systemd = base_meta.get("type") == "systemd"
+        systemd = base_meta.get("type") == "system"
         steps = steps[i + 1:]
 
         cfg = {
@@ -337,7 +337,7 @@ class Builder:
                 if kw not in FS_STEPS | META_STEPS:
                     die(f"{label}: '{kw}' is not supported by fcvm build")
                 if kw in ("CMD", "ENTRYPOINT") and systemd:
-                    die(f"{label}: {kw} has no effect on systemd images")
+                    die(f"{label}: {kw} has no effect on system images (systemd is the init)")
 
                 # --- metadata-only steps
                 if kw in META_STEPS:

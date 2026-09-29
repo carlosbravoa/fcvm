@@ -65,7 +65,7 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `inspect VM` | the VM's details as JSON |
 | `create VM IMAGE [opts] [-- CMD...]` | VM on the shared image plus its own writable layer. `--vcpus N`, `--mem MiB`, `--disk SIZE` (layer size, default 8G sparse), `-p [BIND:]HOST:GUEST` (repeatable), `-v VOLUME:/PATH[:ro]` (repeatable, created on first use), `--net none`, `--allow HOSTS`, `--idle` (container: run nothing, stay up for `exec`), `--copy` (private full copy instead), `-- CMD` (replaces the image's CMD and keeps its ENTRYPOINT, as `docker run` does), `--entrypoint CMD` (`""` clears it) |
 | `start [-a] VM` | boots in the background, like `docker start`. `-a` attaches the console |
-| `run IMAGE [-d] [opts] [-- CMD...]` | throwaway VM, deleted when it stops. **Container images**: attached like `docker run`: you see the output, Ctrl-C goes to the app, Ctrl-] detaches, and fcvm exits with the container's exit code. **Ubuntu images**: boots and opens `fcvm shell` (or runs CMD); when the shell or CMD ends, the VM is stopped and deleted. `-d`: background |
+| `run IMAGE [-d] [opts] [-- CMD...]` | throwaway VM, deleted when it stops. **App images**: attached like `docker run`: you see the output, Ctrl-C goes to the app, Ctrl-] detaches, and fcvm exits with the container's exit code. **System images**: boots and opens `fcvm shell` (or runs CMD); when the shell or CMD ends, the VM is stopped and deleted. `-d`: background |
 | `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s |
 | `exec [-i] [-t] [-u USER] [-w DIR] [-e K=V]... [--timeout S] VM CMD...` | runs a command in a running VM, like `docker exec`. Exits with its status, or 124 on timeout |
 | `cp [-L] SRC DST` | copies files or directories into or out of a running VM (`VM:PATH` on one side), like `docker cp` |
@@ -86,6 +86,40 @@ extra kernel args) live at the top of `lib/common.sh`. Override them in
 `fcvm.conf` or the environment, e.g. `KERNEL_CHANNEL=longterm ./fcvm kernel`
 or `VM_KERNEL_ARGS=loglevel=7 ./fcvm run alpine-latest`.
 
+## Image types: app and system
+
+Every fcvm image, of either type, boots as a full Firecracker microVM under
+KVM: its own kernel, virtual CPUs, memory, disks and network card. No Docker,
+containerd or runc is involved. The type only says what runs as PID 1:
+
+| | **app** | **system** |
+|---|---|---|
+| comes from | container images (Docker Hub, registries, `docker save`), and builds and commits on them | the Ubuntu base (`fcvm base`), and builds and commits on it |
+| PID 1 | `fc-init` runs the image's ENTRYPOINT + CMD as its user, with its env and workdir, like `docker run` | `fc-init` sets up the root and hands PID 1 to systemd: journald, udev, dbus, sshd, a login prompt |
+| lifetime | as long as that process; its exit code is fcvm's | until stopped or shut down from inside |
+| boot / memory | ~0.5 s, tens of MB | ~2.3 s, more |
+| `run IMAGE` | attached to the app's output | opens a shell; `exit` deletes the VM |
+| `-- CMD`, `--idle`, `--entrypoint` | yes | no |
+| good for | apps, one-off commands, agent sandboxes | long-lived dev machines, services, cron |
+
+Compared with Docker running the same image, an app VM has the same
+filesystem, command, env and user. The difference is isolation: Docker shares
+the host kernel (namespaces, cgroups), while an app VM has its own guest
+kernel behind hardware virtualization. It costs about 0.5 s of boot and a few
+tens of MB, which is why this suits running untrusted code. Images made before
+the rename (`container`, `systemd`) are migrated automatically.
+
+**Kernel.** Every VM, app or system, runs the one guest kernel built by
+`fcvm kernel` (`kernels/vmlinux`, the newest build; 7.2.8 at the time of
+writing), each VM its own instance of it. Images contain no kernel, not even
+the Ubuntu base, and whatever kernel an image was built for doesn't matter,
+as with Docker. So `uname -r` shows the fcvm kernel in every VM, and
+upgrading means `fcvm kernel`, with no image rebuilds, taking effect at each
+VM's next boot. The kernel is monolithic with no loadable modules, so
+`modprobe` does nothing: features come from `kernel/microvm-x86_64.config`
+(virtio, ext4, overlayfs, cgroups v2, namespaces, nftables, ...). Add to that
+fragment, rebuild, and restart VMs to get more.
+
 ## How it fits together
 
 ```
@@ -101,7 +135,7 @@ registry ─► oci_import.py ─► flattened tar + /.fcvm ─► mkfs.ext4 -d 
 no init or agent, so upgrading `fc-init` never needs an image rebuild.
 `fc-init` assembles the root from drives named on the kernel command line,
 then switches into it (the same moves as `switch_root`). After that it either
-runs the container config or, for Ubuntu images (`fcvm.exec=/sbin/init`),
+runs the app image's command or, for system images (`fcvm.exec=/sbin/init`),
 execs systemd as PID 1. Drives are attached in order, `vda`, `vdb`, ...:
 
 | drive | what | argument |
@@ -167,12 +201,12 @@ writes everything to `vms/<vm>/console.log`, keeps a scrollback, and serves
 clients on `vms/<vm>/console.sock`, so consoles attach and detach (Ctrl-])
 without affecting the VM. When Firecracker exits, the relay runs
 `fcvm _reap <vm>`, which records the container's exit code for a waiting
-`run`, stops the port forwarder, and deletes throwaway VMs. Ubuntu images
+`run`, stops the port forwarder, and deletes throwaway VMs. System images
 have no serial autologin: the console shows boot messages and a `login:`
 prompt, and you get in with `fcvm shell` or `fcvm ssh`.
 
 **exec / shell.** Every VM has a vsock device, and `fc-init` runs an exec
-agent on vsock port 1024. In container VMs it is forked by PID 1. In Ubuntu
+agent on vsock port 1024. In app VMs it is forked by PID 1. In system
 images it runs as `fcvm-agent.service` (`/.fcvm/bin/fc-init --agent`, a copy
 `fc-init` puts on a tmpfs at boot). The host side
 (`lib/exec_client.py`) connects through Firecracker's vsock Unix socket
@@ -192,7 +226,7 @@ so a mismatch between host and VM fails clearly.
 their supplementary groups. An unknown name fails with Docker's message and
 exit code 126. `HOME` comes from the user's passwd entry. The working
 directory is the image's `WORKDIR`, or the user's home when there is none
-(Ubuntu images). The session's PTY is handed to the user, as `login` does,
+(system images). The session's PTY is handed to the user, as `login` does,
 so `sudo`, `less` and the like can open `/dev/tty`.
 
 ```sh
@@ -203,7 +237,7 @@ so `sudo`, `less` and the like can open `/dev/tty`.
 ./fcvm cp ./site web:/usr/share/nginx/html   # tar over exec; needs sh and tar in the image
 ```
 
-**Container VMs.** The importer keeps the image config (Entrypoint, Cmd, Env,
+**App VMs.** The importer keeps the image config (Entrypoint, Cmd, Env,
 WorkingDir, User) in `/.fcvm/`. `fc-init` mounts `/proc`, `/sys`, `/dev`, devpts, cgroup2 and friends, writes
 `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf`, drops to the image
 user, and execs the entrypoint. It forwards signals and reaps zombies. When
@@ -231,7 +265,7 @@ bridge-isolated, so restricted VMs can't see each other either. On that port,
 the VM by source address and checks the host name against the VM's
 allowlist: `vms/.egress/<ip>.json`, re-read on every request. `fc-init`
 exports `http(s)_proxy` to the container's command and every exec session,
-and systemd images get them through `systemd.setenv=`. So pip, npm, apt,
+and system images get them through `systemd.setenv=`. So pip, npm, apt,
 apk, git, curl and Go work unchanged. Names are resolved on the host, so
 split-DNS and VPN names work too. Every decision goes to
 `vms/<vm>/egress.log`. A denied plain-HTTP request gets a 403 that names the
@@ -347,7 +381,7 @@ claude mcp add fcvm -- /path/to/fcvm mcp
 | tool | does |
 |---|---|
 | `images`, `pull_image` | list images; import from Docker Hub or any registry |
-| `create_sandbox` | create and boot a VM. Container images stay idle for `exec` unless given a command |
+| `create_sandbox` | create and boot a VM. App images stay idle for `exec` unless given a command |
 | `exec` | run a shell command (`command`) or exact `argv`, with `workdir`, `env`, `user`, `stdin` and `timeout` (default 300 s). Returns `exit_code`, `stdout`, `stderr` |
 | `write_file`, `read_file` | text files in the VM |
 | `copy_to_vm`, `copy_from_vm` | host files and directories in or out (`fcvm cp`) |
@@ -404,7 +438,7 @@ could adopt. Orchestration is out of scope for now. Items marked ✅ are done.
 ### Agentic development
 
 Where fcvm already fits: many short-lived, disposable, isolated sandboxes.
-`create` takes 0.1 s, a container VM runs in about 1 s, and Ubuntu boots in
+`create` takes 0.1 s, an app VM runs in about 1 s, and Ubuntu boots in
 2.3 s. Docker Hub works as the toolchain catalogue, behind a real kernel
 boundary. `exec` has real exit codes and separate stdout/stderr, which maps
 directly onto an agent's "run command" tool. Multipass is still better for

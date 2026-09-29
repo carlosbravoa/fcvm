@@ -26,6 +26,6 @@ img=$IMAGES_DIR/$name.ext4
 rm -f "$img"
 mkfs.ext4 -q -F -L rootfs -N "$inodes" -d "$tar" "$img" "${size_mb}M"
 chmod a-w "$img"   # shared read-only by every VM created from it
-jq --arg type container --arg size "${size_mb}M" '. + {type: $type, disk_size: $size}' \
+jq --arg type app --arg size "${size_mb}M" '. + {type: $type, disk_size: $size}' \
     "$IMAGES_DIR/$name.json" > "$IMAGES_DIR/$name.json.tmp" && mv "$IMAGES_DIR/$name.json.tmp" "$IMAGES_DIR/$name.json"
 log "image ready: $img (${size_mb} MiB). Try: ./fcvm run $name"

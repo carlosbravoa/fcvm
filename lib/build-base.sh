@@ -77,5 +77,5 @@ rm -f "$img"
 mkfs.ext4 -q -F -L rootfs -d "$tar" "$img" "$BASE_SIZE"
 chmod a-w "$img"   # shared read-only by every VM created from it
 jq -n --arg suite "$UBUNTU_SUITE" --arg size "$BASE_SIZE" \
-    '{type: "systemd", ref: ("ubuntu:" + $suite), disk_size: $size}' > "$IMAGES_DIR/$name.json"
+    '{type: "system", ref: ("ubuntu:" + $suite), disk_size: $size}' > "$IMAGES_DIR/$name.json"
 log "image ready: $img. Try: ./fcvm create dev $name && ./fcvm start dev"

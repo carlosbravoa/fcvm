@@ -87,7 +87,7 @@ create() {
     vm_exists "$vm" && die "VM '$vm' already exists"
     local meta type
     meta=$(image_json "$image")
-    type=$(jq -r '.type // "container"' "$meta")
+    type=$(jq -r '.type // "app"' "$meta")
     if [ $idle = 1 ]; then
         [ ${#argv[@]} -eq 0 ] && [ $set_entrypoint = 0 ] || die "--idle excludes -- CMD and --entrypoint"
         argv=(/.fcvm/bin/fc-init --idle)   # stay up for exec; stop ends it cleanly
@@ -99,7 +99,7 @@ create() {
         argv=("${entrypoint[@]}" "${argv[@]}")
         [ ${#argv[@]} -gt 0 ] || die "nothing to run: empty entrypoint and command"
     fi
-    [ ${#argv[@]} -eq 0 ] || [ "$type" = container ] || die "-- CMD and --idle only apply to container images"
+    [ ${#argv[@]} -eq 0 ] || [ "$type" = app ] || die "-- CMD, --idle and --entrypoint only apply to app images (system images boot systemd)"
     [ $copy = 0 ] || [ -z "$(jq -r '.parent // empty' "$meta")" ] || die "--copy needs a base image; '$image' is a committed layer"
     if [ ${#allow[@]} -gt 0 ]; then
         [ "$netmode" = full ] || die "--allow and --net none are mutually exclusive"
@@ -252,7 +252,7 @@ start() {
             IP=$NET_R_PREFIX.$((10 + TAP_INDEX))
             local proxy=http://$NET_R_PREFIX.1:$EGRESS_PORT v
             args+=" ip=$IP::$NET_R_PREFIX.1:255.255.255.0:$vm:eth0:off:$NET_R_PREFIX.1 fcvm.proxy=$proxy"
-            if [ "$type" = systemd ]; then
+            if [ "$type" = system ]; then
                 for v in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; do args+=" systemd.setenv=$v=$proxy"; done
                 args+=" systemd.setenv=no_proxy=localhost,127.0.0.1"
             fi
@@ -310,8 +310,8 @@ start() {
         vols+=("$dev:${vol#*:}")
     done
     [ ${#vols[@]} -eq 0 ] || args+=" fcvm.vols=$(IFS=,; echo "${vols[*]}")"
-    [ "$type" = systemd ] && args+=" fcvm.exec=/sbin/init"
-    if [ "$type" = container ]; then
+    [ "$type" = system ] && args+=" fcvm.exec=/sbin/init"
+    if [ "$type" = app ]; then
         args+=" quiet loglevel=1"   # keep the console to the app's output
     else
         args+=" systemd.hostname=$vm"
@@ -356,7 +356,7 @@ start() {
     if [ $attach = 1 ]; then
         attach_vm "$vm"
     elif [ -z "${QUIET_START:-}" ]; then
-        log "running (pid $pid). $([ "$type" = systemd ] && echo "fcvm shell $vm" || echo "fcvm console $vm") | fcvm logs $vm | fcvm stop $vm"
+        log "running (pid $pid). $([ "$type" = system ] && echo "fcvm shell $vm" || echo "fcvm console $vm") | fcvm logs $vm | fcvm stop $vm"
     fi
 }
 
@@ -443,10 +443,10 @@ run() {
     done
     local type vm meta
     meta=$(image_json "$image")
-    type=$(jq -r '.type // "container"' "$meta")
+    type=$(jq -r '.type // "app"' "$meta")
     vm=${image%%-*}-$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')
 
-    if [ "$type" = container ]; then
+    if [ "$type" = app ]; then
         EPHEMERAL=true create "$vm" "$image" "${opts[@]}" ${argv[@]+-- "${argv[@]}"}
         if [ $bg = 1 ]; then start "$vm"; return; fi
         QUIET_START=1 start "$vm"
@@ -615,7 +615,7 @@ commit() {
         [ "$f" = argv ] && [ -z "$pre" ] && continue   # --copy disk: argv is the image's own
         debugfs -w -R "rm $pre/.fcvm/$f" "$out" >/dev/null 2>&1 || true
     done
-    [ "$(jq -r .type "$dir/vm.json")" != systemd ] || scrub_identity "$out" "$pre"
+    [ "$(jq -r .type "$dir/vm.json")" != system ] || scrub_identity "$out" "$pre"
     chmod a-w "$out"
     if [ -f "$dir/disk.ext4" ]; then
         jq --arg vm "$vm" --arg parent "$parent" 'del(.parent) + {ref: "commit of \($vm) (from \($parent))"}' \
@@ -788,7 +788,7 @@ inspect_json() {
     d=$(vm_dir "$vm")
     if vm_running "$vm"; then
         state=running pid=$(vm_pid "$vm") ip=$(cat "$d/ip" 2>/dev/null || true)
-    elif [ "$(jq -r .type "$d/vm.json")" = container ]; then
+    elif [ "$(jq -r .type "$d/vm.json")" = app ]; then
         code=$(exit_code "$vm"); [ -z "$code" ] || state=exited
     fi
     local rss=""; [ -z "$pid" ] || rss=$(vm_rss "$pid")
@@ -873,7 +873,7 @@ list_vms() {
             rss=$(( $(vm_rss "$(vm_pid "$vm")") / 1048576 ))
             mem="${rss}M/${alloc}M"   # used / allocated
             nrun=$((nrun + 1)); tot_alloc=$((tot_alloc + alloc)); tot_rss=$((tot_rss + rss))
-        elif [ "$(jq -r .type "$d/vm.json")" = container ]; then
+        elif [ "$(jq -r .type "$d/vm.json")" = app ]; then
             code=$(exit_code "$vm"); [ -z "$code" ] || state="exited($code)"
         fi
         used=$(du -h "$d"/*.ext4 2>/dev/null | awk '{print $1; exit}')
@@ -897,7 +897,7 @@ list_images() {
             [ $all = 1 ] || [[ $name != _* ]] || continue
             jq --arg name "$name" --argjson used "$(( $(stat -c %b "${j%.json}.ext4") * 512 ))" \
                 --argjson users "$(jq -n '$ARGS.positional' --args $(image_users "$name"))" \
-                '{name: $name, type: (.type // "container"), parent: (.parent // null), ref: (.ref // null),
+                '{name: $name, type: (.type // "app"), parent: (.parent // null), ref: (.ref // null),
                   disk_used_bytes: $used, used_by: $users} + (. | {argv, env, workdir, user, exposed_ports} | with_entries(select(.value != null)))' "$j"
         done | jq -s .
         return
@@ -907,7 +907,7 @@ list_images() {
         [ -f "$j" ] || continue
         name=$(basename "$j" .json)
         [ $all = 1 ] || [[ $name != _* ]] || continue   # build cache (fcvm build)
-        printf '%-28s %-10s %-8s %-8s %s\n' "$name" "$(jq -r '.type // "container"' "$j")" \
+        printf '%-28s %-10s %-8s %-8s %s\n' "$name" "$(jq -r '.type // "app"' "$j")" \
             "$(du -h "${j%.json}.ext4" | cut -f1)" "$(image_users "$name" | wc -l)" \
             "$(jq -r 'if .parent then "layer on \(.parent)" else (.ref // "-") end' "$j")"
     done

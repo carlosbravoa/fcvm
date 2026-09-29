@@ -55,11 +55,24 @@ without it. Building images uses user namespaces and `mkfs.ext4 -d
 
 ## Quick start
 
-```sh
-./fcvm host-setup          # apt packages, KVM access (sudo, once)
-./fcvm net-up              # bridge + taps + NAT (sudo, again after every reboot)
-./fcvm all                 # firecracker + kernel + init + Ubuntu base image
+From a fresh clone to a shell in a microVM (x86_64 Linux with KVM):
 
+```sh
+./fcvm host-setup            # packages and /dev/kvm access (sudo, once)
+./fcvm net-up                # bridges, taps, NAT and isolation rules (sudo, after every reboot)
+./fcvm firecracker           # download Firecracker into bin/
+./fcvm kernel                # build the guest kernel from kernel.org (a few minutes, once)
+./fcvm import alpine:latest  # any OCI image; becomes the fcvm image "alpine-latest"
+./fcvm run alpine-latest     # a shell in a throwaway VM; `exit` stops and deletes it
+```
+
+Once that works, `./fcvm run alpine-latest -- echo hello` boots a VM, runs the
+command and cleans up in about a second and a half.
+
+## A tour
+
+```sh
+./fcvm base                # a full Ubuntu 26.04 system image (systemd, ssh); `./fcvm all` = firecracker + kernel + init + base
 ./fcvm create dev ubuntu-26.04
 ./fcvm start dev           # boots in the background
 ./fcvm shell dev           # root shell; `exit` leaves the VM running
@@ -71,6 +84,7 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 ./fcvm run alpine-latest -- sh -c 'exit 3'; echo $?   # prints 3
 
 # a sandbox for work: prepare once, commit, start copies from that state
+./fcvm import python:3.13-slim
 ./fcvm create box python-3.13-slim --idle -v cache:/root/.cache
 ./fcvm start box && ./fcvm cp ./myproject box:/work
 ./fcvm exec -w /work box pip install -r requirements.txt

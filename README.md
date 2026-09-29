@@ -3,6 +3,7 @@
 `fcvm` builds everything a Firecracker microVM needs and turns container images
 into VMs:
 
+**Build it yourself**
 - **Kernel**: fetches the newest kernel from kernel.org (stable by default),
   starts from `allnoconfig` and applies a small fragment
   (`kernel/microvm-x86_64.config`). The result is a ~27 MB monolithic `vmlinux`
@@ -10,19 +11,40 @@ into VMs:
 - **Ubuntu 26.04 base image**: minbase + systemd + ssh, built rootless with
   `mmdebstrap`.
 - **Container import**: pulls any image from Docker Hub (or ghcr.io, quay.io,
-  ...) and flattens its layers. A small static init (`init/fc-init.c`, booted
-  from an initramfs) runs the image's entrypoint with its env, workdir and
-  user.
-- **Agent-friendly**: `exec` with exit codes, timeouts and separate
-  stdout/stderr, `cp`, `commit` (snapshot a prepared VM as an image), named
-  volumes, `--json` output, and an MCP server (`fcvm mcp`) that exposes all
-  of it as tools.
-- **Networking**: one host bridge with NAT and a pool of taps owned by your
-  user, so VMs start without root.
+  ...) with digest verification and flattens its layers. A small static init
+  (`init/fc-init.c`, booted from an initramfs) runs the image's entrypoint
+  with its env, workdir and user.
+- **Dockerfile builds** (`fcvm build`, a Dockerfile subset), with `RUN`
+  steps executed in a VM.
 
-Only `host-setup` and `net-up` need sudo. Building images uses user
-namespaces and `mkfs.ext4 -d <tarball>`, so file ownership is kept without
-root.
+**Run it like containers**
+- Shared read-only images with a writable layer per VM, `commit` to new
+  layers, named volumes and live host directories.
+- Published ports, and `exec` with exit codes, timeouts and separate
+  stdout/stderr.
+- `cp`, and `--json` output.
+- Snapshots of running VMs, forked into copies in ~150 ms.
+
+**Isolation** (details: [docs/security.md](docs/security.md))
+- **Jailed VMs**: Firecracker's jailer through a small root helper. Each VM
+  gets its own uid, a chroot, cgroup limits and its own network namespace.
+- **Network isolation**: VMs can't reach each other or host services,
+  anti-spoofing pins every VM to its MAC and address, and guests get no
+  IPv6.
+- **Local-only ports**: published ports bind to `127.0.0.1` unless you ask
+  otherwise.
+- **Egress allowlists** (`--allow @pypi,github.com`) through a logging proxy,
+  or no network at all.
+
+**For agents and people**
+- **MCP server** (`fcvm mcp`): sandboxes as tools. They're jailed by
+  default, and the server can pin their network policy.
+- **Web console** (`fcvm serve`): VMs, images, builds, stats, a browser
+  terminal and files, local-only with a token.
+
+Only `host-setup`, `net-up` and `jail-setup` need sudo; VMs themselves start
+without it. Building images uses user namespaces and `mkfs.ext4 -d
+<tarball>`, so file ownership is kept without root.
 
 ## Quick start
 
@@ -371,7 +393,8 @@ else (raw TCP, UDP, ICMP, direct DNS) is refused, which is the point.
 Wildcards follow the usual rule: `*.github.com` doesn't match `github.com`
 itself.
 
-**Isolation** (set up by `fcvm net-up`):
+**Isolation** (set up by `fcvm net-up`; the full story, with how to verify
+it, is in [docs/security.md](docs/security.md#network-isolation)):
 - VMs can't reach each other, neither across the bridge (isolated ports) nor
   routed through the host. `NET_ISOLATE=0` lets VMs on `fcbr0` talk.
 - VMs can't reach services on the host (`172.30.0.1`, or any other host
@@ -398,6 +421,9 @@ itself.
   new kernel series.
 
 ## Jailed VMs
+
+A summary. [docs/security.md](docs/security.md#jailed-vms-in-detail) covers
+the helper, what it validates, cleanup and troubleshooting in full.
 
 ```sh
 ./fcvm jail-setup                            # once, with sudo; re-run after updating fcvm or `fcvm firecracker`
@@ -706,9 +732,10 @@ lib/web/server.py       web console backend (fcvm serve): HTTP, WebSockets, stat
 lib/web/static/         web console frontend (plain HTML/CSS/JS, vendored xterm.js)
 lib/build.py            fcvm build (Dockerfile subset)
 lib/console.py          per-VM serial console relay (attach/detach, logs)
-lib/net.sh              host bridge/taps/NAT
+lib/net.sh              host bridges, taps, NAT, isolation and anti-spoofing rules
 init/fc-init.c          init for every VM (initramfs): root assembly, container PID 1, exec agent
 kernel/microvm-*.config kernel fragment
+docs/security.md        security and isolation reference (jailer, network, verification)
 bin/ kernels/ images/ vms/ volumes/ snapshots/ cache/ build/   generated
 ```
 
@@ -850,8 +877,11 @@ Done (see "Isolation" under networking):
 - Published ports bind to `127.0.0.1` by default.
 - Egress allowlists came with A4.
 
-Still open: full IPv6 for guests (addressing, NAT66 or routed, and the same
-rules for v6).
+Still open:
+- Full IPv6 for guests (addressing, NAT66 or routed, and the same rules for
+  v6).
+- An option to keep full-network VMs off private ranges: today NAT reaches
+  your LAN and other bridges on the host (LXD, Multipass, Docker).
 
 #### E3. Supply chain
 

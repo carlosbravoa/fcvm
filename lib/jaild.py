@@ -28,11 +28,12 @@ vmstate/mem instead of a config, and fcvm loads it through the API. Paths
 inside a jail are the same for every VM (/drive0.ext4, /vsock.sock, tap0),
 so a snapshot of one jailed VM restores into another's jail unchanged.
 
-No separate PID namespace: the chroot has no /proc, the VMM runs as a unique
-unprivileged uid, and Firecracker's seccomp filter doesn't allow signalling
-other processes.
+No separate PID namespace: fcvm needs the VMM's real pid (liveness, stats,
+stop), and the unique uid already keeps it from signalling or ptracing any
+other process; the chroot has no /proc.
 
 When Firecracker exits: unmount, drop ACLs, delete the namespace and chroot.
+On startup: sweep whatever a previous run left (restart or crash).
 """
 import argparse
 import array

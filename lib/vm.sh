@@ -64,7 +64,7 @@ create() {
     local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [-- CMD...]"
     local vm=${1:?$usage} image=${2:?$usage}
     shift 2
-    local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() argv=() netmode=full allow=()
+    local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full allow=()
     local entrypoint=() set_entrypoint=0
     while [ $# -gt 0 ]; do
         case $1 in
@@ -75,7 +75,10 @@ create() {
             --idle)         idle=1; shift ;;
             --entrypoint)   set_entrypoint=1; [ -z "${2-}" ] || entrypoint=("$2"); shift 2 ;;
             -p|--publish)   ports+=("$2"); shift 2 ;;
-            -v|--volume)    vols+=("$2"); shift 2 ;;
+            -v|--volume)    case $2 in
+                                /*|./*|../*|~*) shares+=("$2") ;;   # a host directory, mounted live
+                                *)              vols+=("$2") ;;     # a named volume
+                            esac; shift 2 ;;
             --net)          [[ ${2:-} =~ ^(full|none)$ ]] || die "--net wants full or none (use --allow for a restricted network)"
                             netmode=$2; shift 2 ;;
             --allow)        IFS=, read -ra _a <<<"${2:?--allow wants HOST[,HOST...]}"; allow+=("${_a[@]}"); shift 2 ;;
@@ -111,8 +114,17 @@ create() {
     for p in "${ports[@]}"; do
         [[ $p =~ ^(([0-9.]+):)?[0-9]+:[0-9]+(/tcp)?$ ]] || die "bad port spec '$p' (want [BIND:]HOSTPORT:GUESTPORT, TCP only)"
     done
+    local sharejson='[]' hdir gpath sro
+    for p in "${shares[@]}"; do
+        [[ $p =~ ^([^:]+):(/[^:,]*)(:ro)?$ ]] || die "bad mount '$p' (want /HOST/DIR:/GUEST/PATH[:ro])"
+        hdir=${BASH_REMATCH[1]} gpath=${BASH_REMATCH[2]} sro=${BASH_REMATCH[3]}
+        hdir=${hdir/#\~/$HOME}
+        [ -d "$hdir" ] || die "not a directory: $hdir"
+        sharejson=$(jq --arg h "$(realpath "$hdir")" --arg g "$gpath" --argjson ro "$([ -n "$sro" ] && echo true || echo false)" \
+            '. + [{host: $h, path: $g, ro: $ro}]' <<<"$sharejson")
+    done
     for p in "${vols[@]}"; do
-        [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:,]*(:ro)?$ ]] || die "bad volume spec '$p' (want NAME:/PATH[:ro]; host directories can't be mounted, use fcvm cp)"
+        [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:,]*(:ro)?$ ]] || die "bad volume spec '$p' (want NAME:/PATH[:ro] for a named volume, or /HOST/DIR:/PATH[:ro] for a host directory)"
         [ -f "$VOLUMES_DIR/${p%%:*}.ext4" ] || volume_create "${p%%:*}"
     done
 
@@ -133,10 +145,10 @@ create() {
     jq -n --arg image "$image" --arg type "$type" --argjson vcpus "$vcpus" --argjson mem "$mem" \
         --argjson ephemeral "${EPHEMERAL:-false}" \
         --argjson ports "$(jq -n '$ARGS.positional' --args "${ports[@]}")" \
-        --argjson volumes "$(jq -n '$ARGS.positional' --args "${vols[@]}")" \
+        --argjson volumes "$(jq -n '$ARGS.positional' --args "${vols[@]}")" --argjson shares "$sharejson" \
         --argjson net "$(jq -n --arg mode "$netmode" '{mode: $mode, allow: $ARGS.positional}' --args "${allow[@]}")" \
         '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
-          net: $net, ephemeral: $ephemeral, created: (now | todate)}' > "$dir/vm.json"
+          shares: $shares, net: $net, ephemeral: $ephemeral, created: (now | todate)}' > "$dir/vm.json"
     [ -n "${EPHEMERAL:-}" ] || log "created VM '$vm' from $image ($([ $copy = 1 ] && echo 'private copy' || echo 'shared image + writable layer'))"
 }
 
@@ -310,6 +322,16 @@ start() {
         vols+=("$dev:${vol#*:}")
     done
     [ ${#vols[@]} -eq 0 ] || args+=" fcvm.vols=$(IFS=,; echo "${vols[*]}")"
+    # Live host directories: vsock ports 10000+, served by lib/share9p.py.
+    local nshares exports=() gspecs=() i h
+    nshares=$(jq '.shares // [] | length' "$DIR/vm.json")
+    for ((i = 0; i < nshares; i++)); do
+        h=$(jq -r ".shares[$i].host" "$DIR/vm.json")
+        [ -d "$h" ] || die "shared host directory is gone: $h"
+        exports+=("$((10000 + i))=$h$(jq -r "if .shares[$i].ro then \":ro\" else \"\" end" "$DIR/vm.json")")
+        gspecs+=("$((10000 + i)):$(jq -r ".shares[$i].path + (if .shares[$i].ro then \":ro\" else \"\" end)" "$DIR/vm.json")")
+    done
+    [ $nshares = 0 ] || args+=" fcvm.shares=$(IFS=,; echo "${gspecs[*]}")"
     [ "$type" = system ] && args+=" fcvm.exec=/sbin/init"
     if [ "$type" = app ]; then
         args+=" quiet loglevel=1"   # keep the console to the app's output
@@ -341,6 +363,16 @@ start() {
     [ ${#PORTS[@]} -eq 0 ] || info+=", ports ${PORTS[*]}"
     log "starting '$vm' ($info)"
 
+    if [ ${#exports[@]} -gt 0 ]; then
+        (   # listening before the guest connects at boot; exits with the VM
+            if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
+            exec setsid python3 "$FCVM_ROOT/lib/share9p.py" --uds-prefix "$DIR/vsock.sock" --pidfile "$DIR/pid" \
+                "${exports[@]}" </dev/null >"$DIR/share.log" 2>&1
+        ) &
+        echo $! > "$DIR/share.pid"
+        for ((i = 0; i < 50; i++)); do [ -S "$DIR/vsock.sock_10000" ] && break; sleep 0.02; done
+        [ -S "$DIR/vsock.sock_10000" ] || { cat "$DIR/share.log" >&2; die "host directory server failed to start"; }
+    fi
     setsid python3 "$FCVM_ROOT/lib/console.py" serve --sock "$DIR/console.sock" --log "$DIR/console.log" \
         --pidfile "$DIR/pid" --on-exit "$(printf '%q _reap %q' "$FCVM_ROOT/fcvm" "$vm")" -- "${fc[@]}" \
         </dev/null >"$DIR/relay.log" 2>&1 &
@@ -419,6 +451,7 @@ reap() {
         echo "${code}" > "$VMS_DIR/.exit/$vm"
     fi
     if [ -f "$dir/portfwd.pid" ]; then kill "$(cat "$dir/portfwd.pid")" 2>/dev/null || true; fi
+    if [ -f "$dir/share.pid" ]; then kill "$(cat "$dir/share.pid")" 2>/dev/null || true; rm -f "$dir/share.pid" "$dir"/vsock.sock_*; fi
     if [ -f "$dir/ip" ]; then rm -f "$VMS_DIR/.egress/$(cat "$dir/ip").json"; fi
     rm -f "$dir/fc.sock" "$dir/vsock.sock" "$dir/console.sock" "$dir/portfwd.pid" "$dir/pid"
     if [ "$(jq -r .ephemeral "$dir/vm.json")" = true ]; then rm -rf "$dir"; fi
@@ -799,6 +832,8 @@ snapshot_create() {
     if jq -e '[.volumes[]? | select(endswith(":ro") | not)] | length > 0' "$vdir/vm.json" >/dev/null; then
         die "VM '$vm' has read-write volumes; a fork can't share them (use :ro volumes, or copy the data in)"
     fi
+    [ "$(jq '.shares // [] | length' "$vdir/vm.json")" = 0 ] ||
+        die "VM '$vm' has live host directories mounted; their connections can't be cloned into a fork"
     if [ -f "$vdir/disk.ext4" ]; then disk=disk.ext4 drive=root; else disk=rw.ext4 drive=rw; fi
     mkdir -p "$dir"
     t0=$(date +%s%N)
@@ -1039,7 +1074,8 @@ list_vms() {
         [ -f "$d/disk.ext4" ] && used+=" copy"
         printf "$fmt" "$vm" "$state" "$ip" "$(jq -r .image "$d/vm.json")" "$mem" "$used" \
             "$(jq -r '[(if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
-                + (.ports // []) + ((.volumes // []) | map("-v " + .)) | join(" ")' "$d/vm.json")"
+                + (.ports // []) + ((.volumes // []) | map("-v " + .))
+                + ((.shares // []) | map("-v \(.host):\(.path)\(if .ro then ":ro" else "" end)")) | join(" ")' "$d/vm.json")"
     done
     if [ $nrun -gt 0 ]; then
         printf '\n%d running: %dM allocated, %dM used on the host (MEM = used/allocated)\n' "$nrun" "$tot_alloc" "$tot_rss"

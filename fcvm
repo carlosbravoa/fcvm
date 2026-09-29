@@ -29,7 +29,8 @@ VMs:
                              create a VM: IMAGE's disk is shared read-only, writes go to
                              a per-VM layer. opts: --vcpus N --mem MiB --disk SIZE
                              --copy (private full copy) -p [BIND:]HOST:GUEST (publish TCP)
-                             -v VOLUME:/PATH[:ro] (named volume) --idle (app images: no
+                             -v VOLUME:/PATH[:ro] (named volume) or -v /HOST/DIR:/PATH[:ro]
+                             (live host directory) --idle (app images: no
                              command, stays up for exec) --net none (no network)
                              --allow HOST,*.DOMAIN,@PRESET (egress allowlist via proxy)
   start [-a] VM              boot a VM in the background; -a attaches its console

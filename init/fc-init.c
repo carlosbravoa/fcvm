@@ -10,6 +10,7 @@
  *   fcvm.layers=DEV,...    committed image layers, topmost first (ext4, upper/)
  *   fcvm.vols=DEV:PATH[:ro],...  volumes
  *   fcvm.exec=PATH         then exec PATH as PID 1 (systemd images) ...
+ *   fcvm.shares=PORT:PATH[:ro],...  live host directories over vsock + 9P
  *   fcvm.proxy=URL         restricted network: http(s)_proxy for the container
  *                          command and exec sessions (systemd images get it via
  *                          systemd.setenv=)
@@ -409,6 +410,45 @@ static void merge_main(void)
     umount("/mnt/out");
     msg("merged %d layer(s), %d error(s)", n, merge_errors);
     shutdown_vm();
+}
+
+/*
+ * Live host directories (fcvm.shares=PORT:PATH[:ro],...): connect to the host
+ * over vsock (Firecracker hands the connection to <vsock uds>_PORT, where
+ * lib/share9p.py serves the directory) and give the socket to the kernel's 9P
+ * client with trans=fd. `owner` ("uid:gid") is who the files appear to belong
+ * to, passed to the server as the attach name.
+ */
+static void mount_shares(const char *owner)
+{
+    char *shares = karg("fcvm.shares"), *save;
+    for (char *sh = shares ? strtok_r(shares, ",", &save) : NULL; sh; sh = strtok_r(NULL, ",", &save)) {
+        char *path = strchr(sh, ':');
+        if (!path)
+            continue;
+        *path++ = '\0';
+        char *opt = strchr(path, ':');
+        if (opt)
+            *opt++ = '\0';
+        int ro = opt && strcmp(opt, "ro") == 0;
+        struct sockaddr_vm addr = {.svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST,
+                                   .svm_port = (unsigned)atoi(sh)};
+        int s = socket(AF_VSOCK, SOCK_STREAM, 0); /* no CLOEXEC: the kernel takes it over */
+        if (s < 0 || connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            msg("share %s: cannot reach the host (vsock port %s): %s", path, sh, strerror(errno));
+            if (s >= 0)
+                close(s);
+            continue;
+        }
+        char opts[256];
+        snprintf(opts, sizeof(opts),
+                 "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=524288,cache=mmap,access=client,aname=%s",
+                 s, s, owner);
+        mkdir_p(path, 0755);
+        if (mount("fcvm-share", path, "9p", ro ? MS_RDONLY : 0, opts) < 0)
+            msg("share %s: mount: %s", path, strerror(errno));
+        close(s); /* the mount holds its own reference */
+    }
 }
 
 /*
@@ -1137,6 +1177,7 @@ int main(int argc, char **argv_)
         shutdown_vm();
     }
     if (exec) {
+        mount_shares("0:0"); /* system images: files appear owned by root */
         char *init_argv[] = {exec, NULL};
         execv(exec, init_argv);
         msg("exec %s: %s", exec, strerror(errno));
@@ -1144,6 +1185,14 @@ int main(int argc, char **argv_)
     }
 
     setup_fs();
+    {   /* app images: shared files appear owned by the image's user */
+        char *u = config_user(), owner[64] = "0:0";
+        if (u && *u) {
+            unsigned long uid = strtoul(u, &u, 10), gid = *u == ':' ? strtoul(u + 1, NULL, 10) : 0;
+            snprintf(owner, sizeof(owner), "%lu:%lu", uid, gid);
+        }
+        mount_shares(owner);
+    }
     reboot(RB_DISABLE_CAD); /* Ctrl-Alt-Del arrives as SIGINT: graceful stop */
     unlink(CONF "exit-status");
 

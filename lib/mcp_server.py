@@ -277,7 +277,7 @@ TOOLS = {
          "command": {"type": "array", "items": S, "description": "run this instead of staying idle (app images)"},
          "vcpus": I, "mem_mib": I,
          "ports": {"type": "array", "items": S, "description": "publish TCP ports, [BIND:]HOST:GUEST"},
-         "volumes": {"type": "array", "items": S, "description": "named volumes, NAME:/PATH[:ro] (created on first use)"},
+         "volumes": {"type": "array", "items": S, "description": "NAME:/PATH[:ro] for a named volume (created on first use), or /HOST/DIR:/PATH[:ro] to mount a host directory live (edits show up on both sides)"},
          "network": {"description": 'full (default), "none", or an allowlist: ["@pypi", "github.com", "*.example.com"]'
                      + (f". Pinned by the server to: {PINNED_NETWORK}" if PINNED_NETWORK else ""),
                      "anyOf": [S, {"type": "array", "items": S}]}},

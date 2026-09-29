@@ -63,7 +63,7 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `build [-t NAME] [-f FILE] [--build-arg K=V] [--no-cache] [--net none\|--allow H,...] [CONTEXT]` | builds an image from a Dockerfile subset, cached per step. The result is the FROM image plus one layer |
 | `images [--all] [--json]`, `ls [--all] [--json]` | lists images (with what uses each) / VMs (state, exit code, memory used/allocated, disk use, network, ports, volumes). `--all` includes the build cache and build VMs |
 | `inspect VM` | the VM's details as JSON |
-| `create VM IMAGE [opts] [-- CMD...]` | VM on the shared image plus its own writable layer. `--vcpus N`, `--mem MiB`, `--disk SIZE` (layer size, default 8G sparse), `-p [BIND:]HOST:GUEST` (repeatable), `-v VOLUME:/PATH[:ro]` (repeatable, created on first use), `--net none`, `--allow HOSTS`, `--idle` (container: run nothing, stay up for `exec`), `--copy` (private full copy instead), `-- CMD` (replaces the image's CMD and keeps its ENTRYPOINT, as `docker run` does), `--entrypoint CMD` (`""` clears it) |
+| `create VM IMAGE [opts] [-- CMD...]` | VM on the shared image plus its own writable layer. `--vcpus N`, `--mem MiB`, `--disk SIZE` (layer size, default 8G sparse), `-p [BIND:]HOST:GUEST` (repeatable), `-v VOLUME:/PATH[:ro]` (named volume, created on first use) or `-v /HOST/DIR:/PATH[:ro]` (live host directory), repeatable, `--net none`, `--allow HOSTS`, `--idle` (container: run nothing, stay up for `exec`), `--copy` (private full copy instead), `-- CMD` (replaces the image's CMD and keeps its ENTRYPOINT, as `docker run` does), `--entrypoint CMD` (`""` clears it) |
 | `start [-a] VM` | boots in the background, like `docker start`. `-a` attaches the console |
 | `run IMAGE [-d] [opts] [-- CMD...]` | throwaway VM, deleted when it stops. **App images**: attached like `docker run`: you see the output, Ctrl-C goes to the app, Ctrl-] detaches, and fcvm exits with the container's exit code. **System images**: boots and opens `fcvm shell` (or runs CMD); when the shell or CMD ends, the VM is stopped and deleted. `-d`: background |
 | `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s |
@@ -213,8 +213,46 @@ and created on first use (`VOLUME_SIZE`, default 10G sparse). They outlive
 VMs. A new, empty volume takes the owner and mode of the directory it covers,
 as Docker volumes do, so non-root images can write to it. A read-write volume
 can be attached to only one running VM at a time; `:ro` volumes can be
-shared. Live host-directory mounts aren't possible (Firecracker has no
-virtio-fs or 9p); use `fcvm cp` instead.
+shared.
+
+**Host directories.** `-v /host/dir:/path[:ro]` (any value starting with
+`/`, `./`, `../` or `~`) mounts a host directory live, both ways, like a bind
+mount:
+
+```sh
+./fcvm run python-3.13-slim -v ./myproject:/work -- python /work/main.py
+./fcvm create dev2 ubuntu-26.04 -v ~/src:/src && ./fcvm start dev2   # edit on the host, run in the VM
+```
+
+Firecracker has no virtio-fs or 9p device, so fcvm builds the mount from
+parts the kernel already has:
+1. At boot, `fc-init` opens a vsock connection to the host.
+2. Firecracker hands that connection to `vms/<vm>/vsock.sock_<port>`, where
+   `lib/share9p.py` (a small 9P2000.L server, standard library only, one per
+   VM, running as you) serves the directory.
+3. `fc-init` gives the connection to the guest kernel's own 9P client
+   (`mount -t 9p -o trans=fd`).
+
+There's no FUSE and no extra binary in the image, and it works with
+`--net none`. Behaviour:
+- **Ownership:** files appear owned by the image's user (root for system
+  images), so non-root images can write. On the host they belong to you, and
+  `chown` in the guest is accepted and ignored.
+- **Confinement:** the server keeps every operation inside the shared
+  directory. Symlinks are resolved by the guest, so a link to `/etc` points
+  at the guest's `/etc`, not the host's.
+- **Changes:** made on either side, they're visible on the other at once;
+  there's no cache to go stale. git, editors and servers work (tested:
+  `git init/add/commit`, nginx serving files edited on the host).
+- **Speed:** ~280 MB/s write and ~350 MB/s read for large files, and about
+  1 ms per small-file operation. That's fine for source trees. Keep huge
+  many-file trees such as `node_modules` or virtualenvs on the VM's own disk
+  or a named volume.
+- **Snapshots:** VMs with host directories can't be snapshotted, because the
+  live connection can't be cloned into a fork.
+
+`fcvm cp` remains the way to copy things in or out of a running VM without
+a mount.
 
 **Exit codes.** When the container's main process exits, `fc-init` writes its
 status (exit code, or 128+signal, as Docker does) to `/.fcvm/exit-status`.
@@ -506,6 +544,7 @@ lib/import.sh           import wrapper (sizes and creates the ext4)
 lib/vm.sh               VM lifecycle
 lib/portfwd.py          rootless TCP port publishing
 lib/egress_proxy.py     egress proxy for restricted VMs (allowlists, logging)
+lib/share9p.py          9P server for live host directories (-v /host:/path)
 lib/egress-presets.conf allowlist presets (@pypi, @npm, ...)
 lib/exec_client.py      host side of fcvm exec / shell (vsock)
 lib/mcp_server.py       MCP server (fcvm mcp)
@@ -533,10 +572,12 @@ directly onto an agent's "run command" tool. Multipass is still better for
 long-lived dev machines with mounted source trees, and it runs on macOS and
 Windows. fcvm needs KVM and never will.
 
-- **A1. Getting code in and out.** Firecracker has no virtio-fs or 9p, so
-  there are no live shared folders. ✅ `fcvm cp` (both directions) and ✅
-  named volumes (`-v NAME:/path`, persistent ext4 disks). Still open: a
-  host-directory sync over vsock that behaves like a bind mount.
+- **A1. Getting code in and out.** ✅ `fcvm cp` (both directions), ✅ named
+  volumes (`-v NAME:/path`, persistent ext4 disks), ✅ live host directories
+  (`-v /host/dir:/path`): the guest kernel's 9P client over a vsock
+  connection to a host-side 9P server, since Firecracker has no virtio-fs.
+  Still open: faster many-small-file workloads (a multi-threaded or native
+  server, or opt-in client caching).
 - **A2. Snapshots and commit.** ✅ `fcvm commit VM IMAGE` saves a VM's
   writable layer as a new image layer (Docker-style stacking, instant,
   rootless). ✅ `fcvm snapshot` / `fcvm fork`: Firecracker memory snapshots,

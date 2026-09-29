@@ -690,8 +690,10 @@ fleet view would be a separate control-plane product built on this API.
   admin). Shares work with enterprise items E1/E4/E5.
 - **W3. Builds from the UI.** ✅ Edit a Dockerfile and upload a build context,
   with streamed build logs and the per-step cache made visible.
-- **W4. Files.** ✅ A file browser for a running VM (upload, download, edit)
-  over `fcvm cp`, and management of host-directory mounts.
+- **W4. Files.** ✅ A file browser for a running VM (upload, download, edit,
+  rename, delete) using the exec agent's native file operations, so it works
+  in any image, even without a shell, and management of host-directory
+  mounts, live on running VMs.
 - **W5. Activity and audit.** A timeline of who did what (launch, exec,
   console sessions, egress denials), feeding E5.
 - **W6. Service mode.** Run `fcvm serve` as a systemd user service; VMs
@@ -796,7 +798,10 @@ shared images. Keys should be injected per VM at boot instead.
   upgrading the init or agent no longer means rebuilding images.
 - A test suite and CI, covering failure paths, concurrency and host reboots.
   The bash `set -e` pitfalls hit during development show why.
-- A versioned exec agent protocol.
+- Exec agent protocol: ◐ requests carry a version tag (`fcvm2`), and a
+  mismatch fails with a clear error. Still open: version negotiation and a
+  compatibility policy, so newer hosts can talk to VMs booted with an older
+  initramfs.
 - aarch64 (Graviton): needs `kernel/microvm-aarch64.config` and testing.
 
 #### Smaller items

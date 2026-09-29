@@ -120,6 +120,37 @@ VM's next boot. The kernel is monolithic with no loadable modules, so
 (virtio, ext4, overlayfs, cgroups v2, namespaces, nftables, ...). Add to that
 fragment, rebuild, and restart VMs to get more.
 
+**Where the kernel comes from.** You build it, on your machine, with
+`fcvm kernel` (`lib/build-kernel.sh`). It isn't Ubuntu's kernel or one of
+Firecracker's prebuilt CI kernels:
+
+1. Picks the newest release of `KERNEL_CHANNEL` (`stable` by default, or
+   `longterm`, `mainline`, or an exact version such as `fcvm kernel 6.18.54`)
+   from `https://www.kernel.org/releases.json`.
+2. Downloads the official source tarball from `cdn.kernel.org` into `cache/`.
+3. Checks its SHA-256 against kernel.org's `sha256sums.asc`. That catches
+   corruption, but it isn't a proof of origin, because the PGP signature isn't
+   verified yet (roadmap E3).
+4. Extracts it to `build/linux-X.Y.Z/`, runs `make allnoconfig`, applies
+   `kernel/microvm-x86_64.config`, and reports any requested option that
+   didn't make it into the final `.config`.
+5. Compiles `vmlinux` with the host's gcc, in about 2.5 minutes on 12 cores.
+6. Installs it:
+
+```
+kernels/
+  vmlinux -> vmlinux-7.2.8     # what every VM boots (the newest build)
+  vmlinux-7.2.8                # ~27 MB uncompressed ELF
+  config-7.2.8                 # the exact .config it was built with
+```
+
+`kernels/`, `build/` and `cache/` are gitignored. The repository holds the
+recipe (script and config fragment), not the binary, so each machine builds
+its own. Earlier builds stay in `kernels/`. To roll back, point the symlink
+at one of them (`ln -sfn vmlinux-OLD kernels/vmlinux`) and restart the VMs.
+`FORCE=1 fcvm kernel` rebuilds a version that is already built, for example
+after editing the config fragment.
+
 ## How it fits together
 
 ```

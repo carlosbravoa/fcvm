@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# fcvm - build Firecracker microVMs from Ubuntu 26.04 and from OCI/Docker images.
+. "$(dirname "$(readlink -f "$0")")/lib/common.sh"
+
+usage() {
+    cat <<EOF
+usage: fcvm <command> [args]
+
+Host (need sudo):
+  host-setup                 install build/runtime packages, check KVM access
+  net-up | net-down          create/remove bridge $NET_BRIDGE, $NET_TAPS tap devices and NAT
+
+Build:
+  firecracker                download the Firecracker release ($FC_VERSION) into bin/
+  kernel [VERSION]           fetch latest $KERNEL_CHANNEL kernel from kernel.org, build a microVM vmlinux
+  init                       build the static PID 1 used by container VMs
+  base [NAME]                build the Ubuntu 26.04 base image (default name: ubuntu-26.04)
+  import REF [NAME]          pull an image from Docker Hub / any registry and convert it to a VM image
+  all                        firecracker + kernel + init + base
+
+VMs:
+  images                     list images
+  create VM IMAGE [opts] [-- CMD...]
+                             create a VM: IMAGE's disk is shared read-only, writes go to
+                             a per-VM layer. opts: --vcpus N --mem MiB --disk SIZE
+                             --copy (private full copy) -p [BIND:]HOST:GUEST (publish TCP)
+  start VM [-d]              boot a VM (serial console in the foreground; -d = background);
+                             for container VMs, exits with the container's exit code
+  run IMAGE [-d] [opts] [-- CMD...]
+                             create + start a throwaway VM (deleted when it stops)
+  stop VM                    ask the guest to shut down (Ctrl-Alt-Del), kill after a timeout
+  console VM                 tail the console log of a background VM
+  exec [-i] [-t] VM CMD...   run a command in a running VM, like docker exec (over vsock)
+  shell VM                   interactive shell in a running VM (= exec -it VM bash|sh)
+  ssh VM [args]              ssh root@VM (base images)
+  ls                         list VMs
+  rm VM                      delete a VM
+EOF
+}
+
+cmd=${1:-help}; shift || true
+case $cmd in
+    host-setup)         exec "$FCVM_ROOT/lib/host-setup.sh" "$@" ;;
+    net-up|net-down)    exec "$FCVM_ROOT/lib/net.sh" "${cmd#net-}" "$@" ;;
+    firecracker)        exec "$FCVM_ROOT/lib/fetch-firecracker.sh" "$@" ;;
+    kernel)             exec "$FCVM_ROOT/lib/build-kernel.sh" "$@" ;;
+    init)               exec "$FCVM_ROOT/lib/build-init.sh" "$@" ;;
+    base)               exec "$FCVM_ROOT/lib/build-base.sh" "$@" ;;
+    import)             exec "$FCVM_ROOT/lib/import.sh" "$@" ;;
+    all)
+        "$FCVM_ROOT/lib/fetch-firecracker.sh"
+        "$FCVM_ROOT/lib/build-kernel.sh"
+        "$FCVM_ROOT/lib/build-init.sh"
+        "$FCVM_ROOT/lib/build-base.sh" ;;
+    images|create|start|run|stop|console|ssh|exec|shell|ls|rm)
+                        exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
+    help|-h|--help)     usage ;;
+    *)                  usage; exit 1 ;;
+esac

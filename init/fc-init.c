@@ -1,0 +1,601 @@
+/*
+ * fc-init: PID 1 for microVMs converted from OCI/Docker images, and the
+ * overlay-root shim for every fcvm image (see fcvm.overlay below).
+ *
+ * Does what a container runtime would: mounts the API filesystems, sets the
+ * hostname and resolv.conf, then runs the image's entrypoint with its env,
+ * working directory and user. Stays as PID 1 to reap zombies and forward
+ * signals; when the main process exits the VM reboots, which makes
+ * Firecracker exit (boot with reboot=k).
+ *
+ * Configuration written by `fcvm import` under /.fcvm/:
+ *   argv      NUL-separated argument vector
+ *   env       NUL-separated KEY=VALUE list
+ *   workdir   working directory
+ *   user      "uid:gid[:gid,gid...]"
+ *   hostname  hostname
+ *
+ * Networking is configured by the kernel (ip= on the command line); DNS
+ * servers from ip= show up in /proc/net/pnp in resolv.conf format.
+ *
+ * Kernel command line options:
+ *   fcvm.overlay=DEV  the root drive is a shared read-only image: mount DEV
+ *                     (ext4 with upper/ and work/) and switch into an overlay
+ *                     of the two, so all writes land on the per-VM disk
+ *   fcvm.exec=PATH    after switching root, exec PATH as PID 1 (systemd images)
+ *                     instead of running the container config
+ *
+ * On exit the main process status (exit code, or 128+signal) is written to
+ * /.fcvm/exit-status, which the host reads back from the writable disk.
+ *
+ * Build: gcc -static -Os -o fc-init fc-init.c
+ */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <grp.h>
+#include <linux/vm_sockets.h>
+#include <net/if.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mount.h>
+#include <sys/reboot.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <termios.h>
+#include <unistd.h>
+
+#define CONF "/.fcvm/"
+
+static void msg(const char *fmt, ...)
+{
+    char buf[512] = "[fc-init] ";
+    va_list ap;
+    va_start(ap, fmt);
+    int n = 10 + vsnprintf(buf + 10, sizeof(buf) - 11, fmt, ap);
+    va_end(ap);
+    if (n > (int)sizeof(buf) - 1)
+        n = sizeof(buf) - 1;
+    buf[n++] = '\n';
+    write(2, buf, n); /* one write, so parent and child lines don't interleave */
+}
+
+static void mnt(const char *src, const char *dst, const char *type,
+                unsigned long flags, const char *data)
+{
+    mkdir(dst, 0755);
+    if (mount(src, dst, type, flags, data) < 0 && errno != EBUSY)
+        msg("mount %s: %s", dst, strerror(errno));
+}
+
+/* Read a whole file; returns NULL if missing. */
+static char *slurp(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return NULL;
+    size_t cap = 4096, n = 0, r;
+    char *buf = malloc(cap + 1);
+    while ((r = fread(buf + n, 1, cap - n, f)) > 0) {
+        n += r;
+        if (n == cap)
+            buf = realloc(buf, (cap *= 2) + 1);
+    }
+    fclose(f);
+    buf[n] = '\0';
+    if (len)
+        *len = n;
+    return buf;
+}
+
+static void spit(const char *path, const char *data)
+{
+    unlink(path); /* images often ship these as dangling symlinks */
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        msg("write %s: %s", path, strerror(errno));
+        return;
+    }
+    fputs(data, f);
+    fclose(f);
+}
+
+/* Split a NUL-separated buffer into a NULL-terminated vector. */
+static char **split0(char *buf, size_t len)
+{
+    size_t n = 0, i;
+    for (i = 0; i < len; i++)
+        if (buf[i] == '\0')
+            n++;
+    char **v = calloc(n + 2, sizeof(*v));
+    size_t k = 0;
+    for (i = 0; i < len; i += strlen(buf + i) + 1)
+        v[k++] = buf + i;
+    v[k] = NULL;
+    return v;
+}
+
+static char *trim(char *s)
+{
+    if (!s)
+        return s;
+    s[strcspn(s, "\n")] = '\0';
+    return s;
+}
+
+/* Value of "key=value" on the kernel command line, or NULL. */
+static char *karg(const char *key)
+{
+    static char *cmdline;
+    if (!cmdline && !(cmdline = trim(slurp("/proc/cmdline", NULL))))
+        return NULL;
+    size_t klen = strlen(key);
+    for (char *p = cmdline; (p = strstr(p, key)); p += klen) {
+        if ((p == cmdline || p[-1] == ' ') && p[klen] == '=') {
+            char *v = strndup(p + klen + 1, strcspn(p + klen + 1, " "));
+            return v;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Stack the per-VM disk over the read-only root and make the overlay "/".
+ * Same moves as util-linux switch_root: carry /dev, /proc, /sys along, move
+ * the new root over "/" and chroot into it. The image root stays mounted
+ * underneath as the overlay's lower layer.
+ */
+static int switch_to_overlay(const char *dev)
+{
+    const char *rw = CONF "rw", *nr = CONF "newroot";
+    if (mount(dev, rw, "ext4", MS_NOATIME, NULL) < 0) {
+        msg("mount %s: %s", dev, strerror(errno));
+        return -1;
+    }
+    mkdir(CONF "rw/upper", 0755);
+    mkdir(CONF "rw/work", 0755);
+    if (mount("overlay", nr, "overlay", 0,
+              "lowerdir=/,upperdir=" CONF "rw/upper,workdir=" CONF "rw/work") < 0) {
+        msg("mount overlay: %s", strerror(errno));
+        return -1;
+    }
+    static const char *carry[] = {"/dev", "/proc", "/sys"};
+    for (size_t i = 0; i < sizeof(carry) / sizeof(*carry); i++) {
+        char dst[64];
+        snprintf(dst, sizeof(dst), "%s%s", nr, carry[i]);
+        mkdir(dst, 0755);
+        mount(carry[i], dst, NULL, MS_MOVE, NULL);
+    }
+    if (chdir(nr) < 0 || mount(".", "/", NULL, MS_MOVE, NULL) < 0 ||
+        chroot(".") < 0 || chdir("/") < 0) {
+        msg("switch root: %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+static void setup_fs(void)
+{
+    mnt("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+    mnt("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+    mnt("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
+    mnt("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC,
+        "newinstance,ptmxmode=0666,mode=0620,gid=5");
+    mnt("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
+    mnt("mqueue", "/dev/mqueue", "mqueue", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+    mnt("cgroup2", "/sys/fs/cgroup", "cgroup2", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+
+    symlink("/proc/self/fd", "/dev/fd");
+    symlink("/proc/self/fd/0", "/dev/stdin");
+    symlink("/proc/self/fd/1", "/dev/stdout");
+    symlink("/proc/self/fd/2", "/dev/stderr");
+    unlink("/dev/ptmx");
+    symlink("pts/ptmx", "/dev/ptmx");
+}
+
+static void setup_net(const char *hostname)
+{
+    int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    struct ifreq ifr = {0};
+    strcpy(ifr.ifr_name, "lo");
+    if (s >= 0 && ioctl(s, SIOCGIFFLAGS, &ifr) == 0) {
+        ifr.ifr_flags |= IFF_UP;
+        ioctl(s, SIOCSIFFLAGS, &ifr);
+    }
+    if (s >= 0)
+        close(s);
+
+    if (hostname && *hostname)
+        sethostname(hostname, strlen(hostname));
+
+    char hosts[512];
+    snprintf(hosts, sizeof(hosts),
+             "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n"
+             "127.0.1.1\t%s\n", hostname ? hostname : "");
+    spit("/etc/hosts", hosts);
+    if (hostname) {
+        char line[300];
+        snprintf(line, sizeof(line), "%s\n", hostname);
+        spit("/etc/hostname", line);
+    }
+
+    char *pnp = slurp("/proc/net/pnp", NULL); /* "nameserver x.x.x.x" lines */
+    if (pnp && strstr(pnp, "nameserver"))
+        spit("/etc/resolv.conf", pnp);
+    free(pnp);
+}
+
+/*
+ * Become the image's user and exec argv with the image's env and workdir.
+ * Shared by the main process and by `fcvm exec` sessions. No workdir means
+ * $HOME (exec sessions on systemd images). term, if set, overrides TERM.
+ */
+static void exec_as(char **argv, char **env, const char *workdir, char *user,
+                    const char *term)
+{
+    if (user && *user) {
+        uid_t uid = strtoul(strtok(user, ":"), NULL, 10);
+        char *g = strtok(NULL, ":");
+        gid_t gid = g ? strtoul(g, NULL, 10) : 0;
+        gid_t groups[64];
+        int ng = 0;
+        char *extra = strtok(NULL, ":");
+        for (char *t = extra ? strtok(extra, ",") : NULL; t && ng < 64; t = strtok(NULL, ","))
+            groups[ng++] = strtoul(t, NULL, 10);
+        if (setgroups(ng, groups) < 0 || setgid(gid) < 0 || setuid(uid) < 0) {
+            msg("cannot switch to %u:%u: %s", uid, gid, strerror(errno));
+            _exit(126);
+        }
+    }
+
+    /* execvp searches the caller's PATH, so install the image env first. */
+    clearenv();
+    for (char **e = env; e && *e; e++)
+        putenv(*e);
+    if (!getenv("PATH"))
+        setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
+    if (!getenv("HOME"))
+        setenv("HOME", getuid() == 0 ? "/root" : "/", 1);
+    if (term && *term)
+        setenv("TERM", term, 1);
+
+    if (!workdir || !*workdir)
+        workdir = getenv("HOME");
+    mkdir(workdir, 0755);
+    if (chdir(workdir) < 0)
+        msg("chdir %s: %s", workdir, strerror(errno));
+
+    execvp(argv[0], argv);
+    msg("exec %s: %s", argv[0], strerror(errno));
+    _exit(127);
+}
+
+static pid_t start_main(char **argv, char **env, const char *workdir,
+                        char *user, sigset_t *oldmask)
+{
+    pid_t pid = fork();
+    if (pid != 0)
+        return pid;
+
+    sigprocmask(SIG_SETMASK, oldmask, NULL);
+    setsid();
+    ioctl(0, TIOCSCTTY, 1); /* so Ctrl-C on the serial console reaches it */
+    exec_as(argv, env, workdir ? workdir : "/", user, NULL);
+    return -1;
+}
+
+static void shutdown_vm(void)
+{
+    kill(-1, SIGTERM);
+    for (int i = 0; i < 20 && waitpid(-1, NULL, WNOHANG) >= 0; i++)
+        usleep(100000);
+    kill(-1, SIGKILL);
+    sync();
+    reboot(RB_AUTOBOOT); /* reboot=k: Firecracker exits */
+}
+
+/*
+ * Exec agent (`fcvm exec` / `fcvm shell`): listens on vsock port AGENT_PORT
+ * and runs one command per connection, like `docker exec`.
+ *
+ * Frames in both directions: 1 type byte, 4-byte big-endian length, payload.
+ *   host -> guest  R request: NUL-separated tty("0"/"1"), rows, cols, TERM, argv...
+ *                  D stdin data    C stdin closed    W window size (u16 rows, u16 cols)
+ *   guest -> host  D stdout data   E stderr data     X exit status (be32)
+ */
+#define AGENT_PORT 1024
+
+struct buf {
+    char *d;
+    size_t len, cap;
+};
+
+static int write_all(int fd, const void *p, size_t n)
+{
+    const char *c = p;
+    while (n) {
+        ssize_t w = write(fd, c, n);
+        if (w < 0 && errno == EINTR)
+            continue;
+        if (w <= 0)
+            return -1;
+        c += w;
+        n -= w;
+    }
+    return 0;
+}
+
+static int send_frame(int fd, char type, const void *p, uint32_t n)
+{
+    unsigned char h[5] = {type, n >> 24, n >> 16, n >> 8, n};
+    return write_all(fd, h, 5) < 0 || write_all(fd, p, n) < 0 ? -1 : 0;
+}
+
+static uint32_t be32(const char *p)
+{
+    const unsigned char *u = (const unsigned char *)p;
+    return (uint32_t)u[0] << 24 | u[1] << 16 | u[2] << 8 | u[3];
+}
+
+/* Append whatever is readable on fd; returns bytes read (0 = EOF, <0 = error). */
+static ssize_t fill(struct buf *b, int fd)
+{
+    if (b->cap - b->len < 65536)
+        b->d = realloc(b->d, b->cap += 65536);
+    ssize_t n = read(fd, b->d + b->len, b->cap - b->len);
+    if (n > 0)
+        b->len += n;
+    return n;
+}
+
+/* Length of the first complete frame in b (header included), or 0. */
+static size_t frame_ready(struct buf *b)
+{
+    if (b->len < 5)
+        return 0;
+    size_t n = 5 + be32(b->d + 1);
+    return b->len >= n ? n : 0;
+}
+
+static void consume(struct buf *b, size_t n)
+{
+    memmove(b->d, b->d + n, b->len - n);
+    b->len -= n;
+}
+
+/* Forward everything readable on fd as frames of type t; returns -1 at EOF. */
+static int pump(int fd, int conn, char t)
+{
+    char data[16384];
+    ssize_t n = read(fd, data, sizeof(data));
+    if (n > 0)
+        return send_frame(conn, t, data, n);
+    return n < 0 && (errno == EAGAIN || errno == EINTR) ? 0 : -1;
+}
+
+static void agent_session(int conn)
+{
+    struct buf b = {0};
+    size_t flen;
+    while (!(flen = frame_ready(&b)))
+        if (fill(&b, conn) <= 0)
+            _exit(0);
+    if (b.d[0] != 'R')
+        _exit(0);
+
+    /* Request: tty, rows, cols, TERM, argv... */
+    char *fields[260];
+    int nf = 0;
+    for (size_t i = 5; i < flen && nf < 259; i += strlen(b.d + i) + 1)
+        fields[nf++] = strndup(b.d + i, flen - i);
+    consume(&b, flen);
+    if (nf < 4)
+        _exit(0);
+    int tty = fields[0][0] == '1';
+    struct winsize ws = {.ws_row = atoi(fields[1]), .ws_col = atoi(fields[2])};
+    char *term = fields[3];
+    char **argv = &fields[4];
+    fields[nf] = NULL;
+    static char *bash[] = {"/bin/bash", NULL}, *sh[] = {"/bin/sh", NULL};
+    if (nf == 4)
+        argv = access("/bin/bash", X_OK) == 0 ? bash : sh;
+
+    size_t elen = 0;
+    char *ebuf = slurp(CONF "env", &elen);
+    char **env = ebuf && elen ? split0(ebuf, elen) : NULL;
+    char *workdir = trim(slurp(CONF "workdir", NULL));
+    char *user = trim(slurp(CONF "user", NULL));
+
+    int in = -1, out = -1, err = -1;
+    pid_t pid;
+    if (tty) {
+        int m = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+        if (m < 0 || grantpt(m) < 0 || unlockpt(m) < 0)
+            _exit(1);
+        ioctl(m, TIOCSWINSZ, &ws);
+        char *slave = ptsname(m);
+        if ((pid = fork()) == 0) {
+            setsid();
+            int s = open(slave, O_RDWR);
+            ioctl(s, TIOCSCTTY, 0);
+            dup2(s, 0), dup2(s, 1), dup2(s, 2);
+            if (s > 2)
+                close(s);
+            exec_as(argv, env, workdir, user, term);
+        }
+        in = out = m;
+    } else {
+        int pi[2], po[2], pe[2];
+        if (pipe2(pi, O_CLOEXEC) < 0 || pipe2(po, O_CLOEXEC) < 0 || pipe2(pe, O_CLOEXEC) < 0)
+            _exit(1);
+        if ((pid = fork()) == 0) {
+            setsid();
+            dup2(pi[0], 0), dup2(po[1], 1), dup2(pe[1], 2);
+            exec_as(argv, env, workdir, user, NULL);
+        }
+        close(pi[0]), close(po[1]), close(pe[1]);
+        in = pi[1], out = po[0], err = pe[0];
+    }
+
+    int status = 0, out_open = 1;
+    for (;;) {
+        struct pollfd p[3] = {{conn, POLLIN, 0}, {out_open ? out : -1, POLLIN, 0}, {err, POLLIN, 0}};
+        poll(p, 3, 100);
+        if (p[0].revents && fill(&b, conn) <= 0) { /* host went away */
+            kill(-pid, SIGHUP);
+            _exit(0);
+        }
+        { /* frames may already be buffered along with the request */
+            while ((flen = frame_ready(&b))) {
+                uint32_t n = flen - 5;
+                char *d = b.d + 5;
+                if (b.d[0] == 'D' && in >= 0)
+                    write_all(in, d, n);
+                else if (b.d[0] == 'C' && !tty && in >= 0)
+                    close(in), in = -1;
+                else if (b.d[0] == 'W' && tty && n == 4) {
+                    struct winsize w = {.ws_row = (unsigned char)d[0] << 8 | (unsigned char)d[1],
+                                        .ws_col = (unsigned char)d[2] << 8 | (unsigned char)d[3]};
+                    ioctl(out, TIOCSWINSZ, &w);
+                }
+                consume(&b, flen);
+            }
+        }
+        if (p[1].revents && pump(out, conn, 'D') < 0)
+            out_open = 0; /* pty: EIO once the session's last process closes it */
+        if (p[2].revents && pump(err, conn, 'E') < 0)
+            close(err), err = -1;
+        if (waitpid(pid, &status, WNOHANG) == pid)
+            break;
+    }
+    /* Drain output the command wrote just before exiting. */
+    if (out_open) {
+        fcntl(out, F_SETFL, O_NONBLOCK);
+        while (pump(out, conn, 'D') == 0 && poll(&(struct pollfd){out, POLLIN, 0}, 1, 0) > 0)
+            ;
+    }
+    if (err >= 0) {
+        fcntl(err, F_SETFL, O_NONBLOCK);
+        while (pump(err, conn, 'E') == 0 && poll(&(struct pollfd){err, POLLIN, 0}, 1, 0) > 0)
+            ;
+    }
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+    unsigned char x[4] = {code >> 24, code >> 16, code >> 8, code};
+    send_frame(conn, 'X', x, 4);
+    _exit(0);
+}
+
+static int agent_main(void)
+{
+    int s = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    struct sockaddr_vm addr = {.svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_ANY,
+                               .svm_port = AGENT_PORT};
+    if (s < 0 || bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0 || listen(s, 16) < 0) {
+        msg("exec agent: vsock port %d: %s", AGENT_PORT, strerror(errno));
+        return 1;
+    }
+    signal(SIGCHLD, SIG_IGN); /* sessions are reaped automatically */
+    for (;;) {
+        int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
+        if (c < 0)
+            continue;
+        if (fork() == 0) {
+            close(s);
+            signal(SIGCHLD, SIG_DFL);
+            agent_session(c);
+        }
+        close(c);
+    }
+}
+
+int main(int argc, char **argv_)
+{
+    if (argc > 1 && strcmp(argv_[1], "--agent") == 0)
+        return agent_main(); /* systemd images run the agent as a service */
+    if (getpid() != 1) {
+        fprintf(stderr, "usage: fc-init (as PID 1) | fc-init --agent\n");
+        return 1;
+    }
+    mnt("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+    char *overlay = karg("fcvm.overlay");
+    char *exec = karg("fcvm.exec");
+    if (overlay && switch_to_overlay(overlay) < 0) {
+        msg("cannot set up the writable layer; halting");
+        shutdown_vm();
+    }
+    if (exec) {
+        char *init_argv[] = {exec, NULL};
+        execv(exec, init_argv);
+        msg("exec %s: %s", exec, strerror(errno));
+        shutdown_vm();
+    }
+
+    setup_fs();
+    reboot(RB_DISABLE_CAD); /* Ctrl-Alt-Del arrives as SIGINT: graceful stop */
+    unlink(CONF "exit-status");
+
+    size_t alen = 0, elen = 0;
+    char *abuf = slurp(CONF "argv", &alen);
+    char *ebuf = slurp(CONF "env", &elen);
+    char *workdir = trim(slurp(CONF "workdir", NULL));
+    char *user = trim(slurp(CONF "user", NULL));
+    char *hostname = trim(slurp(CONF "hostname", NULL));
+
+    setup_net(hostname);
+
+    static char *fallback[] = {"/bin/sh", NULL};
+    char **argv = abuf && alen ? split0(abuf, alen) : fallback;
+    char **env = ebuf && elen ? split0(ebuf, elen) : NULL;
+
+    sigset_t all, old;
+    sigfillset(&all);
+    sigprocmask(SIG_BLOCK, &all, &old);
+
+    if (fork() == 0) { /* exec agent for `fcvm exec` / `fcvm shell` */
+        sigprocmask(SIG_SETMASK, &old, NULL);
+        _exit(agent_main());
+    }
+
+    pid_t main_pid = start_main(argv, env, workdir, user, &old);
+    if (main_pid < 0) {
+        msg("fork: %s", strerror(errno));
+        shutdown_vm();
+    }
+
+    int status = 0;
+    for (;;) {
+        siginfo_t si;
+        int sig = sigwaitinfo(&all, &si);
+        if (sig == SIGCHLD) {
+            pid_t p;
+            int st;
+            while ((p = waitpid(-1, &st, WNOHANG)) > 0)
+                if (p == main_pid) {
+                    status = st;
+                    goto done;
+                }
+        } else if (sig == SIGINT || sig == SIGTERM || sig == SIGPWR) {
+            kill(main_pid, SIGTERM); /* Ctrl-Alt-Del / stop request */
+        } else if (sig > 0) {
+            kill(main_pid, sig);
+        }
+    }
+done:;
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+    if (WIFEXITED(status))
+        msg("%s exited with status %d", argv[0], code);
+    else
+        msg("%s killed by signal %d", argv[0], WTERMSIG(status));
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d\n", code);
+    spit(CONF "exit-status", buf);
+    shutdown_vm();
+    return 0;
+}

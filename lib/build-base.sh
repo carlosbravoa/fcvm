@@ -41,12 +41,6 @@ mmdebstrap \
     --customize-hook='mkdir -p -m 700 "$1/root/.ssh"' \
     --customize-hook="upload $keys /root/.ssh/authorized_keys" \
     --customize-hook='chmod 600 "$1/root/.ssh/authorized_keys"' \
-    --customize-hook='mkdir -p "$1/etc/systemd/system/serial-getty@ttyS0.service.d"
-cat > "$1/etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf" <<EOF
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud 115200,57600,38400,9600 - \$TERM
-EOF' \
     --customize-hook='cat > "$1/etc/systemd/system/ssh-hostkeys.service" <<EOF
 [Unit]
 Description=Generate SSH host keys on first boot

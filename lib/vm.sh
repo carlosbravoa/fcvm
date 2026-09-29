@@ -132,9 +132,20 @@ start_portfwd() {
     kill -0 $! 2>/dev/null || { cat "$DIR/portfwd.log" >&2; return 1; }
 }
 
+# fcvm start [-a] VM: boot in the background (like docker start); -a attaches the
+# console afterwards. The serial console is held by lib/console.py, which logs
+# it and lets clients attach/detach; when Firecracker exits it runs `_reap`.
 start() {
-    local vm=${1:?usage: fcvm start VM [-d]} bg=0
-    [ "${2:-}" = -d ] && bg=1
+    local usage="usage: fcvm start [-a] VM" attach=0 vm=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -a|--attach) attach=1; shift ;;
+            -d)          shift ;;   # background is the default now
+            -*)          die "unknown option $1 ($usage)" ;;
+            *)           vm=$1; shift ;;
+        esac
+    done
+    [ -n "$vm" ] || die "$usage"
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" && die "VM '$vm' is already running (pid $(vm_pid "$vm"))"
     [ -x "$FIRECRACKER" ] || die "firecracker not installed (run: ./fcvm firecracker)"
@@ -190,34 +201,55 @@ start() {
         "entropy": {}
     }' > "$DIR/fc.json"
 
-    rm -f "$DIR/fc.sock" "$DIR/vsock.sock"
+    rm -f "$DIR/fc.sock" "$DIR/vsock.sock" "$DIR/console.sock" "$DIR/pid" "$DIR/waiter"
     : > "$DIR/firecracker.log"
+    : > "$DIR/console.log"
     local fc=("$FIRECRACKER" --api-sock "$DIR/fc.sock" --config-file "$DIR/fc.json"
               --log-path "$DIR/firecracker.log" --level Warning)
     local info="$type, ${vcpus} vCPU, ${mem} MiB, kernel ${kernel##*/}${IP:+, ip $IP}"
     [ ${#PORTS[@]} -eq 0 ] || info+=", ports ${PORTS[*]}"
     log "starting '$vm' ($info)"
-    if [ $bg = 1 ]; then
-        setsid "${fc[@]}" </dev/null >"$DIR/console.log" 2>&1 &
-        local pid=$!
-        echo $pid > "$DIR/pid"
-        start_portfwd $pid || { kill $pid; cleanup "$vm"; die "cannot publish ports"; }
-        sleep 0.3
-        vm_running "$vm" || { cat "$DIR/console.log" "$DIR/firecracker.log" >&2; cleanup "$vm"; die "firecracker failed to start"; }
-        log "running in background (pid $pid). Console: ./fcvm console $vm"
-    else
-        [ "$type" = systemd ] && log "serial console attached; 'poweroff' in the guest or './fcvm stop $vm' to exit"
-        local rc=0 code
-        ( echo "$BASHPID" > "$DIR/pid"; start_portfwd "$BASHPID" || exit 125; exec "${fc[@]}" ) || rc=$?
-        case $rc in
-            0)   ;;
-            125) warn "cannot publish ports; VM not started" ;;
-            *)   warn "firecracker exited with status $rc (see $DIR/firecracker.log)" ;;
-        esac
-        code=$([ "$type" = container ] && exit_code "$vm" || true)
-        cleanup "$vm"
-        return "${code:-$rc}"
+
+    setsid python3 "$FCVM_ROOT/lib/console.py" serve --sock "$DIR/console.sock" --log "$DIR/console.log" \
+        --pidfile "$DIR/pid" --on-exit "$(printf '%q _reap %q' "$FCVM_ROOT/fcvm" "$vm")" -- "${fc[@]}" \
+        </dev/null >"$DIR/relay.log" 2>&1 &
+    local i pid=""
+    for ((i = 0; i < 50; i++)); do pid=$(vm_pid "$vm"); [ -n "$pid" ] && break; sleep 0.02; done
+    [ -n "$pid" ] || { cat "$DIR/relay.log" >&2; die "console relay failed to start"; }
+    start_portfwd "$pid" || { kill "$pid"; die "cannot publish ports; VM not started"; }
+    sleep 0.2
+    if ! vm_running "$vm"; then
+        cat "$DIR/console.log" "$DIR/firecracker.log" >&2
+        die "firecracker failed to start"
     fi
+    if [ $attach = 1 ]; then
+        attach_vm "$vm"
+    elif [ -z "${QUIET_START:-}" ]; then
+        log "running (pid $pid). $([ "$type" = systemd ] && echo "fcvm shell $vm" || echo "fcvm console $vm") | fcvm logs $vm | fcvm stop $vm"
+    fi
+}
+
+# Attach this terminal to a running VM's console until it exits (returning a
+# container's exit code) or the user detaches with Ctrl-] (returning 0).
+attach_vm() {
+    local vm=$1 replay=${2:-tail} dir rc=0 i
+    dir=$(vm_dir "$vm")
+    touch "$dir/waiter"   # ask the reaper to keep the exit code for us
+    [ -t 0 ] && log "attached to '$vm' console (Ctrl-] to detach)"
+    python3 "$FCVM_ROOT/lib/console.py" attach "$dir/console.sock" --replay "$replay" || rc=$?
+    if [ $rc = 2 ]; then
+        rm -f "$dir/waiter"
+        printf '\n' >&2
+        log "detached; '$vm' is still running. fcvm console $vm | fcvm stop $vm"
+        return 0
+    fi
+    for ((i = 0; i < 100; i++)); do [ -f "$dir/pid" ] || break; sleep 0.05; done   # reaper done
+    local code=""
+    if [ -f "$VMS_DIR/.exit/$vm" ]; then
+        code=$(cat "$VMS_DIR/.exit/$vm"); rm -f "$VMS_DIR/.exit/$vm"
+    fi
+    rm -f "$dir/waiter"
+    return "${code:-0}"
 }
 
 stop() {
@@ -230,38 +262,92 @@ stop() {
             -H 'Content-Type: application/json' -d '{"action_type": "SendCtrlAltDel"}' >/dev/null || true
         for ((i = 0; i < 100; i++)); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
         if kill -0 "$pid" 2>/dev/null; then warn "guest did not shut down; killing"; kill -9 "$pid"; fi
-        log "stopped '$vm'"
+        for ((i = 0; i < 50; i++)); do [ -f "$dir/pid" ] || break; sleep 0.1; done   # relay reaps
+        [ -n "${QUIET_STOP:-}" ] || log "stopped '$vm'"
     fi
-    cleanup "$vm"
+    [ -f "$dir/pid" ] && reap "$vm"   # relay gone (crash, host reboot): reap here
+    return 0
 }
 
-cleanup() {
-    local dir; dir=$(vm_dir "$1")
+# Run by the console relay once Firecracker has exited: records the container
+# exit code (for an attached `run`), stops the port forwarder, removes runtime
+# files and deletes throwaway VMs.
+reap() {
+    local vm=${1:?} dir code
+    dir=$(vm_dir "$vm")
+    [ -f "$dir/vm.json" ] || return 0
+    if [ -f "$dir/waiter" ]; then
+        code=$(exit_code "$vm")
+        mkdir -p "$VMS_DIR/.exit"
+        echo "${code}" > "$VMS_DIR/.exit/$vm"
+    fi
     if [ -f "$dir/portfwd.pid" ]; then kill "$(cat "$dir/portfwd.pid")" 2>/dev/null || true; fi
-    rm -f "$dir/pid" "$dir/fc.sock" "$dir/vsock.sock" "$dir/portfwd.pid"
-    if [ "$(jq -r .ephemeral "$dir/vm.json" 2>/dev/null)" = true ]; then rm -rf "$dir"; fi
+    rm -f "$dir/fc.sock" "$dir/vsock.sock" "$dir/console.sock" "$dir/portfwd.pid" "$dir/pid"
+    if [ "$(jq -r .ephemeral "$dir/vm.json")" = true ]; then rm -rf "$dir"; fi
 }
 
+# fcvm run IMAGE [-d] [opts] [-- CMD...]: throwaway VM, deleted when it stops.
+#   container image: attached to its console like `docker run` (Ctrl-] detaches);
+#                    exits with the container's exit code
+#   systemd image:   boots, then `fcvm shell` (or CMD via exec); the VM is
+#                    stopped and deleted when the shell/command ends
 run() {
-    local image=${1:?usage: fcvm run IMAGE [-d] [-p [BIND:]HOST:GUEST]... [--vcpus N] [--mem MiB] [--disk SIZE] [-- CMD...]}
+    local usage="usage: fcvm run IMAGE [-d] [-p [BIND:]HOST:GUEST]... [--vcpus N] [--mem MiB] [--disk SIZE] [-- CMD...]"
+    local image=${1:?$usage}
     shift
-    local bg="" opts=()
+    local bg=0 opts=() argv=()
     while [ $# -gt 0 ]; do
         case $1 in
-            -d) bg=-d; shift ;;
-            --) break ;;
+            -d) bg=1; shift ;;
+            --) shift; argv=("$@"); break ;;
             *)  opts+=("$1"); shift ;;
         esac
     done
-    local vm; vm=${image%%-*}-$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')
-    EPHEMERAL=true create "$vm" "$image" "${opts[@]}" "$@"
-    start "$vm" $bg
+    local type vm
+    type=$(jq -r '.type // "container"' "$(image_json "$image")")
+    vm=${image%%-*}-$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')
+
+    if [ "$type" = container ]; then
+        EPHEMERAL=true create "$vm" "$image" "${opts[@]}" ${argv[@]+-- "${argv[@]}"}
+        if [ $bg = 1 ]; then start "$vm"; return; fi
+        QUIET_START=1 start "$vm"
+        attach_vm "$vm" all
+        return
+    fi
+
+    EPHEMERAL=true create "$vm" "$image" "${opts[@]}"
+    if [ $bg = 1 ]; then start "$vm"; return; fi
+    QUIET_START=1 start "$vm"
+    local rc=0
+    if [ ${#argv[@]} -gt 0 ]; then
+        if [ -t 0 ]; then exec_vm -it "$vm" "${argv[@]}" || rc=$?; else exec_vm -i "$vm" "${argv[@]}" || rc=$?; fi
+    else
+        shell_vm "$vm" || rc=$?
+    fi
+    QUIET_STOP=1 stop "$vm"
+    log "throwaway VM '$vm' stopped and removed"
+    return $rc
 }
 
+# fcvm console VM: attach to the live serial console (Ctrl-] detaches).
 console() {
-    local f; f=$(vm_dir "${1:?usage: fcvm console VM}")/console.log
-    [ -f "$f" ] || die "no console log for '$1' (only background VMs have one)"
-    tail -n +1 -f "$f"
+    local vm=${1:?usage: fcvm console VM}
+    vm_exists "$vm" || die "no VM '$vm'"
+    vm_running "$vm" || die "VM '$vm' is not running (see: fcvm logs $vm)"
+    attach_vm "$vm" tail
+}
+
+# fcvm logs [-f] VM: console output of the current/last boot.
+logs() {
+    local follow=0 vm=""
+    while [ $# -gt 0 ]; do
+        case $1 in -f|--follow) follow=1 ;; *) vm=$1 ;; esac
+        shift
+    done
+    [ -n "$vm" ] || die "usage: fcvm logs [-f] VM"
+    local f; f=$(vm_dir "$vm")/console.log
+    [ -f "$f" ] || die "no console log for '$vm'"
+    if [ $follow = 1 ]; then tail -n +1 -f "$f"; else cat "$f"; fi
 }
 
 ssh_vm() {
@@ -285,7 +371,7 @@ exec_vm() {
     local vm=${1:?$usage}; shift
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" || die "VM '$vm' is not running"
-    exec python3 "$FCVM_ROOT/lib/exec_client.py" "${flags[@]}" "$(vm_dir "$vm")/vsock.sock" -- "$@"
+    python3 "$FCVM_ROOT/lib/exec_client.py" "${flags[@]}" "$(vm_dir "$vm")/vsock.sock" -- "$@"
 }
 
 # fcvm shell [-u USER] VM: interactive shell (bash, else sh), as the image's user by default.
@@ -347,6 +433,8 @@ case $cmd in
     run)     run "$@" ;;
     stop)    stop "$@" ;;
     console) console "$@" ;;
+    logs)    logs "$@" ;;
+    _reap)   reap "$@" ;;
     ssh)     ssh_vm "$@" ;;
     exec)    exec_vm "$@" ;;
     shell)   shell_vm "$@" ;;

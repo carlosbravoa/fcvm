@@ -24,12 +24,14 @@ VMs:
                              create a VM: IMAGE's disk is shared read-only, writes go to
                              a per-VM layer. opts: --vcpus N --mem MiB --disk SIZE
                              --copy (private full copy) -p [BIND:]HOST:GUEST (publish TCP)
-  start VM [-d]              boot a VM (serial console in the foreground; -d = background);
-                             for container VMs, exits with the container's exit code
+  start [-a] VM              boot a VM in the background; -a attaches its console
   run IMAGE [-d] [opts] [-- CMD...]
-                             create + start a throwaway VM (deleted when it stops)
+                             throwaway VM, deleted when it stops. Container images: attached
+                             like docker run (exit code passed through; Ctrl-] detaches).
+                             Ubuntu images: drops into a shell; exit stops and deletes it
   stop VM                    ask the guest to shut down (Ctrl-Alt-Del), kill after a timeout
-  console VM                 tail the console log of a background VM
+  console VM                 attach to the serial console (Ctrl-] detaches)
+  logs [-f] VM               console output of the current or last boot
   exec [-i] [-t] [-u USER] VM CMD...
                              run a command in a running VM, like docker exec (over vsock);
                              USER is name|uid[:group|gid], default: the image's USER
@@ -54,7 +56,7 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|ssh|exec|shell|ls|rm)
+    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|_reap)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     help|-h|--help)     usage ;;
     *)                  usage; exit 1 ;;

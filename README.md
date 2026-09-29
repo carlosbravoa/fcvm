@@ -27,8 +27,9 @@ root.
 ./fcvm all                 # firecracker + kernel + init + Ubuntu base image
 
 ./fcvm create dev ubuntu-26.04
-./fcvm start dev           # serial console, auto-login as root; `poweroff` to exit
-./fcvm start dev -d && ./fcvm ssh dev
+./fcvm start dev           # boots in the background
+./fcvm shell dev           # root shell; `exit` leaves the VM running
+./fcvm run ubuntu-26.04    # throwaway sandbox: shell, and `exit` deletes the VM
 
 ./fcvm import nginx:latest
 ./fcvm run nginx-latest -d -p 8080:80    # throwaway VM, deleted when stopped
@@ -49,12 +50,14 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `import REF [NAME]` | registry image → `images/NAME.ext4` + `NAME.json` |
 | `images`, `ls` | lists images (with how many VMs use each) / VMs (state, exit code, disk use, ports) |
 | `create VM IMAGE [opts] [-- CMD...]` | VM on the shared image plus its own writable layer. `--vcpus N`, `--mem MiB`, `--disk SIZE` (layer size, default 8G sparse), `-p [BIND:]HOST:GUEST` (repeatable), `--copy` (private full copy instead), `-- CMD` (replaces the container command) |
-| `start VM [-d]` | boots in the foreground (serial console) or in the background. In the foreground, a container VM's exit code becomes fcvm's |
-| `run IMAGE [-d] [opts] [-- CMD...]` | `create` + `start` for a throwaway VM, deleted when it stops |
+| `start [-a] VM` | boots in the background, like `docker start`. `-a` attaches the console |
+| `run IMAGE [-d] [opts] [-- CMD...]` | throwaway VM, deleted when it stops. **Container images**: attached like `docker run`: you see the output, Ctrl-C goes to the app, Ctrl-] detaches, and fcvm exits with the container's exit code. **Ubuntu images**: boots and opens `fcvm shell` (or runs CMD); when the shell or CMD ends, the VM is stopped and deleted. `-d`: background |
 | `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s |
 | `exec [-i] [-t] [-u USER] VM CMD...` | runs a command in a running VM, like `docker exec`. Exits with its status |
 | `shell [-u USER] VM` | interactive shell in a running VM (bash, else sh). Same as `exec -it VM` |
-| `console VM`, `ssh VM`, `rm VM` | follows the console log, connects with ssh, deletes |
+| `console VM` | attaches to the live serial console. Ctrl-] detaches and the VM keeps running |
+| `logs [-f] VM` | console output of the current or last boot |
+| `ssh VM`, `rm VM` | connects with ssh, deletes |
 
 Settings (kernel channel, Ubuntu suite, packages, subnet, default vCPU/memory,
 extra kernel args) live at the top of `lib/common.sh`. Override them in
@@ -94,6 +97,16 @@ VM's IP. It watches the Firecracker PID and exits with the VM. A port that is
 already taken stops the VM from starting. The guest sees connections coming
 from the bridge (172.30.0.1), not from the real client. With ufw active,
 allowing a published port from the LAN still needs `sudo ufw allow 8080/tcp`.
+
+**Consoles.** Firecracker's serial port is its stdin/stdout. `fcvm start`
+runs it under `lib/console.py`, a small relay that owns the PTY. The relay
+writes everything to `vms/<vm>/console.log`, keeps a scrollback, and serves
+clients on `vms/<vm>/console.sock`, so consoles attach and detach (Ctrl-])
+without affecting the VM. When Firecracker exits, the relay runs
+`fcvm _reap <vm>`, which records the container's exit code for a waiting
+`run`, stops the port forwarder, and deletes throwaway VMs. Ubuntu images
+have no serial autologin: the console shows boot messages and a `login:`
+prompt, and you get in with `fcvm shell` or `fcvm ssh`.
 
 **exec / shell.** Every VM has a vsock device, and `fc-init` runs an exec
 agent on vsock port 1024. In container VMs it is forked by PID 1. In Ubuntu
@@ -166,16 +179,49 @@ lib/import.sh           import wrapper (sizes and creates the ext4)
 lib/vm.sh               VM lifecycle
 lib/portfwd.py          rootless TCP port publishing
 lib/exec_client.py      host side of fcvm exec / shell (vsock)
+lib/console.py          per-VM serial console relay (attach/detach, logs)
 lib/net.sh              host bridge/taps/NAT
 init/fc-init.c          PID 1 for container VMs
 kernel/microvm-*.config kernel fragment
 bin/ kernels/ images/ vms/ cache/ build/   generated
 ```
 
-## Limits and next steps
+## Roadmap
 
-- x86_64 only for now. aarch64 needs a `kernel/microvm-aarch64.config`.
-- Published ports are TCP only, and the client address is not preserved.
-  If you need either, add an nftables DNAT rule in `net.sh` (root).
+### Run VMs under the Firecracker jailer
+
+Today Firecracker runs as your user. KVM and Firecracker's own seccomp filters
+are the only boundary between a guest and the host, and every VM can reach the
+files of every other VM. `bin/jailer` (already downloaded by `fcvm firecracker`)
+is Firecracker's production wrapper. Plan:
+
+- **Opt-in mode**: `fcvm start --jail VM` / `JAIL=1`, with the rootless mode
+  staying the default for development. The jailer has to start as root (chroot,
+  mknod, cgroups, namespaces, then drop privileges). That means either `sudo`
+  per start or a small root helper (a systemd service owning `/srv/jailer`)
+  that `fcvm` asks to launch VMs. The helper keeps the CLI password-free.
+- **Chroot per VM** under `/srv/jailer/firecracker/<vm>/root`. The kernel, the
+  shared image (read-only) and the VM's `rw.ext4` are hard-linked or
+  bind-mounted in. `fc.json` paths become chroot-relative.
+- **Dedicated uid/gid per VM** from a reserved range, owning only that VM's
+  `rw.ext4` and sockets, so one compromised VMM can't read or write another
+  VM's disk.
+- **cgroup v2 limits** (`--cgroup-version 2`, `cpu.max`, `memory.max`, pids)
+  derived from `--vcpus`/`--mem`, plus `--resource-limit no-file=...`.
+- **Namespaces**: `--new-pid-ns`, and `--netns` with the VM's tap inside a
+  per-VM network namespace, joined to `fcbr0` through a veth pair. `net.sh`
+  would create those instead of the flat tap pool.
+- **Keep the CLI working**: the API socket and vsock socket live in the chroot.
+  `stop`, `exec`/`shell` and the port forwarder need group access to them, so
+  the helper would create them with a shared `fcvm` group.
+
+### Other items
+
+- aarch64 support (needs `kernel/microvm-aarch64.config` and testing).
+- Published ports are TCP only and don't preserve the client address. An
+  nftables DNAT mode in `net.sh` (root) would fix both.
+- `exec` via the agent has no auth beyond access to the VM's vsock socket.
+  That is fine for a single user, but the jailer's per-VM uids are the natural
+  place to tighten it.
 - Private registries: set `REGISTRY_USER` / `REGISTRY_PASSWORD`.
-- For production isolation, run Firecracker under `bin/jailer`.
+  `~/.docker/config.json` credentials are not read yet.

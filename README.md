@@ -79,6 +79,7 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `volume create NAME [SIZE]`, `volume ls [--json]`, `volume rm NAME` | named volumes: persistent ext4 disks attached with `-v` |
 | `egress VM [--allow H,...] [--deny H,...] [-n N \| -f]` | a restricted VM's allowlist and its allowed/denied requests. Changes apply live |
 | `mcp` | MCP server on stdio, for agents |
+| `serve [--port 8686]` | web console on `http://127.0.0.1:8686`, local only. Prints a login URL |
 | `shell [-u USER] VM` | interactive shell in a running VM (bash, else sh). Same as `exec -it VM` |
 | `console VM` | attaches to the live serial console. Ctrl-] detaches and the VM keeps running |
 | `logs [-f] VM` | console output of the current or last boot |
@@ -493,6 +494,51 @@ docker save myorg/tool:1.0 -o tool.tar && ./fcvm import tool.tar   # -> image to
 ./fcvm import oci:./layout:v2 mytool                               # a tag from an OCI layout
 ```
 
+## Web console
+
+```sh
+./fcvm serve            # prints http://127.0.0.1:8686/?token=...  (open it in a browser)
+```
+
+A cloud-console-like UI for this host:
+- **Dashboard:** host CPU, memory and disk; VM memory actually in use vs
+  allocated; network slots; running instances with their CPU and memory.
+- **Instances:** start, stop, restart, delete, snapshot, commit to image.
+  Each instance page has live charts (CPU, memory, disk I/O, network; the
+  last 10 minutes, sampled every 2 s) with a table view, details, logs, and
+  the egress policy with its allow/deny log.
+- **Browser terminals:** a **Shell** tab (an interactive shell through the
+  exec agent, optionally as another user) and a **Console** tab (the live
+  serial console), using xterm.js.
+- **Launch:** name, image, vCPU and memory; network (full, an allowlist
+  built from presets and extra hosts, or none); published ports; volumes and
+  host directories; for app images, run the image's command, stay idle for
+  the shell, or run a custom command.
+- **Images:** import from a registry or a local archive (runs as a
+  background job with progress), launch from an image, delete.
+- **Snapshots:** fork, delete. **Volumes:** list, delete.
+
+How it's built: `lib/web/server.py` is standard-library Python. It
+implements HTTP/1.1 and WebSockets (RFC 6455) on asyncio, and every change
+goes through the fcvm CLI, like the MCP server, so the UI and the command
+line always agree. Stats come straight from `/proc` (the Firecracker
+process's CPU time, resident memory and I/O) and from the tap devices'
+counters. The frontend in `lib/web/static/` is plain HTML, CSS and JS with no
+build step. xterm.js is vendored (MIT, see `vendor/LICENSE.xterm`), so it
+works offline. Light and dark themes follow the OS, with a toggle.
+
+**Security (local only for now):**
+- It binds 127.0.0.1 only.
+- The URL printed at start carries a random token, exchanged for an
+  HttpOnly, SameSite=Strict cookie. A new token is made on every start.
+- Requests must carry a localhost `Host` header, which blocks DNS
+  rebinding. Changes and WebSockets need a same-origin `Origin`, which
+  blocks cross-site requests.
+- Static files can't escape `static/`, and a strict Content-Security-Policy
+  allows only the app's own scripts.
+- Treat the URL like a password: the browser shell is a root shell in your
+  VMs. Remote access with real authentication is roadmap item W2.
+
 ## Agents (MCP)
 
 `fcvm mcp` is an MCP server on stdio (standard library only). It wraps the
@@ -548,6 +594,8 @@ lib/share9p.py          9P server for live host directories (-v /host:/path)
 lib/egress-presets.conf allowlist presets (@pypi, @npm, ...)
 lib/exec_client.py      host side of fcvm exec / shell (vsock)
 lib/mcp_server.py       MCP server (fcvm mcp)
+lib/web/server.py       web console backend (fcvm serve): HTTP, WebSockets, stats
+lib/web/static/         web console frontend (plain HTML/CSS/JS, vendored xterm.js)
 lib/build.py            fcvm build (Dockerfile subset)
 lib/console.py          per-VM serial console relay (attach/detach, logs)
 lib/net.sh              host bridge/taps/NAT
@@ -600,6 +648,40 @@ Windows. fcvm needs KVM and never will.
   need none. Beyond ~240 VMs per pool, taps would have to be created on
   demand, which needs root.
 - Not planned: macOS/Windows, GPUs, nested virtualization, desktop GUIs.
+
+### Web console
+
+A cloud-console-like web UI for one host: browse images, launch and manage
+instances, see resource use, with a console and shell in the browser. It
+lives in this project (`fcvm serve`) because it is a client of the same
+operations as the CLI and MCP server, and it ships with them. A multi-host
+fleet view would be a separate control-plane product built on this API.
+
+- **W1. Local web console v1.** ✅ `fcvm serve`, bound to 127.0.0.1 with a
+  token cookie. A dashboard of host and VM resource use; images (list,
+  import, delete); a launch form (image, vCPU/memory, network mode and
+  allowlist, ports, volumes and host directories); instances
+  (start/stop/delete, snapshot, fork); an instance page with live stats,
+  logs, egress log, and browser terminals (serial console and shell over
+  WebSockets); snapshots and volumes. Standard library only, no build step,
+  with xterm.js vendored.
+- **W2. Remote access.** Serve on a LAN or tailnet: TLS, real
+  authentication (local users, or OIDC/SSO), roles (viewer, operator,
+  admin). Shares work with enterprise items E1/E4/E5.
+- **W3. Builds from the UI.** Edit a Dockerfile and upload a build context,
+  with streamed build logs and the per-step cache made visible.
+- **W4. Files.** A file browser for a running VM (upload, download, edit)
+  over `fcvm cp`, and management of host-directory mounts.
+- **W5. Activity and audit.** A timeline of who did what (launch, exec,
+  console sessions, egress denials), feeding E5.
+- **W6. Service mode.** Run `fcvm serve` as a systemd user service; VMs
+  marked "start on boot" come back after a host reboot (with E4).
+- **W7. Metrics.** Guest-level metrics through the agent (CPU, memory, disk
+  and processes inside the VM), longer history, and a Prometheus endpoint.
+- **W8. Templates.** Saved launch presets, e.g. "Python sandbox, @pypi only,
+  2 GB", shared with the MCP server's defaults.
+- **W9. Fleet view.** Several fcvm hosts in one console: a separate
+  control-plane product using `fcvm serve` as the per-host agent.
 
 ### Enterprise
 

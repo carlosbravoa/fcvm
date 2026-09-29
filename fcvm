@@ -63,6 +63,7 @@ VMs:
   volume create NAME [SIZE] | ls [--json] | rm NAME
                              named volumes (persistent ext4 disks)
   mcp                        MCP server on stdio, for agents (see README)
+  serve [--port 8686]        web console on http://127.0.0.1:8686 (local only; prints a login URL)
 EOF
 }
 
@@ -84,6 +85,7 @@ case $cmd in
     images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|snapshot|fork|_reap)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
+    serve)              exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;
     help|-h|--help)     usage ;;
     *)                  usage; exit 1 ;;
 esac

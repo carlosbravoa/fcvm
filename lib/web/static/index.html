@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fcvm console</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/vendor/xterm.css">
+  <script src="/static/vendor/xterm.js"></script>
+  <script src="/static/vendor/addon-fit.js"></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="brand"><span class="logo" aria-hidden="true"></span> fcvm</div>
+  <div class="top">
+    <span class="host" id="host">…</span>
+    <span class="spacer"></span>
+    <button id="theme" title="Toggle light/dark theme" aria-label="Toggle light/dark theme"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg></button>
+    <button class="primary" id="launch">+ Launch instance</button>
+  </div>
+  <nav id="nav">
+    <a href="#/" data-page="dashboard">Dashboard</a>
+    <a href="#/instances" data-page="instances">Instances <span class="count" id="n-instances"></span></a>
+    <a href="#/images" data-page="images">Images <span class="count" id="n-images"></span></a>
+    <a href="#/snapshots" data-page="snapshots">Snapshots <span class="count" id="n-snapshots"></span></a>
+    <a href="#/volumes" data-page="volumes">Volumes <span class="count" id="n-volumes"></span></a>
+    <div class="foot" id="foot"></div>
+  </nav>
+  <main id="main"></main>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>

@@ -172,6 +172,29 @@ containerd or runc is involved. The type only says what runs as PID 1:
 | `-- CMD`, `--idle`, `--entrypoint` | yes | no |
 | good for | apps, one-off commands, agent sandboxes | long-lived dev machines, services, cron |
 
+**Example: Ubuntu both ways.** The same distribution can be either type:
+
+```sh
+./fcvm import ubuntu:latest   # app image "ubuntu-latest", from Docker Hub
+./fcvm run ubuntu-latest      # a bash prompt; `exit` and the VM is gone
+
+./fcvm base                   # system image "ubuntu-26.04", built with mmdebstrap
+./fcvm run ubuntu-26.04       # boots systemd, then a root shell
+```
+
+| | `./fcvm import ubuntu:latest` | `./fcvm base` |
+|---|---|---|
+| type | **app** (like any Docker image) | **system** |
+| PID 1 | fcvm's small init, which runs `bash` | systemd |
+| services, ssh, journald, timers | no | yes, it boots like a server |
+| feels like | `docker run -it ubuntu` | a Multipass or cloud VM |
+| size | 128M | 266M |
+
+In the app image you can `apt install` anything, but nothing starts in the
+background, because a container image has no init system. Install nginx and
+you start it yourself, as in Docker. In the system image, `apt install nginx`
+leaves a running, enabled service, as on any Ubuntu server.
+
 Compared with Docker running the same image, an app VM has the same
 filesystem, command, env and user. The difference is isolation: Docker shares
 the host kernel (namespaces, cgroups), while an app VM has its own guest

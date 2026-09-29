@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# fcvm - build Firecracker microVMs from Ubuntu 26.04 and from OCI/Docker images.
+# fcvm - disposable, isolated microVMs with container ergonomics, for people and agents.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
 usage() {
     cat <<EOF
 usage: fcvm <command> [args]
+Disposable, isolated Firecracker microVMs with container ergonomics.
 
 Host (need sudo):
   host-setup                 install build/runtime packages, check KVM access
@@ -15,7 +16,7 @@ Build:
   firecracker                download the Firecracker release ($FC_VERSION) into bin/
   kernel [VERSION]           fetch latest $KERNEL_CHANNEL kernel from kernel.org, build a microVM vmlinux
   init                       build fc-init and the initramfs every VM boots with
-  base [NAME]                build the Ubuntu 26.04 base image (default name: ubuntu-26.04)
+  base [NAME]                build a full-OS base image from scratch: Ubuntu 26.04 (default name: ubuntu-26.04)
   import REF [NAME]          image from Docker Hub / any registry, or local: docker-archive:F.tar,
                              oci:DIR, oci-archive:F.tar (or a path) -> VM image
   build [-t NAME] [-f FILE] [--build-arg K=V] [--no-cache] [--allow H,...] [CONTEXT]

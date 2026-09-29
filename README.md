@@ -1,7 +1,14 @@
-# fcvm: Firecracker microVMs from Ubuntu 26.04 and Docker images
+# fcvm: disposable, isolated microVMs with container ergonomics, for people and agents
 
-`fcvm` builds everything a Firecracker microVM needs and turns container images
-into VMs:
+`fcvm` runs workloads in Firecracker microVMs, each with its own kernel, with
+the convenience of a container tool: images, layers, volumes, ports, `exec`,
+snapshots and fork. It's self-hosted, starts VMs without root, and puts a real
+VM boundary around code you don't trust, with optional jailing and network
+isolation on top. Use it from the CLI, a web console, or an MCP client.
+
+Images come from anywhere: any OCI registry (Docker Hub, ghcr.io, quay.io,
+...), a local `docker save`, a Dockerfile, a committed VM, or a full-OS base
+built from scratch (Ubuntu 26.04 is the included example).
 
 **Build it yourself**
 - **Kernel**: fetches the newest kernel from kernel.org (stable by default),

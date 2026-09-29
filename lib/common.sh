@@ -12,10 +12,14 @@ FCVM_ROOT=${FCVM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 : "${UBUNTU_MIRROR:=http://archive.ubuntu.com/ubuntu}"
 : "${BASE_PACKAGES:=systemd-sysv,udev,dbus,iproute2,iputils-ping,netbase,ca-certificates,openssh-server,curl,less,nano,sudo,kmod}"
 : "${BASE_SIZE:=4G}"
-: "${NET_BRIDGE:=fcbr0}"
+: "${NET_BRIDGE:=fcbr0}"                        # full network: NAT to everything
 : "${NET_PREFIX:=172.30.0}"                    # /24; host is .1, VMs get .10 + tap index
-: "${NET_TAPS:=16}"
-: "${NET_DNS:=1.1.1.1}"
+: "${NET_TAPS:=64}"                            # taps per bridge
+: "${NET_ISOLATE:=0}"                          # 1: VMs on $NET_BRIDGE can't reach each other
+: "${NET_R_BRIDGE:=fcbr1}"                     # restricted network (--allow): proxy only
+: "${NET_R_PREFIX:=172.30.1}"
+: "${EGRESS_PORT:=3128}"                       # egress proxy, on $NET_R_PREFIX.1
+: "${NET_DNS:=auto}"                           # auto: the host's upstream resolvers
 : "${VM_VCPUS:=2}"
 : "${VM_MEM_MIB:=1024}"
 : "${VM_KERNEL_ARGS:=}"                        # extra kernel args, e.g. "loglevel=7" to debug boot
@@ -67,4 +71,18 @@ image_users() {
         [ -f "$j" ] || continue
         if [ "$(jq -r '.parent // empty' "$j")" = "$1" ]; then echo "image:$(basename "$j" .json)"; fi
     done
+}
+
+# DNS servers for VMs with full network ("a b", at most two). auto: the host's
+# real upstream resolvers (systemd-resolved's list, else /etc/resolv.conf),
+# skipping loopback stubs a VM can't reach; 1.1.1.1 as a last resort.
+vm_dns() {
+    if [ "$NET_DNS" != auto ]; then echo "$NET_DNS"; return; fi
+    local f ns
+    for f in /run/systemd/resolve/resolv.conf /etc/resolv.conf; do
+        [ -r "$f" ] || continue
+        ns=$(awk '$1 == "nameserver" && $2 !~ /^127\./ && $2 !~ /:/ {print $2}' "$f" | head -2 | tr '\n' ' ')
+        [ -n "$ns" ] && { echo "$ns"; return; }
+    done
+    echo 1.1.1.1
 }

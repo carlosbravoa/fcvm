@@ -54,7 +54,7 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | command | what it does |
 |---|---|
 | `host-setup` | installs build/runtime packages, checks `/dev/kvm` access |
-| `net-up` / `net-down` | bridge `fcbr0` (172.30.0.1/24), taps `fctap0..15`, nftables NAT, ufw rules |
+| `net-up` / `net-down` | bridges `fcbr0` (172.30.0.1/24, NAT) and `fcbr1` (172.30.1.1/24, restricted), 64 taps each, nftables rules, ufw rules |
 | `firecracker` | downloads the latest Firecracker release into `bin/` (checksum-verified) |
 | `kernel [stable\|mainline\|longterm\|X.Y.Z]` | builds `kernels/vmlinux-X.Y.Z`; `kernels/vmlinux` points at the newest |
 | `init` | builds `build/fc-init` (static) and `build/initramfs.cpio`, which every VM boots with |
@@ -71,6 +71,7 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `commit VM IMAGE` | saves a stopped VM's changes as a new image, a read-only layer on its image |
 | `rmi IMAGE` | deletes an image nothing depends on |
 | `volume create NAME [SIZE]`, `volume ls [--json]`, `volume rm NAME` | named volumes: persistent ext4 disks attached with `-v` |
+| `egress VM [--allow H,...] [--deny H,...] [-n N \| -f]` | a restricted VM's allowlist and its allowed/denied requests. Changes apply live |
 | `mcp` | MCP server on stdio, for agents |
 | `shell [-u USER] VM` | interactive shell in a running VM (bash, else sh). Same as `exec -it VM` |
 | `console VM` | attaches to the live serial console. Ctrl-] detaches and the VM keeps running |
@@ -192,12 +193,50 @@ the main process exits, it reboots the guest, and with `reboot=k` Firecracker
 then exits. `fcvm stop` sends Ctrl-Alt-Del, which `fc-init` turns into SIGTERM
 for the app.
 
-**Networking.** The kernel configures `eth0` from the `ip=` boot argument:
-`172.30.0.(10+i)` for tap `i`, gateway `172.30.0.1`, DNS `$NET_DNS`. No DHCP
-or network manager runs in the guest. The Ubuntu image links
+**Networking.** The kernel configures `eth0` from the `ip=` boot argument,
+so no DHCP or network manager runs in the guest. The Ubuntu image links
 `/etc/resolv.conf` to `/proc/net/pnp`. `fcvm start` takes the first free tap
-and holds a lock on it for the life of the VM. VMs are reachable from the host
-at their IP, and they reach the internet through NAT.
+of the VM's pool and holds a lock on it for the life of the VM. Each VM gets
+one of three network modes at `create`/`run`:
+
+| mode | option | what the VM can reach |
+|---|---|---|
+| full | (default) | everything, through NAT on `fcbr0` (`172.30.0.(10+i)`). DNS is the host's upstream resolvers (`NET_DNS=auto`) |
+| none | `--net none` | nothing: no network card. Needs no tap |
+| restricted | `--allow HOST,*.DOMAIN,HOST:PORT,@PRESET` | only the egress proxy on `fcbr1` (`172.30.1.(10+i)`) |
+
+**Egress control (restricted mode).** `fcbr1` has no NAT and no forwarding.
+nftables lets its VMs reach only `172.30.1.1:3128`, and its taps are
+bridge-isolated, so restricted VMs can't see each other either. On that port,
+`lib/egress_proxy.py` (one per user, started on demand, rootless) accepts
+`CONNECT` for HTTPS and absolute-URL requests for plain HTTP. It identifies
+the VM by source address and checks the host name against the VM's
+allowlist: `vms/.egress/<ip>.json`, re-read on every request. `fc-init`
+exports `http(s)_proxy` to the container's command and every exec session,
+and systemd images get them through `systemd.setenv=`. So pip, npm, apt,
+apk, git, curl and Go work unchanged. Names are resolved on the host, so
+split-DNS and VPN names work too. Every decision goes to
+`vms/<vm>/egress.log`. A denied plain-HTTP request gets a 403 that names the
+command to allow it; for HTTPS, clients just report the refused tunnel.
+
+```sh
+./fcvm run python-3.13-slim --allow @pypi -- pip install requests       # works
+./fcvm create box alpine-latest --idle --allow @alpine,github.com        # restricted VM
+./fcvm create box alpine-latest --net none                                # no network at all
+./fcvm egress box                     # allowlist + recent ALLOW/DENY log
+./fcvm egress box --allow example.com # live change, no restart
+```
+
+A request outside the allowlist fails with a 403 from the proxy, for example
+`urlopen error Tunnel connection failed: 403 Forbidden` from Python, and
+shows up as `DENY` in `fcvm egress`.
+
+Presets live in `lib/egress-presets.conf` (`@pypi`, `@npm`, `@github`,
+`@golang`, `@crates`, `@ubuntu`, `@debian`, `@alpine`, ...); add your own
+mirrors there. Only HTTP(S) and proxy-aware traffic can be allowed. Anything
+else (raw TCP, UDP, ICMP, direct DNS) is refused, which is the point.
+Wildcards follow the usual rule: `*.github.com` doesn't match `github.com`
+itself. VMs on `fcbr0` can reach each other unless `NET_ISOLATE=1`.
 
 **Kernel config notes** (learned the hard way on 7.2 + Firecracker 1.17):
 - `CONFIG_PCI=y` is required even for virtio-mmio guests. Firecracker's ACPI
@@ -231,7 +270,17 @@ claude mcp add fcvm -- /path/to/fcvm mcp
 | `write_file`, `read_file` | text files in the VM |
 | `copy_to_vm`, `copy_from_vm` | host files and directories in or out (`fcvm cp`) |
 | `commit_vm` | save a VM's state as an image; new sandboxes start from it |
+| `egress_log` | a sandbox's network policy and its allowed/denied requests |
 | `logs`, `list_vms`, `start_vm`, `stop_vm`, `remove_vm`, `volumes` | lifecycle and state |
+
+`create_sandbox` takes `network`: `"full"`, `"none"`, or an allowlist such
+as `["@pypi", "github.com"]`. To decide the policy for agents yourself, pin
+it when registering the server. Agents can then only narrow it to `"none"`,
+and no tool widens an allowlist:
+
+```sh
+claude mcp add fcvm -e FCVM_MCP_NETWORK=@pypi,@github -- /path/to/fcvm mcp
+```
 
 Output is capped at 20,000 characters per stream (head and tail kept) so a
 noisy command can't flood the agent's context. Errors from fcvm itself (no
@@ -251,6 +300,8 @@ lib/oci_import.py       registry client + layer flattening (stdlib only)
 lib/import.sh           import wrapper (sizes and creates the ext4)
 lib/vm.sh               VM lifecycle
 lib/portfwd.py          rootless TCP port publishing
+lib/egress_proxy.py     egress proxy for restricted VMs (allowlists, logging)
+lib/egress-presets.conf allowlist presets (@pypi, @npm, ...)
 lib/exec_client.py      host side of fcvm exec / shell (vsock)
 lib/mcp_server.py       MCP server (fcvm mcp)
 lib/console.py          per-VM serial console relay (attach/detach, logs)
@@ -288,14 +339,16 @@ Windows. fcvm needs KVM and never will.
   re-addressing inside the guest) and entropy reseeding (VMGenID).
 - **A3. Machine interface.** ✅ `--json` for `ls`/`images`, `fcvm inspect`,
   and ✅ an MCP server (`fcvm mcp`) that exposes sandbox tools to agents.
-- **A4. Egress control.** A per-VM network policy (no network, or an
-  allowlist such as PyPI/npm/GitHub only) and configurable DNS. DNS is fixed
-  to `$NET_DNS` today, which breaks split-DNS corporate networks.
+- **A4. Egress control.** ✅ `--net none`, ✅ `--allow` allowlists enforced by
+  a host-side proxy with an audit log, ✅ DNS from the host's upstream
+  resolvers. Still open: non-HTTP protocols in allowlists (e.g. SSH to
+  github.com), and TLS inspection, which is deliberately not done.
 - **A5. exec for agents.** ✅ `--timeout`, `-e KEY=VAL`, `-w DIR`.
 - **A6. Provisioning.** A cloud-init equivalent or build recipe. Import from a
   local `docker save` tarball or OCI layout, not only from registries.
-- **A7. Concurrency.** Raise the limit of 16 taps on one /24; parallel agent
-  attempts need more.
+- **A7. Concurrency.** ✅ 64 taps per network pool, and `--net none` VMs
+  need none. Beyond ~240 VMs per pool, taps would have to be created on
+  demand, which needs root.
 - Not planned: macOS/Windows, GPUs, nested virtualization, desktop GUIs.
 
 ### Enterprise

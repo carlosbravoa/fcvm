@@ -10,6 +10,9 @@
  *   fcvm.layers=DEV,...    committed image layers, topmost first (ext4, upper/)
  *   fcvm.vols=DEV:PATH[:ro],...  volumes
  *   fcvm.exec=PATH         then exec PATH as PID 1 (systemd images) ...
+ *   fcvm.proxy=URL         restricted network: http(s)_proxy for the container
+ *                          command and exec sessions (systemd images get it via
+ *                          systemd.setenv=)
  *
  * ... otherwise stage 2 acts as PID 1 for a container image:
  * Does what a container runtime would: mounts the API filesystems, sets the
@@ -355,6 +358,29 @@ static int isnum(const char *s)
 }
 
 /*
+ * Proxy variables for restricted VMs (fcvm.proxy=URL on the command line):
+ * appended to `env` (a NULL-terminated, malloc'd vector) and returned.
+ */
+static char **with_proxy_env(char **env)
+{
+    static const char *vars[] = {"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"};
+    char *proxy = karg("fcvm.proxy");
+    int n = 0;
+    while (env && env[n])
+        n++;
+    if (!proxy)
+        return env;
+    char **out = calloc(n + 7, sizeof(*out));
+    for (int i = 0; i < n; i++)
+        out[i] = env[i];
+    for (size_t i = 0; i < 4; i++)
+        asprintf(&out[n++], "%s=%s", vars[i], proxy);
+    out[n++] = "no_proxy=localhost,127.0.0.1,::1";
+    out[n++] = "NO_PROXY=localhost,127.0.0.1,::1";
+    return out;
+}
+
+/*
  * Find the /etc/passwd or /etc/group entry whose name is `name` (or, with
  * name NULL, whose id is `id`) and split it into f[]. Returns the number of
  * fields, 0 if not found. The strings stay allocated.
@@ -636,6 +662,10 @@ static void agent_session(int conn)
     int ni = 0;
     while (image_env && image_env[ni])
         ni++;
+    image_env = with_proxy_env(image_env);
+    ni = 0;
+    while (image_env && image_env[ni])
+        ni++;
     char **env = calloc(ni + nenv + 1, sizeof(*env));
     for (int i = 0; i < ni; i++)
         env[i] = image_env[i];
@@ -810,7 +840,7 @@ int main(int argc, char **argv_)
 
     static char *fallback[] = {"/bin/sh", NULL};
     char **argv = abuf && alen ? split0(abuf, alen) : fallback;
-    char **env = ebuf && elen ? split0(ebuf, elen) : NULL;
+    char **env = with_proxy_env(ebuf && elen ? split0(ebuf, elen) : NULL);
 
     sigset_t all, old;
     sigfillset(&all);

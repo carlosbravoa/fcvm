@@ -25,7 +25,8 @@ VMs:
                              a per-VM layer. opts: --vcpus N --mem MiB --disk SIZE
                              --copy (private full copy) -p [BIND:]HOST:GUEST (publish TCP)
                              -v VOLUME:/PATH[:ro] (named volume) --idle (container: no
-                             command, stays up for exec)
+                             command, stays up for exec) --net none (no network)
+                             --allow HOST,*.DOMAIN,@PRESET (egress allowlist via proxy)
   start [-a] VM              boot a VM in the background; -a attaches its console
   run IMAGE [-d] [opts] [-- CMD...]
                              throwaway VM, deleted when it stops. Container images: attached
@@ -45,6 +46,8 @@ VMs:
   ls [--json]                list VMs
   rm VM                      delete a VM
   rmi IMAGE                  delete an image
+  egress VM [--allow H,...] [--deny H,...] [-f]
+                             a restricted VM's allowlist and request log (changes are live)
   volume create NAME [SIZE] | ls [--json] | rm NAME
                              named volumes (persistent ext4 disks)
   mcp                        MCP server on stdio, for agents (see README)
@@ -65,7 +68,7 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|cp|volume|_reap)
+    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|cp|volume|egress|_reap)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     help|-h|--help)     usage ;;

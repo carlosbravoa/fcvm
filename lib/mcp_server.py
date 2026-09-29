@@ -19,12 +19,21 @@ PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 OUTPUT_CAP = 20000
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
+# Operator-pinned network policy for sandboxes created through MCP, e.g.
+#   claude mcp add fcvm -e FCVM_MCP_NETWORK=@pypi,@github -- fcvm mcp
+# "none", or a comma-separated allowlist. Agents can then only narrow it to
+# "none"; there is deliberately no tool to widen an allowlist.
+PINNED_NETWORK = os.environ.get("FCVM_MCP_NETWORK", "").strip()
+
 INSTRUCTIONS = """fcvm runs Firecracker microVMs: real kernel isolation, ~1 s to boot a container
 image, ~2 s for Ubuntu. Typical loop: images (or pull_image) -> create_sandbox ->
 exec / write_file / read_file / copy_* -> commit_vm to save a prepared state ->
 remove_vm. Container sandboxes run as the image's USER; pass user="root" to exec
-for installs. Sandboxes have outbound network (NAT). Files in a sandbox are lost
-on remove_vm unless committed or stored on a volume."""
+for installs. Network: "full" (NAT), "none", or an allowlist of hosts/@presets
+(@pypi, @npm, @github, ...) enforced by a host-side HTTP(S) proxy; the sandbox's
+http(s)_proxy variables are preset, and egress_log shows what was allowed or
+denied. Files in a sandbox are lost on remove_vm unless committed or stored on
+a volume."""
 
 
 class ToolError(Exception):
@@ -76,7 +85,22 @@ def t_list_vms():
     return json.loads(fcvm("ls", "--json")[1])
 
 
-def t_create_sandbox(image, name=None, command=None, vcpus=None, mem_mib=None, ports=None, volumes=None):
+def network_args(network):
+    if PINNED_NETWORK:
+        if network not in (None, "none"):
+            raise ToolError(f"the network policy is pinned by the server's configuration ({PINNED_NETWORK}); "
+                            "you may only request network='none'")
+        network = "none" if network == "none" else PINNED_NETWORK
+    if network in (None, "full"):
+        return []
+    if network == "none":
+        return ["--net", "none"]
+    allow = network if isinstance(network, list) else network.split(",")
+    return ["--allow", ",".join(a.strip() for a in allow if a.strip())]
+
+
+def t_create_sandbox(image, name=None, command=None, vcpus=None, mem_mib=None, ports=None, volumes=None,
+                     network=None):
     img = next((i for i in t_images() if i["name"] == image), None)
     if not img:
         raise ToolError(f"no image '{image}'; see the images tool or pull_image")
@@ -91,6 +115,7 @@ def t_create_sandbox(image, name=None, command=None, vcpus=None, mem_mib=None, p
         args += ["-p", p]
     for v in volumes or []:
         args += ["-v", v]
+    args += network_args(network)
     if img["type"] == "container":
         args += ["--", *command] if command else ["--idle"]
     fcvm(*args)
@@ -182,6 +207,10 @@ def t_commit_vm(vm, image):
     return {"image": image, "from": vm, "restarted": was_running}
 
 
+def t_egress_log(vm, lines=50):
+    return {"log": ANSI.sub("", fcvm("egress", vm, "-n", lines)[1])}
+
+
 def t_volumes():
     return json.loads(fcvm("volume", "ls", "--json")[1])
 
@@ -199,7 +228,10 @@ TOOLS = {
          "command": {"type": "array", "items": S, "description": "run this instead of staying idle (container images)"},
          "vcpus": I, "mem_mib": I,
          "ports": {"type": "array", "items": S, "description": "publish TCP ports, [BIND:]HOST:GUEST"},
-         "volumes": {"type": "array", "items": S, "description": "named volumes, NAME:/PATH[:ro] (created on first use)"}},
+         "volumes": {"type": "array", "items": S, "description": "named volumes, NAME:/PATH[:ro] (created on first use)"},
+         "network": {"description": 'full (default), "none", or an allowlist: ["@pypi", "github.com", "*.example.com"]'
+                     + (f". Pinned by the server to: {PINNED_NETWORK}" if PINNED_NETWORK else ""),
+                     "anyOf": [S, {"type": "array", "items": S}]}},
         ["image"]),
     "exec": (t_exec, "Run a command in a running VM. Returns exit_code, stdout and stderr (capped).",
              {"vm": S, "command": {**S, "description": "shell command, run with sh -c"},
@@ -225,6 +257,8 @@ TOOLS = {
         "Save a VM's changes as a new image (a layer on its image), e.g. after installing dependencies, so new sandboxes start from that state. A running VM is stopped and restarted.",
         {"vm": S, "image": S}, ["vm", "image"]),
     "volumes": (t_volumes, "List named volumes.", {}, []),
+    "egress_log": (t_egress_log, "A sandbox's network policy and its recent allowed/denied requests.",
+                   {"vm": S, "lines": I}, ["vm"]),
 }
 
 

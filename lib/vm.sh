@@ -61,10 +61,10 @@ exit_code() {
 }
 
 create() {
-    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [-- CMD...]"
+    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [-- CMD...]"
     local vm=${1:?$usage} image=${2:?$usage}
     shift 2
-    local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() argv=()
+    local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() argv=() netmode=full allow=()
     while [ $# -gt 0 ]; do
         case $1 in
             --vcpus)        vcpus=$2; shift 2 ;;
@@ -74,6 +74,9 @@ create() {
             --idle)         idle=1; shift ;;
             -p|--publish)   ports+=("$2"); shift 2 ;;
             -v|--volume)    vols+=("$2"); shift 2 ;;
+            --net)          [[ ${2:-} =~ ^(full|none)$ ]] || die "--net wants full or none (use --allow for a restricted network)"
+                            netmode=$2; shift 2 ;;
+            --allow)        IFS=, read -ra _a <<<"${2:?--allow wants HOST[,HOST...]}"; allow+=("${_a[@]}"); shift 2 ;;
             --)             shift; argv=("$@"); break ;;
             *)              die "unknown option $1 ($usage)" ;;
         esac
@@ -89,6 +92,12 @@ create() {
     fi
     [ ${#argv[@]} -eq 0 ] || [ "$type" = container ] || die "-- CMD and --idle only apply to container images"
     [ $copy = 0 ] || [ -z "$(jq -r '.parent // empty' "$meta")" ] || die "--copy needs a base image; '$image' is a committed layer"
+    if [ ${#allow[@]} -gt 0 ]; then
+        [ "$netmode" = full ] || die "--allow and --net none are mutually exclusive"
+        netmode=restricted
+        expand_allow "${allow[@]}" >/dev/null   # validate now, expand at start
+    fi
+    [ "$netmode" != none ] || [ ${#ports[@]} -eq 0 ] || die "-p needs a network; the VM has --net none"
     local p
     for p in "${ports[@]}"; do
         [[ $p =~ ^(([0-9.]+):)?[0-9]+:[0-9]+(/tcp)?$ ]] || die "bad port spec '$p' (want [BIND:]HOSTPORT:GUESTPORT, TCP only)"
@@ -116,23 +125,74 @@ create() {
         --argjson ephemeral "${EPHEMERAL:-false}" \
         --argjson ports "$(jq -n '$ARGS.positional' --args "${ports[@]}")" \
         --argjson volumes "$(jq -n '$ARGS.positional' --args "${vols[@]}")" \
+        --argjson net "$(jq -n --arg mode "$netmode" '{mode: $mode, allow: $ARGS.positional}' --args "${allow[@]}")" \
         '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
-          ephemeral: $ephemeral, created: (now | todate)}' > "$dir/vm.json"
+          net: $net, ephemeral: $ephemeral, created: (now | todate)}' > "$dir/vm.json"
     [ -n "${EPHEMERAL:-}" ] || log "created VM '$vm' from $image ($([ $copy = 1 ] && echo 'private copy' || echo 'shared image + writable layer'))"
 }
 
 # Claim a free tap: the flock is inherited by firecracker and held for its lifetime.
-claim_tap() {
+claim_tap() {   # tap-name-prefix
     mkdir -p "$VMS_DIR/.locks"
     local i
     for ((i = 0; i < NET_TAPS; i++)); do
-        [ -e "/sys/class/net/fctap$i" ] || continue
-        exec {TAP_FD}>"$VMS_DIR/.locks/fctap$i"
+        [ -e "/sys/class/net/$1$i" ] || continue
+        exec {TAP_FD}>"$VMS_DIR/.locks/$1$i"
         if flock -n "$TAP_FD"; then TAP_INDEX=$i; return 0; fi
         exec {TAP_FD}>&-
     done
     return 1
 }
+
+# --- egress policy (restricted network, --allow) --------------------------------
+
+# Allowlist entries with @presets expanded (lib/egress-presets.conf).
+expand_allow() {
+    local e hosts
+    for e in "$@"; do
+        if [[ $e == @* ]]; then
+            hosts=$(awk -v p="$e" '$1 == p {for (i = 2; i <= NF; i++) print $i}' "$FCVM_ROOT/lib/egress-presets.conf")
+            [ -n "$hosts" ] || die "unknown egress preset '$e' (see lib/egress-presets.conf)"
+            echo "$hosts"
+        else
+            [[ $e =~ ^(\*\.)?[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die "bad allowlist entry '$e' (want host, *.domain, host:port or @preset)"
+            echo "$e"
+        fi
+    done
+}
+
+# Policy file the egress proxy reads for the VM at $IP (re-read per request).
+write_policy() {   # vm ip
+    local dir; dir=$(vm_dir "$1")
+    mkdir -p "$VMS_DIR/.egress"
+    jq -n --arg vm "$1" --arg log "$dir/egress.log" \
+        --argjson allow "$(jq -n '$ARGS.positional' --args $(expand_allow $(jq -r '.net.allow[]?' "$dir/vm.json")))" \
+        '{vm: $vm, allow: $allow, log: $log}' > "$VMS_DIR/.egress/$2.json.tmp"
+    mv "$VMS_DIR/.egress/$2.json.tmp" "$VMS_DIR/.egress/$2.json"
+}
+
+# One egress proxy per user, shared by all restricted VMs, kept alive by a
+# restart loop: a crash (or killing the python process to reload it) costs at
+# most a second of refused connections. proxy.pid is the loop; kill it to stop.
+ensure_proxy() {
+    local pidf=$VMS_DIR/.egress/proxy.pid
+    if [ -f "$pidf" ] && kill -0 "$(cat "$pidf")" 2>/dev/null; then return 0; fi
+    mkdir -p "$VMS_DIR/.egress"
+    (   # don't let the long-lived proxy inherit this VM's tap lock
+        if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
+        exec setsid bash -c 'while :; do python3 "$1" --listen "$2" --policy-dir "$3"; sleep 1; done' egress-proxy \
+            "$FCVM_ROOT/lib/egress_proxy.py" "$NET_R_PREFIX.1:$EGRESS_PORT" "$VMS_DIR/.egress" \
+            </dev/null >>"$VMS_DIR/.egress/proxy.log" 2>&1
+    ) &
+    echo $! > "$pidf"
+    local i
+    for ((i = 0; i < 20; i++)); do
+        (exec 3<>"/dev/tcp/$NET_R_PREFIX.1/$EGRESS_PORT") 2>/dev/null && return 0
+        sleep 0.1
+    done
+    cat "$VMS_DIR/.egress/proxy.log" >&2; die "egress proxy failed to start"
+}
+
 
 # Publish ports for the VM whose firecracker runs as pid $1 (see portfwd.py).
 start_portfwd() {
@@ -172,18 +232,37 @@ start() {
     mapfile -t PORTS < <(jq -r '.ports[]?' "$DIR/vm.json")
     mapfile -t VOLUMES < <(jq -r '.volumes[]?' "$DIR/vm.json")
 
-    local args="console=ttyS0 reboot=k panic=1" net='[]'
+    local args="console=ttyS0 reboot=k panic=1" net='[]' mode mac
+    mode=$(jq -r '.net.mode // "full"' "$DIR/vm.json")
     IP=""
-    if claim_tap; then
-        IP=$NET_PREFIX.$((10 + TAP_INDEX))
-        local mac; mac=$(printf '06:00:%02x:%02x:%02x:%02x' ${IP//./ })
-        args+=" ip=$IP::$NET_PREFIX.1:255.255.255.0:$vm:eth0:off:$NET_DNS"
-        net=$(jq -n --arg mac "$mac" --arg tap "fctap$TAP_INDEX" '[{iface_id: "eth0", guest_mac: $mac, host_dev_name: $tap}]')
-        echo "$IP" > "$DIR/ip"
-    else
-        warn "no free tap device; starting without network (run: ./fcvm net-up)"
-        rm -f "$DIR/ip"
-    fi
+    rm -f "$DIR/ip"
+    case $mode in
+        none) ;;
+        restricted)
+            claim_tap fcrtap || die "no free restricted tap (fcrtap*); run: ./fcvm net-up"
+            IP=$NET_R_PREFIX.$((10 + TAP_INDEX))
+            local proxy=http://$NET_R_PREFIX.1:$EGRESS_PORT v
+            args+=" ip=$IP::$NET_R_PREFIX.1:255.255.255.0:$vm:eth0:off:$NET_R_PREFIX.1 fcvm.proxy=$proxy"
+            if [ "$type" = systemd ]; then
+                for v in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; do args+=" systemd.setenv=$v=$proxy"; done
+                args+=" systemd.setenv=no_proxy=localhost,127.0.0.1"
+            fi
+            write_policy "$vm" "$IP"
+            ensure_proxy
+            net=$(jq -n --arg tap "fcrtap$TAP_INDEX" --arg mac "$(printf '06:01:%02x:%02x:%02x:%02x' ${IP//./ })" \
+                '[{iface_id: "eth0", guest_mac: $mac, host_dev_name: $tap}]') ;;
+        *)
+            if claim_tap fctap; then
+                IP=$NET_PREFIX.$((10 + TAP_INDEX))
+                local dns; dns=$(vm_dns)
+                args+=" ip=$IP::$NET_PREFIX.1:255.255.255.0:$vm:eth0:off:$(tr ' ' : <<<"${dns% }")"
+                net=$(jq -n --arg tap "fctap$TAP_INDEX" --arg mac "$(printf '06:00:%02x:%02x:%02x:%02x' ${IP//./ })" \
+                    '[{iface_id: "eth0", guest_mac: $mac, host_dev_name: $tap}]')
+            else
+                warn "no free tap device; starting without network (run: ./fcvm net-up)"
+            fi ;;
+    esac
+    [ -z "$IP" ] || echo "$IP" > "$DIR/ip"
 
     # Drives, in attach order: vda, vdb, ... (Firecracker keeps config order).
     # fc-init (initramfs) assembles the root from the fcvm.* arguments.
@@ -246,6 +325,10 @@ start() {
     local fc=("$FIRECRACKER" --api-sock "$DIR/fc.sock" --config-file "$DIR/fc.json"
               --log-path "$DIR/firecracker.log" --level Warning)
     local info="$type, ${vcpus} vCPU, ${mem} MiB, kernel ${kernel##*/}${IP:+, ip $IP}"
+    case $mode in
+        none)       info+=", no network" ;;
+        restricted) info+=", egress: $(jq -r '.net.allow | join(" ")' "$DIR/vm.json")" ;;
+    esac
     [ ${#PORTS[@]} -eq 0 ] || info+=", ports ${PORTS[*]}"
     log "starting '$vm' ($info)"
 
@@ -327,6 +410,7 @@ reap() {
         echo "${code}" > "$VMS_DIR/.exit/$vm"
     fi
     if [ -f "$dir/portfwd.pid" ]; then kill "$(cat "$dir/portfwd.pid")" 2>/dev/null || true; fi
+    if [ -f "$dir/ip" ]; then rm -f "$VMS_DIR/.egress/$(cat "$dir/ip").json"; fi
     rm -f "$dir/fc.sock" "$dir/vsock.sock" "$dir/console.sock" "$dir/portfwd.pid" "$dir/pid"
     if [ "$(jq -r .ephemeral "$dir/vm.json")" = true ]; then rm -rf "$dir"; fi
 }
@@ -419,6 +503,7 @@ exec_vm() {
     local vm=${1:?$usage}; shift
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" || die "VM '$vm' is not running"
+    [ "$(jq -r '.net.mode // "full"' "$(vm_dir "$vm")/vm.json")" != restricted ] || ensure_proxy
     python3 "$FCVM_ROOT/lib/exec_client.py" "${flags[@]}" "$(vm_dir "$vm")/vsock.sock" -- "$@"
 }
 
@@ -606,6 +691,46 @@ inspect() {
     inspect_json "$vm"
 }
 
+# fcvm egress VM [--allow HOST,...] [--deny HOST,...] [-n N | -f]: a restricted
+# VM's allowlist and its allow/deny log. Changes apply live to a running VM.
+egress() {
+    local usage="usage: fcvm egress VM [--allow HOST,...] [--deny HOST,...] [-n LINES | -f]"
+    local vm="" add=() del=() lines=20 follow=0 _a
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --allow) IFS=, read -ra _a <<<"${2:?$usage}"; add+=("${_a[@]}"); shift 2 ;;
+            --deny)  IFS=, read -ra _a <<<"${2:?$usage}"; del+=("${_a[@]}"); shift 2 ;;
+            -n)      lines=${2:?$usage}; shift 2 ;;
+            -f)      follow=1; shift ;;
+            -*)      die "unknown option $1 ($usage)" ;;
+            *)       vm=$1; shift ;;
+        esac
+    done
+    [ -n "$vm" ] || die "$usage"
+    vm_exists "$vm" || die "no VM '$vm'"
+    local dir; dir=$(vm_dir "$vm")
+    local mode; mode=$(jq -r '.net.mode // "full"' "$dir/vm.json")
+    if [ ${#add[@]} -gt 0 ] || [ ${#del[@]} -gt 0 ]; then
+        [ "$mode" = restricted ] || die "VM '$vm' has network '$mode'; allowlists apply to VMs created with --allow"
+        [ ${#add[@]} -eq 0 ] || expand_allow "${add[@]}" >/dev/null
+        jq --argjson add "$(jq -n '$ARGS.positional' --args "${add[@]}")" \
+           --argjson del "$(jq -n '$ARGS.positional' --args "${del[@]}")" \
+           '.net.allow = ((.net.allow + $add | unique) - $del)' "$dir/vm.json" > "$dir/vm.json.tmp" &&
+            mv "$dir/vm.json.tmp" "$dir/vm.json"
+        if vm_running "$vm" && [ -f "$dir/ip" ]; then write_policy "$vm" "$(cat "$dir/ip")"; fi
+    fi
+    local fmt='"\(.ts)  \(.decision | ascii_upcase | .[0:5])  \(.method) \(.host):\(.port)"'
+    if [ $follow = 1 ]; then
+        touch "$dir/egress.log"; tail -n "$lines" -f "$dir/egress.log" | jq --unbuffered -r "$fmt"
+        return
+    fi
+    echo "network: $mode"
+    [ "$mode" != restricted ] || echo "allow:   $(jq -r '.net.allow | join(" ")' "$dir/vm.json")"
+    if [ -s "$dir/egress.log" ]; then
+        echo "recent requests:"; tail -n "$lines" "$dir/egress.log" | jq -r "$fmt" | sed 's/^/  /'
+    fi
+}
+
 list_vms() {
     local d
     if [ "${1:-}" = --json ]; then
@@ -613,7 +738,7 @@ list_vms() {
         return
     fi
     local fmt='%-20s %-11s %-14s %-18s %-10s %s\n'
-    printf "$fmt" NAME STATE IP IMAGE DISK PORTS
+    printf "$fmt" NAME STATE IP IMAGE DISK "NETWORK/PORTS/VOLUMES"
     local vm state ip code used
     for d in "$VMS_DIR"/*/; do
         [ -f "$d/vm.json" ] || continue
@@ -627,7 +752,8 @@ list_vms() {
         used=$(du -h "$d"/*.ext4 2>/dev/null | awk '{print $1; exit}')
         [ -f "$d/disk.ext4" ] && used+=" copy"
         printf "$fmt" "$vm" "$state" "$ip" "$(jq -r .image "$d/vm.json")" "$used" \
-            "$(jq -r '(.ports // []) + ((.volumes // []) | map("-v " + .)) | join(" ")' "$d/vm.json")"
+            "$(jq -r '[(if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
+                + (.ports // []) + ((.volumes // []) | map("-v " + .)) | join(" ")' "$d/vm.json")"
     done
 }
 
@@ -680,5 +806,6 @@ case $cmd in
     rmi)     rmi "$@" ;;
     cp)      cp_cmd "$@" ;;
     volume)  volume_cmd "$@" ;;
+    egress)  egress "$@" ;;
     rm)      rm_vm "$@" ;;
 esac

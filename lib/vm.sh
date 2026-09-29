@@ -61,17 +61,19 @@ exit_code() {
 }
 
 create() {
-    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [-p [BIND:]HOST:GUEST]... [-- CMD...]"
+    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [-- CMD...]"
     local vm=${1:?$usage} image=${2:?$usage}
     shift 2
-    local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 ports=() argv=()
+    local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() argv=()
     while [ $# -gt 0 ]; do
         case $1 in
             --vcpus)        vcpus=$2; shift 2 ;;
             --mem)          mem=$2; shift 2 ;;
             --disk)         disk=$2; shift 2 ;;
             --copy)         copy=1; shift ;;
+            --idle)         idle=1; shift ;;
             -p|--publish)   ports+=("$2"); shift 2 ;;
+            -v|--volume)    vols+=("$2"); shift 2 ;;
             --)             shift; argv=("$@"); break ;;
             *)              die "unknown option $1 ($usage)" ;;
         esac
@@ -81,10 +83,19 @@ create() {
     local meta type
     meta=$(image_json "$image")
     type=$(jq -r '.type // "container"' "$meta")
-    [ ${#argv[@]} -eq 0 ] || [ "$type" = container ] || die "-- CMD only applies to container images"
+    if [ $idle = 1 ]; then
+        [ ${#argv[@]} -eq 0 ] || die "--idle and -- CMD are mutually exclusive"
+        argv=(/.fcvm/bin/fc-init --idle)   # stay up for exec; stop ends it cleanly
+    fi
+    [ ${#argv[@]} -eq 0 ] || [ "$type" = container ] || die "-- CMD and --idle only apply to container images"
+    [ $copy = 0 ] || [ -z "$(jq -r '.parent // empty' "$meta")" ] || die "--copy needs a base image; '$image' is a committed layer"
     local p
     for p in "${ports[@]}"; do
         [[ $p =~ ^(([0-9.]+):)?[0-9]+:[0-9]+(/tcp)?$ ]] || die "bad port spec '$p' (want [BIND:]HOSTPORT:GUESTPORT, TCP only)"
+    done
+    for p in "${vols[@]}"; do
+        [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:,]*(:ro)?$ ]] || die "bad volume spec '$p' (want NAME:/PATH[:ro]; host directories can't be mounted, use fcvm cp)"
+        [ -f "$VOLUMES_DIR/${p%%:*}.ext4" ] || volume_create "${p%%:*}"
     done
 
     local dir; dir=$(vm_dir "$vm")
@@ -102,9 +113,11 @@ create() {
         make_rw "$dir/rw.ext4" "${disk:-$VM_DISK}" "${argv[@]}"
     fi
     jq -n --arg image "$image" --arg type "$type" --argjson vcpus "$vcpus" --argjson mem "$mem" \
-        --argjson ephemeral "${EPHEMERAL:-false}" --args \
-        '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ARGS.positional, ephemeral: $ephemeral}' \
-        "${ports[@]}" > "$dir/vm.json"
+        --argjson ephemeral "${EPHEMERAL:-false}" \
+        --argjson ports "$(jq -n '$ARGS.positional' --args "${ports[@]}")" \
+        --argjson volumes "$(jq -n '$ARGS.positional' --args "${vols[@]}")" \
+        '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
+          ephemeral: $ephemeral, created: (now | todate)}' > "$dir/vm.json"
     [ -n "${EPHEMERAL:-}" ] || log "created VM '$vm' from $image ($([ $copy = 1 ] && echo 'private copy' || echo 'shared image + writable layer'))"
 }
 
@@ -157,6 +170,7 @@ start() {
     vcpus=$(jq -r .vcpus "$DIR/vm.json")
     mem=$(jq -r .mem_mib "$DIR/vm.json")
     mapfile -t PORTS < <(jq -r '.ports[]?' "$DIR/vm.json")
+    mapfile -t VOLUMES < <(jq -r '.volumes[]?' "$DIR/vm.json")
 
     local args="console=ttyS0 reboot=k panic=1" net='[]'
     IP=""
@@ -171,19 +185,44 @@ start() {
         rm -f "$DIR/ip"
     fi
 
-    local drives
+    # Drives, in attach order: vda, vdb, ... (Firecracker keeps config order).
+    # fc-init (initramfs) assembles the root from the fcvm.* arguments.
+    [ -f "$BUILD_DIR/initramfs.cpio" ] || "$FCVM_ROOT/lib/build-init.sh"
+    local drives='[]' n=0 dev letters=abcdefghijklmnopqrstuvwxyz
+    add_drive() {   # id path read_only
+        dev=/dev/vd${letters:n:1}
+        drives=$(jq --arg id "$1" --arg path "$2" --argjson ro "$3" \
+            '. + [{drive_id: $id, path_on_host: $path, is_root_device: false, is_read_only: $ro}]' <<<"$drives")
+        n=$((n + 1))
+    }
     if [ -f "$DIR/disk.ext4" ]; then
-        drives=$(jq -n --arg disk "$DIR/disk.ext4" \
-            '[{drive_id: "rootfs", path_on_host: $disk, is_root_device: true, is_read_only: false}]')
-        [ "$type" = container ] && args+=" init=/.fcvm/init"
+        add_drive root "$DIR/disk.ext4" false; args+=" fcvm.root=$dev"
     else
-        [ -f "$IMAGES_DIR/$image.ext4" ] || die "image '$image' is gone; VM '$vm' cannot boot"
-        drives=$(jq -n --arg base "$IMAGES_DIR/$image.ext4" --arg rw "$DIR/rw.ext4" '[
-            {drive_id: "rootfs", path_on_host: $base, is_root_device: true, is_read_only: true},
-            {drive_id: "rw", path_on_host: $rw, is_root_device: false, is_read_only: false}]')
-        args+=" init=/.fcvm/init fcvm.overlay=/dev/vdb"
-        [ "$type" = systemd ] && args+=" fcvm.exec=/sbin/init"
+        local chain=() layers=() i
+        mapfile -t chain < <(image_chain "$image")
+        for i in "${chain[@]}"; do
+            [ -f "$IMAGES_DIR/$i.ext4" ] || die "image '$i' is gone; VM '$vm' cannot boot"
+        done
+        add_drive root "$IMAGES_DIR/${chain[-1]}.ext4" true; args+=" fcvm.root=$dev"
+        add_drive rw "$DIR/rw.ext4" false; args+=" fcvm.rw=$dev"
+        for ((i = 0; i < ${#chain[@]} - 1; i++)); do
+            add_drive "layer$i" "$IMAGES_DIR/${chain[i]}.ext4" true; layers+=("$dev")
+        done
+        [ ${#layers[@]} -eq 0 ] || args+=" fcvm.layers=$(IFS=,; echo "${layers[*]}")"
     fi
+    local vol vname vols=() busy
+    for vol in "${VOLUMES[@]}"; do
+        vname=${vol%%:*}
+        [ -f "$VOLUMES_DIR/$vname.ext4" ] || die "volume '$vname' is gone"
+        if [[ $vol != *:ro ]]; then
+            busy=$(volume_users "$vname" running rw | grep -vx -- "$vm" || true)
+            [ -z "$busy" ] || die "volume '$vname' is in use by running VM(s): $busy"
+        fi
+        add_drive "vol-$vname" "$VOLUMES_DIR/$vname.ext4" "$([[ $vol == *:ro ]] && echo true || echo false)"
+        vols+=("$dev:${vol#*:}")
+    done
+    [ ${#vols[@]} -eq 0 ] || args+=" fcvm.vols=$(IFS=,; echo "${vols[*]}")"
+    [ "$type" = systemd ] && args+=" fcvm.exec=/sbin/init"
     if [ "$type" = container ]; then
         args+=" quiet loglevel=1"   # keep the console to the app's output
     else
@@ -191,9 +230,9 @@ start() {
     fi
     args+=${VM_KERNEL_ARGS:+ $VM_KERNEL_ARGS}
 
-    jq -n --arg kernel "$kernel" --arg args "$args" --argjson drives "$drives" \
+    jq -n --arg kernel "$kernel" --arg initrd "$BUILD_DIR/initramfs.cpio" --arg args "$args" --argjson drives "$drives" \
         --argjson vcpus "$vcpus" --argjson mem "$mem" --argjson net "$net" --arg vsock "$DIR/vsock.sock" '{
-        "boot-source": {kernel_image_path: $kernel, boot_args: $args},
+        "boot-source": {kernel_image_path: $kernel, initrd_path: $initrd, boot_args: $args},
         "drives": $drives,
         "machine-config": {vcpu_count: $vcpus, mem_size_mib: $mem},
         "network-interfaces": $net,
@@ -258,9 +297,15 @@ stop() {
     dir=$(vm_dir "$vm")
     if vm_running "$vm"; then
         pid=$(vm_pid "$vm")
-        curl -fsS --unix-socket "$dir/fc.sock" -X PUT http://localhost/actions \
-            -H 'Content-Type: application/json' -d '{"action_type": "SendCtrlAltDel"}' >/dev/null || true
-        for ((i = 0; i < 100; i++)); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+        # Resent every 2 s: during early boot the guest's keyboard driver isn't listening yet.
+        for ((i = 0; i < 100; i++)); do
+            kill -0 "$pid" 2>/dev/null || break
+            if ((i % 10 == 0)); then
+                curl -fsS --unix-socket "$dir/fc.sock" -X PUT http://localhost/actions \
+                    -H 'Content-Type: application/json' -d '{"action_type": "SendCtrlAltDel"}' >/dev/null 2>&1 || true
+            fi
+            sleep 0.2
+        done
         if kill -0 "$pid" 2>/dev/null; then warn "guest did not shut down; killing"; kill -9 "$pid"; fi
         for ((i = 0; i < 50; i++)); do [ -f "$dir/pid" ] || break; sleep 0.1; done   # relay reaps
         [ -n "${QUIET_STOP:-}" ] || log "stopped '$vm'"
@@ -360,10 +405,13 @@ ssh_vm() {
 # fcvm exec [-i] [-t] [-u USER] VM [CMD...]: like `docker exec`, over vsock
 # (no network or sshd needed). USER is name|uid[:group|gid], resolved in the guest.
 exec_vm() {
-    local usage="usage: fcvm exec [-i] [-t] [-u USER] VM [CMD...]" flags=()
+    local usage="usage: fcvm exec [-i] [-t] [-u USER] [-w DIR] [-e KEY=VAL]... [--timeout SECS] VM [CMD...]" flags=()
     while [[ ${1:-} == -* ]]; do
         case $1 in
             -u|--user)     flags+=(-u "${2:?$usage}"); shift 2 ;;
+            -w|--workdir)  flags+=(-w "${2:?$usage}"); shift 2 ;;
+            -e|--env)      [[ ${2:-} == *=* ]] || die "-e wants KEY=VALUE"; flags+=(-e "$2"); shift 2 ;;
+            --timeout)     [[ ${2:-} =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--timeout wants seconds"; flags+=(--timeout "$2"); shift 2 ;;
             -i|-t|-it|-ti) [[ $1 == *i* ]] && flags+=(-i); [[ $1 == *t* ]] && flags+=(-t); shift ;;
             *)             die "unknown option $1 ($usage)" ;;
         esac
@@ -388,10 +436,185 @@ shell_vm() {
     if [ -t 0 ]; then exec_vm -it "${user[@]}" "$vm"; else exec_vm -i "${user[@]}" "$vm"; fi
 }
 
+# --- volumes: persistent ext4 disks, attached with -v NAME:/PATH[:ro] ---------
+
+volume_create() {
+    local name=${1:?usage: fcvm volume create NAME [SIZE]} size=${2:-$VOLUME_SIZE}
+    [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "invalid volume name '$name'"
+    local f=$VOLUMES_DIR/$name.ext4
+    [ ! -e "$f" ] || die "volume '$name' already exists"
+    mkdir -p "$VOLUMES_DIR"
+    truncate -s "$size" "$f"
+    mkfs.ext4 -q -F -L "vol-${name:0:12}" -E lazy_itable_init=1,lazy_journal_init=1,root_owner=0:0 "$f"
+    debugfs -w -R "rmdir /lost+found" "$f" >/dev/null 2>&1   # an empty root, like a docker volume
+    log "created volume '$name' ($size, sparse)"
+}
+
+# VMs that reference volume $1. Filters: "running" (only running VMs), "rw" (only rw mounts).
+volume_users() {
+    local name=$1 want_running=${2:-} want_rw=${3:-} j vm spec
+    for j in "$VMS_DIR"/*/vm.json; do
+        [ -f "$j" ] || continue
+        vm=$(basename "${j%/vm.json}")
+        [ -z "$want_running" ] || vm_running "$vm" || continue
+        while read -r spec; do
+            [ "${spec%%:*}" = "$name" ] || continue
+            [ -z "$want_rw" ] || [[ $spec != *:ro ]] || continue
+            echo "$vm"; break
+        done < <(jq -r '.volumes[]?' "$j")
+    done
+}
+
+volume_cmd() {
+    local sub=${1:-ls}; shift || true
+    case $sub in
+        create) volume_create "$@" ;;
+        ls)
+            local json=0 f name
+            [ "${1:-}" = --json ] && json=1
+            for f in "$VOLUMES_DIR"/*.ext4; do
+                [ -f "$f" ] || continue
+                name=$(basename "$f" .ext4)
+                jq -n --arg name "$name" --argjson size "$(stat -c %s "$f")" \
+                    --argjson used "$(( $(stat -c %b "$f") * 512 ))" \
+                    --argjson vms "$(jq -n '$ARGS.positional' --args $(volume_users "$name"))" \
+                    '{name: $name, size_bytes: $size, used_bytes: $used, vms: $vms}'
+            done | if [ $json = 1 ]; then jq -s .; else
+                jq -rs '(["NAME","SIZE","USED","VMS"] | @tsv), (.[] | [.name, "\(.size_bytes / 1073741824 | floor)G",
+                    "\(.used_bytes / 1048576 | floor)M", (.vms | join(","))] | @tsv)' | column -t -s $'\t'; fi ;;
+        rm)
+            local name=${1:?usage: fcvm volume rm NAME} users
+            [ -f "$VOLUMES_DIR/$name.ext4" ] || die "no volume '$name'"
+            users=$(volume_users "$name" | tr '\n' ' ')
+            [ -z "$users" ] || die "volume '$name' is used by VM(s): $users"
+            rm -f "$VOLUMES_DIR/$name.ext4"
+            log "removed volume '$name'" ;;
+        *) die "usage: fcvm volume create NAME [SIZE] | ls [--json] | rm NAME" ;;
+    esac
+}
+
+# --- images: commit and remove --------------------------------------------------
+
+# fcvm commit VM IMAGE: the VM's writable layer becomes a read-only layer on top
+# of the VM's image (docker commit). Instant: the layer disk is copied, not
+# merged. A --copy VM's private disk becomes a standalone base image instead.
+commit() {
+    local vm=${1:?usage: fcvm commit VM IMAGE} image=${2:?usage: fcvm commit VM IMAGE}
+    vm_exists "$vm" || die "no VM '$vm'"
+    vm_running "$vm" && die "VM '$vm' is running; stop it first (fcvm stop $vm)"
+    [[ $image =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "invalid image name '$image'"
+    [ ! -e "$IMAGES_DIR/$image.json" ] || die "image '$image' already exists"
+    local dir parent src out rc=0
+    dir=$(vm_dir "$vm")
+    parent=$(jq -r .image "$dir/vm.json")
+    out=$IMAGES_DIR/$image.ext4
+    if [ -f "$dir/disk.ext4" ]; then src=$dir/disk.ext4; else src=$dir/rw.ext4; fi
+    cp --sparse=always "$src" "$out"
+    chmod u+w "$out"
+    e2fsck -fy "$out" >/dev/null 2>&1 || rc=$?   # replay the journal if the VM was killed
+    [ $rc -lt 4 ] || { rm -f "$out"; die "the VM's disk has errors e2fsck could not fix"; }
+    # Per-VM state, not image content: the last exit status, and the command
+    # override from create --idle / -- CMD (the image keeps its own command).
+    local f pre; pre=$([ "$src" = "$dir/rw.ext4" ] && echo /upper || true)
+    for f in exit-status argv; do
+        [ "$f" = argv ] && [ -z "$pre" ] && continue   # --copy disk: argv is the image's own
+        debugfs -w -R "rm $pre/.fcvm/$f" "$out" >/dev/null 2>&1 || true
+    done
+    chmod a-w "$out"
+    if [ -f "$dir/disk.ext4" ]; then
+        jq --arg vm "$vm" --arg parent "$parent" 'del(.parent) + {ref: "commit of \($vm) (from \($parent))"}' \
+            "$IMAGES_DIR/$parent.json" > "$IMAGES_DIR/$image.json"
+    else
+        jq --arg vm "$vm" --arg parent "$parent" '. + {parent: $parent, ref: "commit of \($vm) (from \($parent))"}' \
+            "$IMAGES_DIR/$parent.json" > "$IMAGES_DIR/$image.json"
+    fi
+    log "committed '$vm' as image '$image' ($(du -h "$out" | cut -f1) on disk$([ -f "$dir/disk.ext4" ] || echo ", layer on $parent"))"
+}
+
+rmi() {
+    local image=${1:?usage: fcvm rmi IMAGE} users
+    image_json "$image" >/dev/null
+    users=$(image_users "$image" | tr '\n' ' ')
+    [ -z "$users" ] || die "image '$image' is used by: $users"
+    rm -f "$IMAGES_DIR/$image.ext4" "$IMAGES_DIR/$image.json"
+    log "removed image '$image'"
+}
+
+# --- fcvm cp: files in and out of a running VM (tar over the exec agent) -------
+# Needs sh and tar in the guest (busybox counts). Like docker cp: if DST is an
+# existing directory, SRC is copied into it; otherwise SRC is copied as DST.
+
+cp_cmd() {
+    local usage="usage: fcvm cp [-L] HOST_PATH VM:PATH | fcvm cp [-L] VM:PATH HOST_PATH  (-L: follow symlinks in SRC)"
+    local follow=()
+    if [ "${1:-}" = -L ]; then follow=(-h); shift; fi
+    local src=${1:?$usage} dst=${2:?$usage} vm path base parent newbase xform
+    if [[ $dst == *:* && $src != *:* ]]; then          # host -> VM
+        vm=${dst%%:*} path=${dst#*:}
+        [ -e "$src" ] || die "no such file: $src"
+        vm_running "$vm" || die "VM '$vm' is not running"
+        src=$(realpath -s "$src"); base=$(basename "$src"); parent=$(dirname "$src")
+        if exec_vm "$vm" test -d "$path" 2>/dev/null; then
+            xform=() newbase=$base; dst=$path
+        else
+            newbase=$(basename "$path"); dst=$(dirname "$path")
+            xform=(--transform "s|^$(sed 's/[][\.*^$|]/\\&/g' <<<"$base")\(/\|\$\)|$newbase\1|S")
+        fi
+        tar -C "$parent" --owner=0 --group=0 --numeric-owner "${follow[@]}" "${xform[@]}" -cf - "$base" |
+            exec_vm -i "$vm" sh -c 'mkdir -p "$1" && tar -xf - -C "$1"' sh "$dst" ||
+            die "copy failed (the image needs sh and tar)"
+    elif [[ $src == *:* && $dst != *:* ]]; then        # VM -> host
+        vm=${src%%:*} path=${src#*:}
+        vm_running "$vm" || die "VM '$vm' is not running"
+        path=${path%/}; base=$(basename "$path"); parent=$(dirname "$path")
+        if [ -d "$dst" ]; then
+            xform=()
+        else
+            newbase=$(basename "$dst"); dst=$(dirname "$dst")
+            xform=(--transform "s|^$(sed 's/[][\.*^$|]/\\&/g' <<<"$base")\(/\|\$\)|$newbase\1|S")
+        fi
+        exec_vm "$vm" sh -c 'cd "$1" && tar $3 -cf - "$2"' sh "$parent" "$base" "${follow[*]}" |
+            tar -xf - -C "$dst" --no-same-owner "${xform[@]}" ||
+            die "copy failed (does $path exist? the image needs sh and tar)"
+    else
+        die "$usage"
+    fi
+}
+
+# --- machine-readable state ------------------------------------------------------
+
+inspect_json() {
+    local vm=$1 d state=stopped pid="" ip="" code=""
+    d=$(vm_dir "$vm")
+    if vm_running "$vm"; then
+        state=running pid=$(vm_pid "$vm") ip=$(cat "$d/ip" 2>/dev/null || true)
+    elif [ "$(jq -r .type "$d/vm.json")" = container ]; then
+        code=$(exit_code "$vm"); [ -z "$code" ] || state=exited
+    fi
+    jq --arg name "$vm" --arg state "$state" --arg pid "$pid" --arg ip "$ip" --arg code "$code" \
+        --argjson disk "$(( $(stat -c %b "$d"/*.ext4 | head -1) * 512 ))" \
+        --arg mode "$([ -f "$d/disk.ext4" ] && echo copy || echo overlay)" \
+        --argjson chain "$(jq -n '$ARGS.positional' --args $(image_chain "$(jq -r .image "$d/vm.json")"))" \
+        '{name: $name, state: $state, pid: ($pid | tonumber? // null), ip: ($ip | select(. != "") // null),
+          exit_code: ($code | tonumber? // null), image_chain: $chain, disk_mode: $mode, disk_used_bytes: $disk} + .' \
+        "$d/vm.json"
+}
+
+inspect() {
+    local vm=${1:?usage: fcvm inspect VM}
+    vm_exists "$vm" || die "no VM '$vm'"
+    inspect_json "$vm"
+}
+
 list_vms() {
+    local d
+    if [ "${1:-}" = --json ]; then
+        for d in "$VMS_DIR"/*/; do [ -f "$d/vm.json" ] && inspect_json "$(basename "$d")"; done | jq -s .
+        return
+    fi
     local fmt='%-20s %-11s %-14s %-18s %-10s %s\n'
     printf "$fmt" NAME STATE IP IMAGE DISK PORTS
-    local d vm state ip code used
+    local vm state ip code used
     for d in "$VMS_DIR"/*/; do
         [ -f "$d/vm.json" ] || continue
         vm=$(basename "$d")
@@ -404,18 +627,30 @@ list_vms() {
         used=$(du -h "$d"/*.ext4 2>/dev/null | awk '{print $1; exit}')
         [ -f "$d/disk.ext4" ] && used+=" copy"
         printf "$fmt" "$vm" "$state" "$ip" "$(jq -r .image "$d/vm.json")" "$used" \
-            "$(jq -r '(.ports // []) | join(" ")' "$d/vm.json")"
+            "$(jq -r '(.ports // []) + ((.volumes // []) | map("-v " + .)) | join(" ")' "$d/vm.json")"
     done
 }
 
 list_images() {
-    printf '%-28s %-10s %-8s %-8s %s\n' NAME TYPE SIZE VMS SOURCE
     local j name
+    if [ "${1:-}" = --json ]; then
+        for j in "$IMAGES_DIR"/*.json; do
+            [ -f "$j" ] || continue
+            name=$(basename "$j" .json)
+            jq --arg name "$name" --argjson used "$(( $(stat -c %b "${j%.json}.ext4") * 512 ))" \
+                --argjson users "$(jq -n '$ARGS.positional' --args $(image_users "$name"))" \
+                '{name: $name, type: (.type // "container"), parent: (.parent // null), ref: (.ref // null),
+                  disk_used_bytes: $used, used_by: $users} + (. | {argv, env, workdir, user, exposed_ports} | with_entries(select(.value != null)))' "$j"
+        done | jq -s .
+        return
+    fi
+    printf '%-28s %-10s %-8s %-8s %s\n' NAME TYPE SIZE USED-BY SOURCE
     for j in "$IMAGES_DIR"/*.json; do
         [ -f "$j" ] || continue
         name=$(basename "$j" .json)
         printf '%-28s %-10s %-8s %-8s %s\n' "$name" "$(jq -r '.type // "container"' "$j")" \
-            "$(du -h "${j%.json}.ext4" | cut -f1)" "$(image_users "$name" | wc -w)" "$(jq -r '.ref // "-"' "$j")"
+            "$(du -h "${j%.json}.ext4" | cut -f1)" "$(image_users "$name" | wc -l)" \
+            "$(jq -r 'if .parent then "layer on \(.parent)" else (.ref // "-") end' "$j")"
     done
 }
 
@@ -438,7 +673,12 @@ case $cmd in
     ssh)     ssh_vm "$@" ;;
     exec)    exec_vm "$@" ;;
     shell)   shell_vm "$@" ;;
-    ls)      list_vms ;;
-    images)  list_images ;;
+    ls)      list_vms "$@" ;;
+    images)  list_images "$@" ;;
+    inspect) inspect "$@" ;;
+    commit)  commit "$@" ;;
+    rmi)     rmi "$@" ;;
+    cp)      cp_cmd "$@" ;;
+    volume)  volume_cmd "$@" ;;
     rm)      rm_vm "$@" ;;
 esac

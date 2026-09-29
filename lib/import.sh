@@ -5,15 +5,14 @@ need python3 mkfs.ext4
 
 ref=${1:?usage: fcvm import REF [NAME]}
 name=${2:-$(sed -E 's|^.*/||; s|[@:]|-|g; s|[^A-Za-z0-9_.-]|_|g' <<<"$ref")}
-[ -x "$BUILD_DIR/fc-init" ] || "$FCVM_ROOT/lib/build-init.sh"
-users=$(image_users "$name")
+users=$(image_users "$name" | tr "\n" " ")
 [ -z "$users" ] || die "image '$name' is the shared base of VMs: $users (remove them, or import under another name)"
 
 mkdir -p "$IMAGES_DIR" "$BUILD_DIR"
 tar=$BUILD_DIR/$name.rootfs.tar
 trap 'rm -f "$tar"' EXIT
 python3 "$FCVM_ROOT/lib/oci_import.py" "$ref" \
-    --init "$BUILD_DIR/fc-init" --out "$tar" --meta "$IMAGES_DIR/$name.json" \
+    --out "$tar" --meta "$IMAGES_DIR/$name.json" \
     --hostname "${name%%-*}" --cache "$CACHE_DIR/blobs" --arch "$ARCH"
 
 # Size: content + 4K per entry for metadata/dirs, +10% slack, + IMPORT_FREE_MB free

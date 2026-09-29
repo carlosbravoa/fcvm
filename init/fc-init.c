@@ -1,7 +1,17 @@
 /*
- * fc-init: PID 1 for microVMs converted from OCI/Docker images, and the
- * overlay-root shim for every fcvm image (see fcvm.overlay below).
+ * fc-init: the init of every fcvm microVM. It boots as /init from an
+ * initramfs (build/initramfs.cpio), so images don't carry it and upgrading it
+ * never needs an image rebuild.
  *
+ * Stage 1 assembles the root filesystem from the drives named on the kernel
+ * command line and switches into it:
+ *   fcvm.root=DEV          image disk (read-only when fcvm.rw is given)
+ *   fcvm.rw=DEV            per-VM writable layer (ext4 holding upper/, work/)
+ *   fcvm.layers=DEV,...    committed image layers, topmost first (ext4, upper/)
+ *   fcvm.vols=DEV:PATH[:ro],...  volumes
+ *   fcvm.exec=PATH         then exec PATH as PID 1 (systemd images) ...
+ *
+ * ... otherwise stage 2 acts as PID 1 for a container image:
  * Does what a container runtime would: mounts the API filesystems, sets the
  * hostname and resolv.conf, then runs the image's entrypoint with its env,
  * working directory and user. Stays as PID 1 to reap zombies and forward
@@ -18,19 +28,16 @@
  * Networking is configured by the kernel (ip= on the command line); DNS
  * servers from ip= show up in /proc/net/pnp in resolv.conf format.
  *
- * Kernel command line options:
- *   fcvm.overlay=DEV  the root drive is a shared read-only image: mount DEV
- *                     (ext4 with upper/ and work/) and switch into an overlay
- *                     of the two, so all writes land on the per-VM disk
- *   fcvm.exec=PATH    after switching root, exec PATH as PID 1 (systemd images)
- *                     instead of running the container config
+ * `fc-init --agent` runs the exec agent standalone (systemd images), and
+ * `fc-init --idle` just waits (containers created with --idle, for exec).
  *
  * On exit the main process status (exit code, or 128+signal) is written to
  * /.fcvm/exit-status, which the host reads back from the writable disk.
  *
- * Build: gcc -static -Os -o fc-init fc-init.c
+ * Build: lib/build-init.sh (static binary + initramfs)
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -146,27 +153,137 @@ static char *karg(const char *key)
     return NULL;
 }
 
-/*
- * Stack the per-VM disk over the read-only root and make the overlay "/".
- * Same moves as util-linux switch_root: carry /dev, /proc, /sys along, move
- * the new root over "/" and chroot into it. The image root stays mounted
- * underneath as the overlay's lower layer.
- */
-static int switch_to_overlay(const char *dev)
+static int write_all(int fd, const void *p, size_t n);
+
+static void mkdir_p(const char *path, mode_t mode)
 {
-    const char *rw = CONF "rw", *nr = CONF "newroot";
-    if (mount(dev, rw, "ext4", MS_NOATIME, NULL) < 0) {
-        msg("mount %s: %s", dev, strerror(errno));
+    char tmp[4096];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    for (char *p = tmp + 1; *p; p++)
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, mode);
+            *p = '/';
+        }
+    mkdir(tmp, mode);
+}
+
+/* Mount an ext4 block device, waiting briefly for its node to appear. */
+static int mount_dev(const char *dev, const char *dir, unsigned long flags)
+{
+    for (int i = 0; i < 100 && access(dev, F_OK) < 0; i++)
+        usleep(20000);
+    mkdir_p(dir, 0755);
+    if (mount(dev, dir, "ext4", flags, NULL) < 0) {
+        msg("mount %s on %s: %s", dev, dir, strerror(errno));
         return -1;
     }
-    mkdir(CONF "rw/upper", 0755);
-    mkdir(CONF "rw/work", 0755);
-    if (mount("overlay", nr, "overlay", 0,
-              "lowerdir=/,upperdir=" CONF "rw/upper,workdir=" CONF "rw/work") < 0) {
-        msg("mount overlay: %s", strerror(errno));
+    return 0;
+}
+
+static int copy_file(const char *src, const char *dst, mode_t mode)
+{
+    size_t len;
+    char *data = slurp(src, &len);
+    int fd = data ? open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode) : -1;
+    int ok = fd >= 0 && write_all(fd, data, len) == 0;
+    if (fd >= 0)
+        close(fd);
+    free(data);
+    return ok ? 0 : -1;
+}
+
+static int is_empty_dir(const char *path)
+{
+    DIR *d = opendir(path);
+    struct dirent *e;
+    int empty = 1;
+    while (d && (e = readdir(d)))
+        if (strcmp(e->d_name, ".") && strcmp(e->d_name, ".."))
+            empty = 0;
+    if (d)
+        closedir(d);
+    return d && empty;
+}
+
+/*
+ * Stage 1, running from the initramfs: assemble the root filesystem from the
+ * drives named on the kernel command line, then switch into it (the moves
+ * util-linux switch_root does). Every mount but the final root lives under
+ * the initramfs and becomes unreachable, but stays alive as overlay layers.
+ */
+static int assemble_root(void)
+{
+    char *root = karg("fcvm.root"), *rw = karg("fcvm.rw");
+    char *layers = karg("fcvm.layers"), *vols = karg("fcvm.vols");
+    const char *nr = "/mnt/root";
+    char *save;
+    if (!root) {
+        msg("no fcvm.root= on the kernel command line");
         return -1;
     }
-    static const char *carry[] = {"/dev", "/proc", "/sys"};
+    if (!rw) { /* private disk (--copy): mount it read-write as is */
+        if (mount_dev(root, nr, MS_NOATIME) < 0)
+            return -1;
+    } else {
+        char lower[2048] = "", opts[2400];
+        if (mount_dev(root, "/mnt/base", MS_RDONLY) < 0 ||
+            mount_dev(rw, "/mnt/rw", MS_NOATIME) < 0)
+            return -1;
+        mkdir("/mnt/rw/upper", 0755);
+        mkdir("/mnt/rw/work", 0755);
+        int i = 0;
+        for (char *d = layers ? strtok_r(layers, ",", &save) : NULL; d; d = strtok_r(NULL, ",", &save)) {
+            char dir[32];
+            snprintf(dir, sizeof(dir), "/mnt/l%d", i++);
+            if (mount_dev(d, dir, MS_RDONLY) < 0)
+                return -1;
+            size_t n = strlen(lower);
+            snprintf(lower + n, sizeof(lower) - n, "%s/upper:", dir);
+        }
+        size_t n = strlen(lower);
+        snprintf(lower + n, sizeof(lower) - n, "/mnt/base");
+        snprintf(opts, sizeof(opts), "lowerdir=%s,upperdir=/mnt/rw/upper,workdir=/mnt/rw/work", lower);
+        mkdir_p(nr, 0755);
+        if (mount("overlay", nr, "overlay", 0, opts) < 0) {
+            msg("mount overlay: %s", strerror(errno));
+            return -1;
+        }
+    }
+
+    /* Volumes: DEV:PATH[:ro]. A new (empty) volume takes the owner and mode of
+     * the directory it covers, like a docker named volume, so images running
+     * as non-root can write to it. */
+    for (char *v = vols ? strtok_r(vols, ",", &save) : NULL; v; v = strtok_r(NULL, ",", &save)) {
+        char *dev = v, *path = strchr(v, ':'), dst[4096];
+        if (!path)
+            continue;
+        *path++ = '\0';
+        char *opt = strchr(path, ':');
+        if (opt)
+            *opt++ = '\0';
+        int ro = opt && strcmp(opt, "ro") == 0;
+        snprintf(dst, sizeof(dst), "%s%s", nr, path);
+        struct stat under;
+        int had = stat(dst, &under) == 0 && S_ISDIR(under.st_mode);
+        if (mount_dev(dev, dst, ro ? MS_RDONLY : MS_NOATIME) < 0)
+            return -1;
+        if (had && !ro && is_empty_dir(dst)) {
+            chown(dst, under.st_uid, under.st_gid);
+            chmod(dst, under.st_mode & 07777);
+        }
+    }
+
+    /* Keep a copy of this binary in the new root for systemd's agent service
+     * (fcvm-agent.service runs /.fcvm/bin/fc-init --agent). */
+    char bin[64];
+    snprintf(bin, sizeof(bin), "%s/.fcvm/bin", nr);
+    mkdir_p(bin, 0755);
+    mount("tmpfs", bin, "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755,size=8m");
+    strcat(bin, "/fc-init");
+    copy_file("/init", bin, 0755);
+
+    static const char *carry[] = {"/dev", "/proc"};
     for (size_t i = 0; i < sizeof(carry) / sizeof(*carry); i++) {
         char dst[64];
         snprintf(dst, sizeof(dst), "%s%s", nr, carry[i]);
@@ -402,8 +519,10 @@ static void shutdown_vm(void)
  * and runs one command per connection, like `docker exec`.
  *
  * Frames in both directions: 1 type byte, 4-byte big-endian length, payload.
- *   host -> guest  R request: NUL-separated tty("0"/"1"), rows, cols, TERM,
- *                    user ("" = image default; name|uid[:group|gid]), argv...
+ *   host -> guest  R request, NUL-separated fields: "fcvm2", tty ("0"/"1"),
+ *                    rows, cols, TERM, user ("" = image default;
+ *                    name|uid[:group|gid]), workdir ("" = default), N,
+ *                    N extra KEY=VALUE env entries, argv...
  *                  D stdin data    C stdin closed    W window size (u16 rows, u16 cols)
  *   guest -> host  D stdout data   E stderr data     X exit status (be32)
  */
@@ -487,31 +606,47 @@ static void agent_session(int conn)
     if (b.d[0] != 'R')
         _exit(0);
 
-    /* Request: tty, rows, cols, TERM, user, argv... */
-    char *fields[260];
+    /* Request: "fcvm2", tty, rows, cols, TERM, user, workdir, N, N env, argv... */
+    char *fields[300];
     int nf = 0;
-    for (size_t i = 5; i < flen && nf < 259; i += strlen(b.d + i) + 1)
+    for (size_t i = 5; i < flen && nf < 299; i += strlen(b.d + i) + 1)
         fields[nf++] = strndup(b.d + i, flen - i);
     consume(&b, flen);
-    if (nf < 5)
-        _exit(0);
-    int tty = fields[0][0] == '1';
-    struct winsize ws = {.ws_row = atoi(fields[1]), .ws_col = atoi(fields[2])};
-    char *term = fields[3];
-    char **argv = &fields[5];
     fields[nf] = NULL;
+    int nenv = nf >= 8 ? atoi(fields[7]) : -1;
+    if (nf < 8 || strcmp(fields[0], "fcvm2") != 0 || nenv < 0 || 8 + nenv > nf) {
+        static const char why[] = "fcvm: exec protocol mismatch between host and VM (restart the VM)\n";
+        unsigned char x[4] = {0, 0, 0, 126};
+        send_frame(conn, 'E', why, sizeof(why) - 1);
+        send_frame(conn, 'X', x, 4);
+        _exit(0);
+    }
+    int tty = fields[1][0] == '1';
+    struct winsize ws = {.ws_row = atoi(fields[2]), .ws_col = atoi(fields[3])};
+    char *term = fields[4];
+    char **argv = &fields[8 + nenv];
     static char *bash[] = {"/bin/bash", NULL}, *sh[] = {"/bin/sh", NULL};
-    if (nf == 5)
+    if (!*argv)
         argv = access("/bin/bash", X_OK) == 0 ? bash : sh;
 
+    /* Image env, then exec -e entries (later putenv wins). */
     size_t elen = 0;
     char *ebuf = slurp(CONF "env", &elen);
-    char **env = ebuf && elen ? split0(ebuf, elen) : NULL;
-    char *workdir = trim(slurp(CONF "workdir", NULL));
+    char **image_env = ebuf && elen ? split0(ebuf, elen) : NULL;
+    int ni = 0;
+    while (image_env && image_env[ni])
+        ni++;
+    char **env = calloc(ni + nenv + 1, sizeof(*env));
+    for (int i = 0; i < ni; i++)
+        env[i] = image_env[i];
+    for (int i = 0; i < nenv; i++)
+        env[ni + i] = fields[8 + i];
+
+    char *workdir = *fields[6] ? fields[6] : trim(slurp(CONF "workdir", NULL));
     char *user = trim(slurp(CONF "user", NULL));
-    if (*fields[4]) { /* exec -u */
+    if (*fields[5]) { /* exec -u */
         char why[300];
-        if (!(user = resolve_user(fields[4], why, sizeof(why)))) {
+        if (!(user = resolve_user(fields[5], why, sizeof(why)))) {
             unsigned char x[4] = {0, 0, 0, 126};
             strcat(why, "\n");
             send_frame(conn, 'E', why, strlen(why));
@@ -556,8 +691,10 @@ static void agent_session(int conn)
     for (;;) {
         struct pollfd p[3] = {{conn, POLLIN, 0}, {out_open ? out : -1, POLLIN, 0}, {err, POLLIN, 0}};
         poll(p, 3, 100);
-        if (p[0].revents && fill(&b, conn) <= 0) { /* host went away */
+        if (p[0].revents && fill(&b, conn) <= 0) { /* host went away (or --timeout) */
             kill(-pid, SIGHUP);
+            usleep(200000);
+            kill(-pid, SIGKILL);
             _exit(0);
         }
         { /* frames may already be buffered along with the request */
@@ -623,19 +760,32 @@ static int agent_main(void)
     }
 }
 
+static void idle_stop(int sig)
+{
+    (void)sig;
+    _exit(0);
+}
+
 int main(int argc, char **argv_)
 {
     if (argc > 1 && strcmp(argv_[1], "--agent") == 0)
         return agent_main(); /* systemd images run the agent as a service */
+    if (argc > 1 && strcmp(argv_[1], "--idle") == 0) {
+        /* `fcvm create --idle`: keep a container VM up for exec, stop cleanly */
+        signal(SIGTERM, idle_stop);
+        signal(SIGINT, idle_stop);
+        for (;;)
+            pause();
+    }
     if (getpid() != 1) {
         fprintf(stderr, "usage: fc-init (as PID 1) | fc-init --agent\n");
         return 1;
     }
+    mnt("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
     mnt("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
-    char *overlay = karg("fcvm.overlay");
     char *exec = karg("fcvm.exec");
-    if (overlay && switch_to_overlay(overlay) < 0) {
-        msg("cannot set up the writable layer; halting");
+    if (assemble_root() < 0) {
+        msg("cannot assemble the root filesystem; halting");
         shutdown_vm();
     }
     if (exec) {

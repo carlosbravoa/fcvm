@@ -10,8 +10,7 @@ need mmdebstrap newuidmap mkfs.ext4 ssh-keygen
 name=${1:-ubuntu-26.04}
 img=$IMAGES_DIR/$name.ext4
 mkdir -p "$IMAGES_DIR" "$BUILD_DIR" "$FCVM_ROOT/ssh"
-[ -x "$BUILD_DIR/fc-init" ] || "$FCVM_ROOT/lib/build-init.sh"
-users=$(image_users "$name")
+users=$(image_users "$name" | tr "\n" " ")
 [ -z "$users" ] || die "image '$name' is the shared base of VMs: $users (remove them, or build under another name)"
 
 # Project SSH key (used by `fcvm ssh`) plus the user's own public keys.
@@ -31,10 +30,7 @@ mmdebstrap \
     --include="$BASE_PACKAGES" \
     --customize-hook='echo ubuntu > "$1/etc/hostname"' \
     --customize-hook='printf "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n" > "$1/etc/hosts"' \
-    --customize-hook='echo "# root is set up by the kernel / fc-init (overlay)" > "$1/etc/fstab"' \
-    --customize-hook='mkdir -p "$1/.fcvm/rw" "$1/.fcvm/newroot"' \
-    --customize-hook="upload $BUILD_DIR/fc-init /.fcvm/init" \
-    --customize-hook='chmod 755 "$1/.fcvm/init"' \
+    --customize-hook='echo "# root is assembled by fc-init from the initramfs" > "$1/etc/fstab"' \
     --customize-hook='ln -sf /proc/net/pnp "$1/etc/resolv.conf"' \
     --customize-hook=': > "$1/etc/machine-id"; rm -f "$1/var/lib/dbus/machine-id"' \
     --customize-hook='rm -f "$1"/etc/ssh/ssh_host_*' \
@@ -63,7 +59,7 @@ ln -sf /etc/systemd/system/ssh-hostkeys.service "$1/etc/systemd/system/sysinit.t
 Description=fcvm exec agent (vsock), for fcvm exec / fcvm shell
 
 [Service]
-ExecStart=/.fcvm/init --agent
+ExecStart=/.fcvm/bin/fc-init --agent
 Restart=always
 KillMode=process
 

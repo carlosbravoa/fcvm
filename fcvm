@@ -13,17 +13,19 @@ Host (need sudo):
 Build:
   firecracker                download the Firecracker release ($FC_VERSION) into bin/
   kernel [VERSION]           fetch latest $KERNEL_CHANNEL kernel from kernel.org, build a microVM vmlinux
-  init                       build the static PID 1 used by container VMs
+  init                       build fc-init and the initramfs every VM boots with
   base [NAME]                build the Ubuntu 26.04 base image (default name: ubuntu-26.04)
   import REF [NAME]          pull an image from Docker Hub / any registry and convert it to a VM image
   all                        firecracker + kernel + init + base
 
 VMs:
-  images                     list images
+  images [--json]            list images
   create VM IMAGE [opts] [-- CMD...]
                              create a VM: IMAGE's disk is shared read-only, writes go to
                              a per-VM layer. opts: --vcpus N --mem MiB --disk SIZE
                              --copy (private full copy) -p [BIND:]HOST:GUEST (publish TCP)
+                             -v VOLUME:/PATH[:ro] (named volume) --idle (container: no
+                             command, stays up for exec)
   start [-a] VM              boot a VM in the background; -a attaches its console
   run IMAGE [-d] [opts] [-- CMD...]
                              throwaway VM, deleted when it stops. Container images: attached
@@ -32,13 +34,20 @@ VMs:
   stop VM                    ask the guest to shut down (Ctrl-Alt-Del), kill after a timeout
   console VM                 attach to the serial console (Ctrl-] detaches)
   logs [-f] VM               console output of the current or last boot
-  exec [-i] [-t] [-u USER] VM CMD...
+  exec [-i] [-t] [-u USER] [-w DIR] [-e K=V]... [--timeout S] VM CMD...
                              run a command in a running VM, like docker exec (over vsock);
                              USER is name|uid[:group|gid], default: the image's USER
   shell [-u USER] VM         interactive shell in a running VM (= exec -it VM bash|sh)
   ssh VM [args]              ssh root@VM (base images)
-  ls                         list VMs
+  cp SRC DST                 copy files in/out of a running VM (VM:PATH on one side)
+  commit VM IMAGE            save a stopped VM's changes as a new image (a layer)
+  inspect VM                 VM details as JSON
+  ls [--json]                list VMs
   rm VM                      delete a VM
+  rmi IMAGE                  delete an image
+  volume create NAME [SIZE] | ls [--json] | rm NAME
+                             named volumes (persistent ext4 disks)
+  mcp                        MCP server on stdio, for agents (see README)
 EOF
 }
 
@@ -56,8 +65,9 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|_reap)
+    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|cp|volume|_reap)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
+    mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     help|-h|--help)     usage ;;
     *)                  usage; exit 1 ;;
 esac

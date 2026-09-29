@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Run a command in a VM through the fc-init exec agent (fcvm exec / shell).
 
-  exec_client.py [-i] [-t] [-u USER] VSOCK_UDS [--] [CMD ARGS...]
+  exec_client.py [-i] [-t] [-u USER] [-w DIR] [-e K=V]... [--timeout S] VSOCK_UDS [--] [CMD...]
 
 Talks to Firecracker's vsock Unix socket: "CONNECT <port>\\n" and then the
 agent's frames (see agent_session in init/fc-init.c). No CMD means the guest's
-default shell. Exits with the command's exit status.
+default shell. Exits with the command's exit status, or 124 on --timeout
+(the guest-side process group is killed when the connection drops).
 """
 import argparse
 import fcntl
@@ -53,7 +54,7 @@ def connect(path, timeout=15):
 def winsize():
     try:
         rows, cols, _, _ = struct.unpack("HHHH", fcntl.ioctl(sys.stdin.fileno(), termios.TIOCGWINSZ, b"\0" * 8))
-        return rows, cols
+        return (rows, cols) if rows and cols else (24, 80)   # unset (0x0) on some ptys
     except OSError:
         return 24, 80
 
@@ -64,6 +65,9 @@ def main():
     ap.add_argument("-i", "--interactive", action="store_true", help="keep stdin open")
     ap.add_argument("-t", "--tty", action="store_true", help="allocate a pseudo-terminal")
     ap.add_argument("-u", "--user", default="", help="name|uid[:group|gid], resolved in the guest")
+    ap.add_argument("-w", "--workdir", default="", help="working directory (default: the image's)")
+    ap.add_argument("-e", "--env", action="append", default=[], help="extra KEY=VALUE (repeatable)")
+    ap.add_argument("--timeout", type=float, help="kill the command after this many seconds (exit 124)")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     args = ap.parse_args()
     cmd = args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd
@@ -71,7 +75,8 @@ def main():
 
     sock = connect(args.uds)
     rows, cols = winsize()
-    fields = ["1" if use_tty else "0", str(rows), str(cols), os.environ.get("TERM", "xterm"), args.user] + cmd
+    fields = (["fcvm2", "1" if use_tty else "0", str(rows), str(cols), os.environ.get("TERM", "xterm"),
+               args.user, args.workdir, str(len(args.env))] + args.env + cmd)
     sock.sendall(frame(b"R", b"\0".join(f.encode() for f in fields) + b"\0"))
 
     stdin = sys.stdin.fileno() if args.interactive else None
@@ -84,13 +89,19 @@ def main():
         signal.signal(signal.SIGWINCH, lambda *_: sock.sendall(frame(b"W", struct.pack(">HH", *winsize()))))
 
     buf, code = b"", 255
+    deadline = time.monotonic() + args.timeout if args.timeout else None
     try:
         while True:
             fds = [sock] + ([stdin] if stdin is not None else [])
+            wait = max(0, deadline - time.monotonic()) if deadline else None
             try:
-                ready, _, _ = select.select(fds, [], [])
+                ready, _, _ = select.select(fds, [], [], wait)
             except InterruptedError:
                 continue
+            if deadline and not ready and time.monotonic() >= deadline:
+                sock.close()   # the agent kills the command's process group
+                print(f"fcvm exec: timed out after {args.timeout:g}s", file=sys.stderr)
+                return 124
             if stdin is not None and stdin in ready:
                 data = os.read(stdin, 65536)
                 if data:

@@ -19,6 +19,7 @@ FCVM_ROOT=${FCVM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 : "${VM_VCPUS:=2}"
 : "${VM_MEM_MIB:=1024}"
 : "${VM_KERNEL_ARGS:=}"                        # extra kernel args, e.g. "loglevel=7" to debug boot
+: "${VOLUME_SIZE:=10G}"                         # default size of new volumes (sparse)
 : "${VM_DISK:=8G}"                              # per-VM writable layer (sparse)
 : "${IMPORT_FREE_MB:=64}"                      # free space added to imported disks (for --copy VMs)
 
@@ -28,6 +29,7 @@ CACHE_DIR=$FCVM_ROOT/cache
 KERNELS_DIR=$FCVM_ROOT/kernels
 IMAGES_DIR=$FCVM_ROOT/images
 VMS_DIR=$FCVM_ROOT/vms
+VOLUMES_DIR=$FCVM_ROOT/volumes
 FIRECRACKER=$BIN_DIR/firecracker
 
 log()  { printf '\e[1;34m==>\e[0m %s\n' "$*" >&2; }
@@ -44,11 +46,25 @@ default_kernel() {
     readlink -f "$KERNELS_DIR/vmlinux"
 }
 
-# VMs whose shared read-only root is image $1 (overlay mode).
+# Image $1 and its parents, topmost first (committed images are layers on a parent).
+image_chain() {
+    local img=$1
+    while [ -n "$img" ]; do
+        echo "$img"
+        img=$(jq -r '.parent // empty' "$IMAGES_DIR/$img.json" 2>/dev/null)
+    done
+}
+
+# What depends on image $1: VMs booting from it (anywhere in their image's
+# chain, overlay mode) and images committed on top of it ("image:NAME").
 image_users() {
     local j
     for j in "$VMS_DIR"/*/vm.json; do
         [ -f "$j" ] && [ ! -f "${j%/vm.json}/disk.ext4" ] || continue
-        if [ "$(jq -r .image "$j")" = "$1" ]; then basename "${j%/vm.json}"; fi
-    done | tr '\n' ' '
+        if image_chain "$(jq -r .image "$j")" | grep -qx -- "$1"; then basename "${j%/vm.json}"; fi
+    done
+    for j in "$IMAGES_DIR"/*.json; do
+        [ -f "$j" ] || continue
+        if [ "$(jq -r '.parent // empty' "$j")" = "$1" ]; then echo "image:$(basename "$j" .json)"; fi
+    done
 }

@@ -10,8 +10,13 @@ into VMs:
 - **Ubuntu 26.04 base image**: minbase + systemd + ssh, built rootless with
   `mmdebstrap`.
 - **Container import**: pulls any image from Docker Hub (or ghcr.io, quay.io,
-  ...), flattens its layers, and injects a small static PID 1 (`init/fc-init.c`)
-  that runs the image's entrypoint with its env, workdir and user.
+  ...) and flattens its layers. A small static init (`init/fc-init.c`, booted
+  from an initramfs) runs the image's entrypoint with its env, workdir and
+  user.
+- **Agent-friendly**: `exec` with exit codes, timeouts and separate
+  stdout/stderr, `cp`, `commit` (snapshot a prepared VM as an image), named
+  volumes, `--json` output, and an MCP server (`fcvm mcp`) that exposes all
+  of it as tools.
 - **Networking**: one host bridge with NAT and a pool of taps owned by your
   user, so VMs start without root.
 
@@ -35,6 +40,13 @@ root.
 ./fcvm run nginx-latest -d -p 8080:80    # throwaway VM, deleted when stopped
 curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.10/
 ./fcvm run alpine-latest -- sh -c 'exit 3'; echo $?   # prints 3
+
+# a sandbox for work: prepare once, commit, start copies from that state
+./fcvm create box python-3.13-slim --idle -v cache:/root/.cache
+./fcvm start box && ./fcvm cp ./myproject box:/work
+./fcvm exec -w /work box pip install -r requirements.txt
+./fcvm stop box && ./fcvm commit box myproject-env
+./fcvm run myproject-env -- python /work/main.py
 ```
 
 ## Commands
@@ -45,15 +57,21 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `net-up` / `net-down` | bridge `fcbr0` (172.30.0.1/24), taps `fctap0..15`, nftables NAT, ufw rules |
 | `firecracker` | downloads the latest Firecracker release into `bin/` (checksum-verified) |
 | `kernel [stable\|mainline\|longterm\|X.Y.Z]` | builds `kernels/vmlinux-X.Y.Z`; `kernels/vmlinux` points at the newest |
-| `init` | builds `build/fc-init` (static) |
+| `init` | builds `build/fc-init` (static) and `build/initramfs.cpio`, which every VM boots with |
 | `base [NAME]` | builds `images/ubuntu-26.04.ext4` |
 | `import REF [NAME]` | registry image → `images/NAME.ext4` + `NAME.json` |
-| `images`, `ls` | lists images (with how many VMs use each) / VMs (state, exit code, disk use, ports) |
-| `create VM IMAGE [opts] [-- CMD...]` | VM on the shared image plus its own writable layer. `--vcpus N`, `--mem MiB`, `--disk SIZE` (layer size, default 8G sparse), `-p [BIND:]HOST:GUEST` (repeatable), `--copy` (private full copy instead), `-- CMD` (replaces the container command) |
+| `images [--json]`, `ls [--json]` | lists images (with what uses each) / VMs (state, exit code, disk use, ports, volumes) |
+| `inspect VM` | the VM's details as JSON |
+| `create VM IMAGE [opts] [-- CMD...]` | VM on the shared image plus its own writable layer. `--vcpus N`, `--mem MiB`, `--disk SIZE` (layer size, default 8G sparse), `-p [BIND:]HOST:GUEST` (repeatable), `-v VOLUME:/PATH[:ro]` (repeatable, created on first use), `--idle` (container: run nothing, stay up for `exec`), `--copy` (private full copy instead), `-- CMD` (replaces the container command) |
 | `start [-a] VM` | boots in the background, like `docker start`. `-a` attaches the console |
 | `run IMAGE [-d] [opts] [-- CMD...]` | throwaway VM, deleted when it stops. **Container images**: attached like `docker run`: you see the output, Ctrl-C goes to the app, Ctrl-] detaches, and fcvm exits with the container's exit code. **Ubuntu images**: boots and opens `fcvm shell` (or runs CMD); when the shell or CMD ends, the VM is stopped and deleted. `-d`: background |
 | `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s |
-| `exec [-i] [-t] [-u USER] VM CMD...` | runs a command in a running VM, like `docker exec`. Exits with its status |
+| `exec [-i] [-t] [-u USER] [-w DIR] [-e K=V]... [--timeout S] VM CMD...` | runs a command in a running VM, like `docker exec`. Exits with its status, or 124 on timeout |
+| `cp [-L] SRC DST` | copies files or directories into or out of a running VM (`VM:PATH` on one side), like `docker cp` |
+| `commit VM IMAGE` | saves a stopped VM's changes as a new image, a read-only layer on its image |
+| `rmi IMAGE` | deletes an image nothing depends on |
+| `volume create NAME [SIZE]`, `volume ls [--json]`, `volume rm NAME` | named volumes: persistent ext4 disks attached with `-v` |
+| `mcp` | MCP server on stdio, for agents |
 | `shell [-u USER] VM` | interactive shell in a running VM (bash, else sh). Same as `exec -it VM` |
 | `console VM` | attaches to the live serial console. Ctrl-] detaches and the VM keeps running |
 | `logs [-f] VM` | console output of the current or last boot |
@@ -74,16 +92,42 @@ registry ─► oci_import.py ─► flattened tar + /.fcvm ─► mkfs.ext4 -d 
                                                   vms/<vm>/{disk.ext4, fc.json} ─► firecracker
 ```
 
-**Shared images, writable layers.** Image disks are read-only (`chmod a-w`)
-and shared by every VM created from them. Each VM gets `vms/<vm>/rw.ext4`, a
-sparse ext4 holding overlayfs `upper/` and `work/`. `create` takes about 0.1 s
-and 6 MB. The image is `/dev/vda` (attached read-only), the layer is
-`/dev/vdb`, and the kernel boots `init=/.fcvm/init fcvm.overlay=/dev/vdb`.
-`fc-init` mounts the overlay, moves `/dev`, `/proc` and `/sys` into it and
-switches root, the same moves as `switch_root`. Then it either runs the
-container config or, for Ubuntu images (`fcvm.exec=/sbin/init`), execs
-systemd as PID 1. `import` and `base` refuse to overwrite an image that VMs
-still use. `--copy` gives a VM a private full copy of the image instead.
+**Boot and root filesystem.** Every VM boots the same kernel with
+`build/initramfs.cpio`, which holds only `fc-init` as `/init`. Images carry
+no init or agent, so upgrading `fc-init` never needs an image rebuild.
+`fc-init` assembles the root from drives named on the kernel command line,
+then switches into it (the same moves as `switch_root`). After that it either
+runs the container config or, for Ubuntu images (`fcvm.exec=/sbin/init`),
+execs systemd as PID 1. Drives are attached in order, `vda`, `vdb`, ...:
+
+| drive | what | argument |
+|---|---|---|
+| base image | read-only, shared by all VMs | `fcvm.root=` |
+| writable layer | `vms/<vm>/rw.ext4`: sparse ext4 holding overlayfs `upper/` and `work/` | `fcvm.rw=` |
+| committed layers | read-only, topmost first | `fcvm.layers=` |
+| volumes | `volumes/<name>.ext4` | `fcvm.vols=DEV:PATH[:ro]` |
+
+`create` takes about 0.1 s and 6 MB. `import`, `base` and `rmi` refuse to
+touch an image that VMs or other images still use. `--copy` gives a VM a
+private full copy of the image instead, with no layers.
+
+**Commit and layers.** `fcvm commit VM IMAGE` copies the stopped VM's
+writable layer (sparse, typically a few MB) and registers it as a new image
+whose parent is the VM's image. A VM from that image stacks
+`lowerdir=layer:...:base` under its own writable layer, which is the Docker
+model: deletions are overlayfs whiteouts and keep working across layers.
+Commit is rootless and instant because nothing is merged. Per-VM settings
+aren't saved: a command given with `create -- CMD` or `--idle` stays with the
+VM, and the new image keeps its parent's command. A `--copy` VM's disk becomes
+a standalone image instead.
+
+**Volumes.** Named ext4 disks in `volumes/`, attached with `-v NAME:/PATH`
+and created on first use (`VOLUME_SIZE`, default 10G sparse). They outlive
+VMs. A new, empty volume takes the owner and mode of the directory it covers,
+as Docker volumes do, so non-root images can write to it. A read-write volume
+can be attached to only one running VM at a time; `:ro` volumes can be
+shared. Live host-directory mounts aren't possible (Firecracker has no
+virtio-fs or 9p); use `fcvm cp` instead.
 
 **Exit codes.** When the container's main process exits, `fc-init` writes its
 status (exit code, or 128+signal, as Docker does) to `/.fcvm/exit-status`.
@@ -110,15 +154,18 @@ prompt, and you get in with `fcvm shell` or `fcvm ssh`.
 
 **exec / shell.** Every VM has a vsock device, and `fc-init` runs an exec
 agent on vsock port 1024. In container VMs it is forked by PID 1. In Ubuntu
-images it runs as `fcvm-agent.service` (`/.fcvm/init --agent`). The host side
+images it runs as `fcvm-agent.service` (`/.fcvm/bin/fc-init --agent`, a copy
+`fc-init` puts on a tmpfs at boot). The host side
 (`lib/exec_client.py`) connects through Firecracker's vsock Unix socket
 (`vms/<vm>/vsock.sock`, `CONNECT 1024`). Each connection runs one command, as
 the image's user with its env and workdir, as `docker exec` does. It runs on
 a PTY with raw mode and window-size updates (`-t`), or on pipes with separate
 stdout/stderr (no `-t`), and returns the exit code. No network or sshd is
 needed, so it works for any image, including distroless ones (as long as the
-command exists). Images built before this feature need a re-import or
-rebuild, because `fc-init` is baked into each image.
+command exists). `-w` and `-e` set the working directory and extra
+environment. `--timeout` drops the connection, and the agent then kills the
+command's process group, exiting 124. The request carries a protocol version,
+so a mismatch between host and VM fails clearly.
 
 `-u USER` works as in `docker exec -u`: `name`, `uid`, `name:group` or
 `uid:gid`. It is resolved inside the guest from its own `/etc/passwd` and
@@ -134,12 +181,11 @@ so `sudo`, `less` and the like can open `/dev/tty`.
 ./fcvm shell -u root unpriv            # root shell in an image whose USER is non-root
 ./fcvm exec -u postgres db psql        # as another user
 ./fcvm exec web nginx -t               # one-off command
-tar c ./site | ./fcvm exec -i web tar x -C /usr/share/nginx/html
+./fcvm cp ./site web:/usr/share/nginx/html   # tar over exec; needs sh and tar in the image
 ```
 
 **Container VMs.** The importer keeps the image config (Entrypoint, Cmd, Env,
-WorkingDir, User) in `/.fcvm/`. The kernel boots with `init=/.fcvm/init`.
-`fc-init` mounts `/proc`, `/sys`, `/dev`, devpts, cgroup2 and friends, writes
+WorkingDir, User) in `/.fcvm/`. `fc-init` mounts `/proc`, `/sys`, `/dev`, devpts, cgroup2 and friends, writes
 `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf`, drops to the image
 user, and execs the entrypoint. It forwards signals and reaps zombies. When
 the main process exits, it reboots the guest, and with `reboot=k` Firecracker
@@ -167,6 +213,33 @@ at their IP, and they reach the internet through NAT.
   `.config` (renamed symbol or unmet dependency). Check this after moving to a
   new kernel series.
 
+## Agents (MCP)
+
+`fcvm mcp` is an MCP server on stdio (standard library only). It wraps the
+CLI, so everything behaves as it does on the command line. To register it
+with Claude Code:
+
+```sh
+claude mcp add fcvm -- /path/to/fcvm mcp
+```
+
+| tool | does |
+|---|---|
+| `images`, `pull_image` | list images; import from Docker Hub or any registry |
+| `create_sandbox` | create and boot a VM. Container images stay idle for `exec` unless given a command |
+| `exec` | run a shell command (`command`) or exact `argv`, with `workdir`, `env`, `user`, `stdin` and `timeout` (default 300 s). Returns `exit_code`, `stdout`, `stderr` |
+| `write_file`, `read_file` | text files in the VM |
+| `copy_to_vm`, `copy_from_vm` | host files and directories in or out (`fcvm cp`) |
+| `commit_vm` | save a VM's state as an image; new sandboxes start from it |
+| `logs`, `list_vms`, `start_vm`, `stop_vm`, `remove_vm`, `volumes` | lifecycle and state |
+
+Output is capped at 20,000 characters per stream (head and tail kept) so a
+noisy command can't flood the agent's context. Errors from fcvm itself (no
+such VM, VM not running) come back as tool errors, not as a command's exit
+code. A typical loop takes about 1.5 s to create a sandbox and under 0.5 s
+per `exec`. `commit_vm` after installing dependencies makes later sandboxes
+start ready.
+
 ## Layout
 
 ```
@@ -179,16 +252,66 @@ lib/import.sh           import wrapper (sizes and creates the ext4)
 lib/vm.sh               VM lifecycle
 lib/portfwd.py          rootless TCP port publishing
 lib/exec_client.py      host side of fcvm exec / shell (vsock)
+lib/mcp_server.py       MCP server (fcvm mcp)
 lib/console.py          per-VM serial console relay (attach/detach, logs)
 lib/net.sh              host bridge/taps/NAT
-init/fc-init.c          PID 1 for container VMs
+init/fc-init.c          init for every VM (initramfs): root assembly, container PID 1, exec agent
 kernel/microvm-*.config kernel fragment
-bin/ kernels/ images/ vms/ cache/ build/   generated
+bin/ kernels/ images/ vms/ volumes/ cache/ build/   generated
 ```
 
 ## Roadmap
 
-### Run VMs under the Firecracker jailer
+Priorities come from a review of fcvm from two angles: as a sandbox for
+agentic development (compared with Multipass), and as something an enterprise
+could adopt. Orchestration is out of scope for now. Items marked ✅ are done.
+
+### Agentic development
+
+Where fcvm already fits: many short-lived, disposable, isolated sandboxes.
+`create` takes 0.1 s, a container VM runs in about 1 s, and Ubuntu boots in
+2.3 s. Docker Hub works as the toolchain catalogue, behind a real kernel
+boundary. `exec` has real exit codes and separate stdout/stderr, which maps
+directly onto an agent's "run command" tool. Multipass is still better for
+long-lived dev machines with mounted source trees, and it runs on macOS and
+Windows. fcvm needs KVM and never will.
+
+- **A1. Getting code in and out.** Firecracker has no virtio-fs or 9p, so
+  there are no live shared folders. ✅ `fcvm cp` (both directions) and ✅
+  named volumes (`-v NAME:/path`, persistent ext4 disks). Still open: a
+  host-directory sync over vsock that behaves like a bind mount.
+- **A2. Snapshots and commit.** ✅ `fcvm commit VM IMAGE` saves a VM's
+  writable layer as a new image layer (Docker-style stacking, instant,
+  rootless). Next: Firecracker memory snapshots, to prepare a VM once and
+  fork it per agent attempt in about 100–200 ms, or roll back after a bad
+  attempt. This needs a new tap and IP per fork (network overrides plus
+  re-addressing inside the guest) and entropy reseeding (VMGenID).
+- **A3. Machine interface.** ✅ `--json` for `ls`/`images`, `fcvm inspect`,
+  and ✅ an MCP server (`fcvm mcp`) that exposes sandbox tools to agents.
+- **A4. Egress control.** A per-VM network policy (no network, or an
+  allowlist such as PyPI/npm/GitHub only) and configurable DNS. DNS is fixed
+  to `$NET_DNS` today, which breaks split-DNS corporate networks.
+- **A5. exec for agents.** ✅ `--timeout`, `-e KEY=VAL`, `-w DIR`.
+- **A6. Provisioning.** A cloud-init equivalent or build recipe. Import from a
+  local `docker save` tarball or OCI layout, not only from registries.
+- **A7. Concurrency.** Raise the limit of 16 taps on one /24; parallel agent
+  attempts need more.
+- Not planned: macOS/Windows, GPUs, nested virtualization, desktop GUIs.
+
+### Enterprise
+
+Prior art to position against: Weave Ignite (Docker image → Firecracker VM,
+archived 2023), Fly.io (the same idea as a platform), E2B (Firecracker
+sandboxes for AI agents, as a service), Kata Containers and
+firecracker-containerd (microVMs behind the container runtime interface).
+fcvm's niche is self-hosted, simple and auditable: closer to Multipass than
+to Kubernetes.
+
+What is solid: a minimal monolithic guest kernel, digest-verified pulls with
+`@sha256:` pinning, shared read-only images with per-VM layers, rootless
+operation, and a small auditable code base. What blocks adoption, in order:
+
+#### E1. Run VMs under the Firecracker jailer
 
 Today Firecracker runs as your user. KVM and Firecracker's own seccomp filters
 are the only boundary between a guest and the host, and every VM can reach the
@@ -215,13 +338,66 @@ is Firecracker's production wrapper. Plan:
   `stop`, `exec`/`shell` and the port forwarder need group access to them, so
   the helper would create them with a shared `fcvm` group.
 
-### Other items
+#### E2. Network isolation and policy
 
-- aarch64 support (needs `kernel/microvm-aarch64.config` and testing).
+VMs can reach each other on the flat bridge, and every host service on
+172.30.0.1. Published ports bind to `0.0.0.0` by default. Needed: VMs
+isolated from each other, `127.0.0.1` as the default bind address for
+published ports, egress allowlists (shared with A4), and IPv6.
+
+#### E3. Supply chain
+
+- Firecracker and the kernel are checked against checksums from the same
+  place they're downloaded from. kernel.org's signed `sha256sums.asc` is not
+  signature-verified yet (GPG).
+- Container images: signature verification (cosign/notation), registry
+  allowlists, mirrors/proxies (Artifactory), `~/.docker/config.json` and
+  credential helpers.
+- Reproducibility: "latest stable" is good for patches but not reproducible,
+  and Firecracker upstream validates 5.10, 6.1 and 6.18 guests. Enterprise
+  default: a pinned LTS kernel (`KERNEL_CHANNEL=longterm`), SBOMs, and
+  reproducible image builds.
+
+#### E4. Daemon and API
+
+State lives in JSON files, pid files and file locks. After a host reboot,
+nothing is recovered: taps are gone and VMs aren't restarted. There is only
+light protection against two `fcvm` commands running at once, and no API.
+Needed: a daemon with an API and a state store that reconciles after reboot.
+Orchestration would build on it later. The control plane likely moves to Go
+or Rust at that point, while `fc-init` stays small and static.
+
+#### E5. Audit and observability
+
+Log `exec`/`shell`/`console` sessions (who ran what, and when). Export
+Firecracker metrics (`--metrics-path`), and ship console logs somewhere
+central.
+
+#### E6. Resource governance
+
+Host-side cgroup limits (with E1), Firecracker rate limiters for block and
+network I/O, quotas on writable layers and volumes (today they are sparse
+files that can fill the host disk), and disk encryption at rest.
+
+#### E7. Credentials in images
+
+The Ubuntu base image contains the project SSH key and the builder's public
+keys, and `fcvm ssh` skips host-key checking. That is fine on a laptop, not in
+shared images. Keys should be injected per VM at boot instead.
+
+#### E8. Engineering maturity
+
+- ✅ `fc-init` boots from an initramfs instead of living in every image, so
+  upgrading the init or agent no longer means rebuilding images.
+- A test suite and CI, covering failure paths, concurrency and host reboots.
+  The bash `set -e` pitfalls hit during development show why.
+- A versioned exec agent protocol.
+- aarch64 (Graviton): needs `kernel/microvm-aarch64.config` and testing.
+
+#### Smaller items
+
 - Published ports are TCP only and don't preserve the client address. An
   nftables DNAT mode in `net.sh` (root) would fix both.
 - `exec` via the agent has no auth beyond access to the VM's vsock socket.
-  That is fine for a single user, but the jailer's per-VM uids are the natural
+  That is fine for a single user; the jailer's per-VM uids are the natural
   place to tighten it.
-- Private registries: set `REGISTRY_USER` / `REGISTRY_PASSWORD`.
-  `~/.docker/config.json` credentials are not read yet.

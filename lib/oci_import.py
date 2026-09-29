@@ -7,9 +7,10 @@ tokens, or REGISTRY_USER / REGISTRY_PASSWORD from the environment.
 
 Layers are applied with OCI whiteout semantics and written parent-first, the
 order `mkfs.ext4 -d <tar>` needs. The image config becomes /.fcvm/{argv,env,
-workdir,user,hostname}, read at boot by fc-init.
+workdir,user,hostname}, read at boot by fc-init (which itself comes from the
+initramfs, not the image).
 
-  oci_import.py REF --init build/fc-init --out rootfs.tar --meta image.json
+  oci_import.py REF --out rootfs.tar --meta image.json
 """
 import argparse
 import base64
@@ -299,7 +300,6 @@ def resolve_user(spec, passwd, group):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("ref")
-    ap.add_argument("--init", required=True, help="fc-init binary to inject")
     ap.add_argument("--out", required=True, help="output rootfs tar")
     ap.add_argument("--meta", required=True, help="output image metadata json")
     ap.add_argument("--hostname", default="fcvm")
@@ -332,8 +332,7 @@ def main():
     # Mount points and dirs every rootfs needs, even FROM scratch images.
     dirs = {n: ti for n, (_, ti) in winners.items() if ti.isdir()}
     for d, mode in [("etc", 0o755), ("proc", 0o555), ("sys", 0o555), ("dev", 0o755),
-                    ("tmp", 0o1777), ("run", 0o755), ("root", 0o700), (".fcvm", 0o755),
-                    (".fcvm/rw", 0o755), (".fcvm/newroot", 0o755)]:
+                    ("tmp", 0o1777), ("run", 0o755), ("root", 0o700), (".fcvm", 0o755)]:
         if d not in winners:
             dirs[d] = dir_info(d, mode)
     for name, (_, ti) in winners.items():   # parents missing from the layers
@@ -379,7 +378,7 @@ def main():
             else:
                 print(f"    skipping hardlink {ti.name} -> {ti.linkname} (target gone)", file=sys.stderr)
 
-        # fc-init and its config.
+        # Container config for fc-init.
         entrypoint = cfg.get("Entrypoint") or []
         cmd = cfg.get("Cmd") or []
         argv = entrypoint + cmd or ["/bin/sh"]
@@ -387,10 +386,7 @@ def main():
         if not any(e.startswith("PATH=") for e in env):
             env = [f"PATH={DEFAULT_PATH}"] + env
         user = resolve_user(cfg.get("User", ""), wanted["etc/passwd"], wanted["etc/group"])
-        with open(args.init, "rb") as f:
-            init = f.read()
         files = {
-            ".fcvm/init": (init, 0o755),
             ".fcvm/argv": (b"\0".join(a.encode() for a in argv) + b"\0", 0o644),
             ".fcvm/env": (b"\0".join(e.encode() for e in env) + b"\0", 0o644),
             ".fcvm/workdir": ((cfg.get("WorkingDir") or "/").encode(), 0o644),

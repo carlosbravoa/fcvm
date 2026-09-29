@@ -28,7 +28,9 @@ PINNED_NETWORK = os.environ.get("FCVM_MCP_NETWORK", "").strip()
 INSTRUCTIONS = """fcvm runs Firecracker microVMs: real kernel isolation, ~1 s to boot a container
 image, ~2 s for Ubuntu. Typical loop: images (or pull_image) -> create_sandbox ->
 exec / write_file / read_file / copy_* -> commit_vm to save a prepared state ->
-remove_vm. build_image turns a Dockerfile into a reusable image. App sandboxes run as the image's USER; pass user="root" to exec
+remove_vm. build_image turns a Dockerfile into a reusable image. snapshot_vm
++ fork give running copies of a prepared VM in ~0.1 s (parallel attempts,
+rollback). App sandboxes run as the image's USER; pass user="root" to exec
 for installs. Network: "full" (NAT), "none", or an allowlist of hosts/@presets
 (@pypi, @npm, @github, ...) enforced by a host-side HTTP(S) proxy; the sandbox's
 http(s)_proxy variables are preset, and egress_log shows what was allowed or
@@ -225,6 +227,28 @@ def t_commit_vm(vm, image):
     return {"image": image, "from": vm, "restarted": was_running}
 
 
+def t_snapshot_vm(vm, name):
+    running(vm)
+    fcvm("snapshot", vm, name, timeout=300)
+    return next((s for s in t_snapshots() if s["name"] == name), {"name": name})
+
+
+def t_fork(snapshot, name=None, count=1):
+    before = {v["name"] for v in t_list_vms()}
+    args = ["fork", snapshot, *([name] if name else []), "-n", count]
+    fcvm(*args, timeout=60 + 30 * int(count))
+    return [v for v in t_list_vms() if v["name"] not in before]
+
+
+def t_snapshots():
+    return json.loads(fcvm("snapshot", "ls", "--json")[1])
+
+
+def t_remove_snapshot(name):
+    fcvm("snapshot", "rm", name)
+    return {"removed": name}
+
+
 def t_egress_log(vm, lines=50):
     return {"log": ANSI.sub("", fcvm("egress", vm, "-n", lines)[1])}
 
@@ -282,6 +306,15 @@ TOOLS = {
         "Save a VM's changes as a new image (a layer on its image), e.g. after installing dependencies, so new sandboxes start from that state. A running VM is stopped and restarted.",
         {"vm": S, "image": S}, ["vm", "image"]),
     "volumes": (t_volumes, "List named volumes.", {}, []),
+    "snapshot_vm": (t_snapshot_vm,
+        "Snapshot a running VM's memory, processes and disk (it keeps running, paused for ~1 s). Fork it later to get running copies instantly.",
+        {"vm": S, "name": S}, ["vm", "name"]),
+    "fork": (t_fork,
+        "Start VM(s) from a snapshot in ~0.1 s each: running processes, caches and files as they were, but each fork has its own disk, IP, MAC and hostname. Use for parallel attempts from the same prepared state, or to roll back (remove the VM, fork again).",
+        {"snapshot": S, "name": {**S, "description": "VM name, or name prefix when count > 1"},
+         "count": {**I, "description": "number of forks (default 1)"}}, ["snapshot"]),
+    "snapshots": (t_snapshots, "List snapshots.", {}, []),
+    "remove_snapshot": (t_remove_snapshot, "Delete a snapshot (forks made from it keep running).", {"name": S}, ["name"]),
     "egress_log": (t_egress_log, "A sandbox's network policy and its recent allowed/denied requests.",
                    {"vm": S, "lines": I}, ["vm"]),
 }

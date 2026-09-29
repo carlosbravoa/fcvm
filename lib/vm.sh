@@ -775,6 +775,165 @@ cp_cmd() {
     fi
 }
 
+# --- snapshots and fork (Firecracker memory snapshots) ---------------------------
+
+# Firecracker API call; prints Firecracker's error message on failure.
+fc_api() {   # socket method path [json]
+    local out code
+    out=$(curl -sS --unix-socket "$1" -X "$2" "http://localhost$3" -H 'Content-Type: application/json' \
+        ${4:+-d "$4"} -w '\n%{http_code}') || return 1
+    code=${out##*$'\n'}
+    [[ $code == 2* ]] || { echo "${out%$'\n'*}" >&2; return 1; }
+}
+
+# fcvm snapshot VM NAME: pause a running VM, save its memory, device state and
+# writable disk (consistent: taken while paused), then resume it.
+snapshot_create() {
+    local vm=${1:?usage: fcvm snapshot VM NAME} name=${2:?usage: fcvm snapshot VM NAME}
+    vm_exists "$vm" || die "no VM '$vm'"
+    vm_running "$vm" || die "VM '$vm' is not running (snapshots capture a running VM's memory)"
+    [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid snapshot name '$name'"
+    local dir=$SNAPSHOTS_DIR/$name vdir disk drive t0 ms
+    [ ! -e "$dir" ] || die "snapshot '$name' already exists"
+    vdir=$(vm_dir "$vm")
+    if jq -e '[.volumes[]? | select(endswith(":ro") | not)] | length > 0' "$vdir/vm.json" >/dev/null; then
+        die "VM '$vm' has read-write volumes; a fork can't share them (use :ro volumes, or copy the data in)"
+    fi
+    if [ -f "$vdir/disk.ext4" ]; then disk=disk.ext4 drive=root; else disk=rw.ext4 drive=rw; fi
+    mkdir -p "$dir"
+    t0=$(date +%s%N)
+    fc_api "$vdir/fc.sock" PATCH /vm '{"state": "Paused"}' || { rm -rf "$dir"; die "cannot pause '$vm'"; }
+    if ! fc_api "$vdir/fc.sock" PUT /snapshot/create "$(jq -n --arg s "$dir/vmstate" --arg m "$dir/mem" \
+            '{snapshot_type: "Full", snapshot_path: $s, mem_file_path: $m, sync_snapshot_files: false}')" ||
+       ! cp --sparse=always "$vdir/$disk" "$dir/$disk"; then
+        fc_api "$vdir/fc.sock" PATCH /vm '{"state": "Resumed"}' || true
+        rm -rf "$dir"; die "snapshot failed; '$vm' resumed"
+    fi
+    fc_api "$vdir/fc.sock" PATCH /vm '{"state": "Resumed"}' || warn "could not resume '$vm'"
+    ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+    fallocate -d "$dir/mem" 2>/dev/null || true   # untouched guest pages take no disk
+    cp "$vdir/vm.json" "$dir/vm.json"
+    jq -n --arg src "$vm" --arg disk "$disk" --arg drive "$drive" --argjson ms "$ms" \
+        --arg fc "$("$FIRECRACKER" --version | head -1)" --arg srcdisk "$vdir/$disk" \
+        '{source: $src, disk: $disk, drive_id: $drive, source_disk: $srcdisk, paused_ms: $ms,
+          firecracker: $fc, created: (now | todate)}' > "$dir/meta.json"
+    log "snapshot '$name' of '$vm' (paused ${ms} ms; memory $(du -h "$dir/mem" | cut -f1) on disk). Fork it: fcvm fork $name"
+}
+
+# Boot VM $2 from snapshot $1: its own copy of the disk, a free tap, its own
+# vsock socket, then a new address, MAC and hostname via the agent.
+fork_one() {
+    local snap=$1 vm=$2 sdir=$SNAPSHOTS_DIR/$1 dir disk drive mode mac="" gw="" tap="" t0 i pid
+    dir=$(vm_dir "$vm")
+    vm_exists "$vm" && die "VM '$vm' already exists"
+    disk=$(jq -r .disk "$sdir/meta.json"); drive=$(jq -r .drive_id "$sdir/meta.json")
+    t0=$(date +%s%N)
+    mkdir -p "$dir"
+    jq --arg snap "$snap" '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate)}' \
+        "$sdir/vm.json" > "$dir/vm.json"
+    cp --sparse=always "$sdir/$disk" "$dir/$disk"
+    DIR=$dir IP=""
+    mode=$(jq -r '.net.mode // "full"' "$dir/vm.json")
+    case $mode in
+        restricted)
+            claim_tap fcrtap || { rm -rf "$dir"; die "no free restricted tap; run: ./fcvm net-up"; }
+            IP=$NET_R_PREFIX.$((10 + TAP_INDEX)) gw=$NET_R_PREFIX.1 tap=fcrtap$TAP_INDEX
+            mac=$(printf '06:01:%02x:%02x:%02x:%02x' ${IP//./ })
+            write_policy "$vm" "$IP"; ensure_proxy ;;
+        none) ;;
+        *)
+            claim_tap fctap || { rm -rf "$dir"; die "no free tap; run: ./fcvm net-up"; }
+            IP=$NET_PREFIX.$((10 + TAP_INDEX)) gw=$NET_PREFIX.1 tap=fctap$TAP_INDEX
+            mac=$(printf '06:00:%02x:%02x:%02x:%02x' ${IP//./ }) ;;
+    esac
+    [ -z "$IP" ] || echo "$IP" > "$dir/ip"
+    : > "$dir/firecracker.log"; : > "$dir/console.log"
+    setsid python3 "$FCVM_ROOT/lib/console.py" serve --sock "$dir/console.sock" --log "$dir/console.log" \
+        --pidfile "$dir/pid" --on-exit "$(printf '%q _reap %q' "$FCVM_ROOT/fcvm" "$vm")" -- \
+        "$FIRECRACKER" --api-sock "$dir/fc.sock" --log-path "$dir/firecracker.log" --level Warning \
+        </dev/null >"$dir/relay.log" 2>&1 &
+    for ((i = 0; i < 100; i++)); do [ -S "$dir/fc.sock" ] && break; sleep 0.01; done
+    pid=$(vm_pid "$vm")
+    # The snapshot records the source VM's disk path, and loading reopens it
+    # before we re-point the drive at the fork's copy. If the source VM is gone,
+    # stand in for that path with the snapshot's own disk while loading.
+    local srcdisk stand_in=0 made_dir=0 lock
+    srcdisk=$(jq -r --arg d "$VMS_DIR/$(jq -r .source "$sdir/meta.json")/$disk" '.source_disk // $d' "$sdir/meta.json")
+    mkdir -p "$VMS_DIR/.locks"
+    mkdir -p "$VMS_DIR/.locks"
+    exec {lock}>"$VMS_DIR/.locks/snapshot-load"; flock "$lock"
+    if [ ! -e "$srcdisk" ]; then
+        [ -d "${srcdisk%/*}" ] || { mkdir -p "${srcdisk%/*}"; made_dir=1; }
+        ln -s "$sdir/$disk" "$srcdisk"; stand_in=1
+    fi
+    local load
+    load=$(jq -n --arg s "$sdir/vmstate" --arg m "$sdir/mem" --arg tap "$tap" --arg vsock "$dir/vsock.sock" '
+        {snapshot_path: $s, mem_backend: {backend_type: "File", backend_path: $m},
+         vsock_override: {uds_path: $vsock}, clock_realtime: true, resume_vm: false}
+        + (if $tap != "" then {network_overrides: [{iface_id: "eth0", host_dev_name: $tap}]} else {} end)')
+    if ! fc_api "$dir/fc.sock" PUT /snapshot/load "$load" ||
+       ! fc_api "$dir/fc.sock" PATCH "/drives/$drive" "$(jq -n --arg id "$drive" --arg p "$dir/$disk" '{drive_id: $id, path_on_host: $p}')" ||
+       ! fc_api "$dir/fc.sock" PATCH /vm '{"state": "Resumed"}'; then
+        if [ $stand_in = 1 ]; then rm -f "$srcdisk"; fi
+        if [ $made_dir = 1 ]; then rmdir "${srcdisk%/*}" 2>/dev/null || true; fi
+        if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
+        sleep 0.2; rm -rf "$dir"
+        die "restore failed (snapshot taken with $(jq -r .firecracker "$sdir/meta.json"); now $("$FIRECRACKER" --version | head -1))"
+    fi
+    if [ $stand_in = 1 ]; then rm -f "$srcdisk"; fi
+    if [ $made_dir = 1 ]; then rmdir "${srcdisk%/*}" 2>/dev/null || true; fi
+    exec {lock}>&-
+    local ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+    python3 "$FCVM_ROOT/lib/exec_client.py" --netconf "${IP:+$IP/24},$gw,$mac,$vm" "$dir/vsock.sock" ||
+        warn "'$vm' could not be re-addressed (was the source VM started with an older fcvm?)"
+    log "forked '$vm' from '$snap' in ${ms} ms${IP:+ (ip $IP)}"
+}
+
+fork_cmd() {
+    local usage="usage: fcvm fork SNAPSHOT [NAME] [-n COUNT]" snap="" name="" count=1
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -n|--count) [[ ${2:-} =~ ^[1-9][0-9]*$ ]] || die "$usage"; count=$2; shift 2 ;;
+            -*)         die "unknown option $1 ($usage)" ;;
+            *)          if [ -z "$snap" ]; then snap=$1; else name=$1; fi; shift ;;
+        esac
+    done
+    [ -n "$snap" ] || die "$usage"
+    [ -f "$SNAPSHOTS_DIR/$snap/meta.json" ] || die "no snapshot '$snap' (see: fcvm snapshot ls)"
+    [ "$(jq '.ports | length' "$SNAPSHOTS_DIR/$snap/vm.json")" = 0 ] ||
+        warn "published ports aren't carried over to forks (they'd conflict with the source)"
+    local base=${name:-$snap-$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')} i
+    if [ "$count" = 1 ]; then
+        fork_one "$snap" "$base"
+    else
+        for ((i = 1; i <= count; i++)); do fork_one "$snap" "$base-$i"; done
+    fi
+}
+
+snapshot_cmd() {
+    case ${1:-} in
+        ls)
+            local json=0 d
+            [ "${2:-}" = --json ] && json=1
+            for d in "$SNAPSHOTS_DIR"/*/; do
+                [ -f "$d/meta.json" ] || continue
+                jq --arg name "$(basename "$d")" --argjson mem "$(( $(stat -c %b "$d/mem") * 512 ))" \
+                   --argjson disk "$(( $(stat -c %b "$d"/*.ext4 | head -1) * 512 ))" --slurpfile vm "$d/vm.json" \
+                   '{name: $name, source, image: $vm[0].image, type: $vm[0].type, mem_mib: $vm[0].mem_mib,
+                     mem_bytes_on_disk: $mem, disk_bytes: $disk, paused_ms, created}' "$d/meta.json"
+            done | if [ $json = 1 ]; then jq -s .; else
+                jq -rs '(["NAME","SOURCE","IMAGE","MEM","DISK","CREATED"] | @tsv),
+                    (.[] | [.name, .source, .image, "\(.mem_bytes_on_disk / 1048576 | floor)M/\(.mem_mib)M",
+                            "\(.disk_bytes / 1048576 | floor)M", .created] | @tsv)' | column -t -s $'\t'; fi ;;
+        rm)
+            local name=${2:?usage: fcvm snapshot rm NAME}
+            [ -d "$SNAPSHOTS_DIR/$name" ] || die "no snapshot '$name'"
+            rm -rf "${SNAPSHOTS_DIR:?}/$name"; log "removed snapshot '$name'" ;;
+        ""|-h|--help) die "usage: fcvm snapshot VM NAME | fcvm snapshot ls [--json] | fcvm snapshot rm NAME" ;;
+        *) snapshot_create "$@" ;;
+    esac
+}
+
 # --- machine-readable state ------------------------------------------------------
 
 # Host memory a running VM actually uses: its Firecracker process's resident
@@ -942,5 +1101,7 @@ case $cmd in
     cp)      cp_cmd "$@" ;;
     volume)  volume_cmd "$@" ;;
     egress)  egress "$@" ;;
+    snapshot) snapshot_cmd "$@" ;;
+    fork)    fork_cmd "$@" ;;
     rm)      rm_vm "$@" ;;
 esac

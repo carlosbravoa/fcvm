@@ -49,6 +49,10 @@ VMs:
   commit VM IMAGE            save a stopped VM's changes as a new image (a layer)
   squash IMAGE NEW           merge IMAGE's layers into one (same base image)
   prune                      delete the build cache and leftover build VMs
+  snapshot VM NAME           save a running VM's memory + disk (it keeps running)
+  snapshot ls [--json] | rm NAME
+  fork SNAPSHOT [NAME] [-n N]  new running VM(s) from a snapshot in ~50 ms, with their own
+                             disk, IP, MAC and hostname (processes keep running)
   inspect VM                 VM details as JSON
   ls [--all] [--json]        list VMs (--all: include build VMs)
   rm VM                      delete a VM
@@ -76,7 +80,7 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|_reap)
+    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|snapshot|fork|_reap)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     help|-h|--help)     usage ;;

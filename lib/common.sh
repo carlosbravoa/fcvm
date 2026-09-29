@@ -34,6 +34,7 @@ KERNELS_DIR=$FCVM_ROOT/kernels
 IMAGES_DIR=$FCVM_ROOT/images
 VMS_DIR=$FCVM_ROOT/vms
 VOLUMES_DIR=$FCVM_ROOT/volumes
+SNAPSHOTS_DIR=$FCVM_ROOT/snapshots
 FIRECRACKER=$BIN_DIR/firecracker
 
 log()  { printf '\e[1;34m==>\e[0m %s\n' "$*" >&2; }
@@ -70,6 +71,10 @@ image_users() {
     for j in "$IMAGES_DIR"/*.json; do
         [ -f "$j" ] || continue
         if [ "$(jq -r '.parent // empty' "$j")" = "$1" ]; then echo "image:$(basename "$j" .json)"; fi
+    done
+    for j in "$SNAPSHOTS_DIR"/*/vm.json; do   # snapshots boot from their image too
+        [ -f "$j" ] && [ ! -f "${j%/vm.json}/disk.ext4" ] || continue
+        if image_chain "$(jq -r .image "$j")" | grep -qx -- "$1"; then echo "snapshot:$(basename "${j%/vm.json}")"; fi
     done
 }
 

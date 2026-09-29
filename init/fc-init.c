@@ -45,7 +45,10 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <linux/vm_sockets.h>
+#include <arpa/inet.h>
 #include <net/if.h>
+#include <net/if_arp.h>
+#include <net/route.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -837,6 +840,85 @@ static int pump(int fd, int conn, char t)
     return n < 0 && (errno == EAGAIN || errno == EINTR) ? 0 : -1;
 }
 
+/*
+ * Re-identify a VM restored from a snapshot (fcvm fork): new address, MAC and
+ * hostname, applied with plain ioctls so it works in any image. Fields:
+ * "fcvm2", ip, prefix length, gateway, mac, hostname (ip "" = no network).
+ */
+static int netconf(char **f, char *err, size_t errlen)
+{
+    const char *ip = f[1], *gw = f[3], *mac = f[4], *host = f[5];
+    int prefix = atoi(f[2]);
+    if (*host) {
+        char old[256] = "", hosts[1024];
+        gethostname(old, sizeof(old));
+        sethostname(host, strlen(host));
+        char *cur = slurp("/etc/hostname", NULL);
+        if (cur && strcmp(trim(cur), old) == 0) { /* ours, not a distro default */
+            snprintf(hosts, sizeof(hosts), "%s\n", host);
+            spit("/etc/hostname", hosts);
+        }
+        free(cur);
+        char *h = slurp("/etc/hosts", NULL), *line = h ? strstr(h, "127.0.1.1") : NULL;
+        if (line) { /* rewrite the 127.0.1.1 line, keep the rest */
+            *line = '\0';
+            char *rest = strchr(line + 1, '\n');
+            snprintf(hosts, sizeof(hosts), "%s127.0.1.1\t%s\n%s", h, host, rest ? rest + 1 : "");
+            spit("/etc/hosts", hosts);
+        }
+        free(h);
+    }
+    if (!*ip)
+        return 0;
+
+    int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    struct ifreq ifr = {0};
+    strcpy(ifr.ifr_name, "eth0");
+#define IOC(req, what) if (ioctl(s, req, &ifr) < 0) { snprintf(err, errlen, "%s: %s", what, strerror(errno)); close(s); return -1; }
+    IOC(SIOCGIFFLAGS, "get flags");
+    ifr.ifr_flags &= ~IFF_UP;
+    IOC(SIOCSIFFLAGS, "link down");
+    if (*mac) {
+        unsigned int m[6];
+        if (sscanf(mac, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) != 6) {
+            snprintf(err, errlen, "bad mac %s", mac);
+            close(s);
+            return -1;
+        }
+        ifr.ifr_hwaddr.sa_family = ARPHRD_ETHER;
+        for (int i = 0; i < 6; i++)
+            ifr.ifr_hwaddr.sa_data[i] = m[i];
+        IOC(SIOCSIFHWADDR, "set mac");
+    }
+    struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_addr;
+    memset(&ifr.ifr_addr, 0, sizeof(ifr.ifr_addr));
+    sin->sin_family = AF_INET;
+    inet_pton(AF_INET, ip, &sin->sin_addr);
+    IOC(SIOCSIFADDR, "set address");
+    sin->sin_addr.s_addr = htonl(prefix ? ~0u << (32 - prefix) : 0);
+    IOC(SIOCSIFNETMASK, "set netmask");
+    IOC(SIOCGIFFLAGS, "get flags");
+    ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+    IOC(SIOCSIFFLAGS, "link up");
+#undef IOC
+    if (*gw) {
+        struct rtentry rt = {0};
+        struct sockaddr_in *dst = (struct sockaddr_in *)&rt.rt_dst, *mask = (struct sockaddr_in *)&rt.rt_genmask,
+                           *via = (struct sockaddr_in *)&rt.rt_gateway;
+        dst->sin_family = mask->sin_family = via->sin_family = AF_INET;
+        inet_pton(AF_INET, gw, &via->sin_addr);
+        rt.rt_flags = RTF_UP | RTF_GATEWAY;
+        rt.rt_dev = "eth0";
+        if (ioctl(s, SIOCADDRT, &rt) < 0 && errno != EEXIST) {
+            snprintf(err, errlen, "default route: %s", strerror(errno));
+            close(s);
+            return -1;
+        }
+    }
+    close(s);
+    return 0;
+}
+
 static void agent_session(int conn)
 {
     struct buf b = {0};
@@ -844,6 +926,25 @@ static void agent_session(int conn)
     while (!(flen = frame_ready(&b)))
         if (fill(&b, conn) <= 0)
             _exit(0);
+    if (b.d[0] == 'N') { /* netconf: re-identify after a snapshot restore */
+        char *f[8] = {0}, err[300] = "";
+        int nf = 0;
+        for (size_t i = 5; i < flen && nf < 7; i += strlen(b.d + i) + 1)
+            f[nf++] = b.d + i;
+        unsigned char x[4] = {0, 0, 0, 0};
+        if (nf < 6 || strcmp(f[0], "fcvm2") != 0) {
+            snprintf(err, sizeof(err), "bad netconf request");
+        } else if (netconf(f, err, sizeof(err)) < 0) {
+            x[3] = 1;
+        }
+        if (*err) {
+            strcat(err, "\n");
+            send_frame(conn, 'E', err, strlen(err));
+            x[3] = 1;
+        }
+        send_frame(conn, 'X', x, 4);
+        _exit(0);
+    }
     if (b.d[0] != 'R')
         _exit(0);
 

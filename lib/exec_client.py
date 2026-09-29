@@ -68,12 +68,30 @@ def main():
     ap.add_argument("-w", "--workdir", default="", help="working directory (default: the image's)")
     ap.add_argument("-e", "--env", action="append", default=[], help="extra KEY=VALUE (repeatable)")
     ap.add_argument("--timeout", type=float, help="kill the command after this many seconds (exit 124)")
+    ap.add_argument("--netconf", metavar="IP/PREFIX,GW,MAC,HOSTNAME",
+                    help="re-identify a VM restored from a snapshot instead of running a command")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     args = ap.parse_args()
     cmd = args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd
     use_tty = args.tty and sys.stdin.isatty()
 
     sock = connect(args.uds)
+    if args.netconf:
+        addr, gw, mac, host = (args.netconf.split(",") + ["", "", "", ""])[:4]
+        ip, _, prefix = addr.partition("/")
+        sock.sendall(frame(b"N", b"\0".join(f.encode() for f in ["fcvm2", ip, prefix or "24", gw, mac, host]) + b"\0"))
+        buf = b""
+        while chunk := sock.recv(4096):
+            buf += chunk
+        code = 1
+        while len(buf) >= 5:
+            kind, n = buf[:1], struct.unpack(">I", buf[1:5])[0]
+            payload, buf = buf[5:5 + n], buf[5 + n:]
+            if kind == b"E":
+                sys.stderr.write(payload.decode(errors="replace"))
+            elif kind == b"X":
+                code = struct.unpack(">i", payload)[0]
+        return code
     rows, cols = winsize()
     fields = (["fcvm2", "1" if use_tty else "0", str(rows), str(cols), os.environ.get("TERM", "xterm"),
                args.user, args.workdir, str(len(args.env))] + args.env + cmd)

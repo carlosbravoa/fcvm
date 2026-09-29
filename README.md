@@ -73,6 +73,9 @@ curl http://localhost:8080/              # or the VM's own IP: http://172.30.0.1
 | `rmi IMAGE` | deletes an image nothing depends on |
 | `squash IMAGE NEW` | merges IMAGE's committed layers into one, on the same base image |
 | `prune` | deletes the build cache and leftover build VMs |
+| `snapshot VM NAME` | saves a running VM's memory, device state and disk. The VM keeps running (paused ~0.75 s per GB of RAM) |
+| `snapshot ls [--json]`, `snapshot rm NAME` | lists / deletes snapshots |
+| `fork SNAPSHOT [NAME] [-n N]` | starts running VM(s) from a snapshot in ~120 ms each, with their own disk, IP, MAC and hostname |
 | `volume create NAME [SIZE]`, `volume ls [--json]`, `volume rm NAME` | named volumes: persistent ext4 disks attached with `-v` |
 | `egress VM [--allow H,...] [--deny H,...] [-n N \| -f]` | a restricted VM's allowlist and its allowed/denied requests. Changes apply live |
 | `mcp` | MCP server on stdio, for agents |
@@ -335,6 +338,59 @@ itself. VMs on `fcbr0` can reach each other unless `NET_ISOLATE=1`.
   `.config` (renamed symbol or unmet dependency). Check this after moving to a
   new kernel series.
 
+## Snapshots and fork
+
+`fcvm snapshot` captures a running VM whole: its memory (processes, page
+cache, anything in RAM), device state and writable disk, all taken while it
+is paused, so they are consistent. `fcvm fork` starts new VMs from that
+exact moment. Processes keep running from where they were, and warm caches
+and loaded dependencies stay warm.
+
+```sh
+./fcvm create box python-3.13-slim --idle && ./fcvm start box
+./fcvm exec box sh -c 'pip install -q numpy pandas && python -c "import pandas"'   # prepare once
+./fcvm snapshot box ready          # box keeps running
+./fcvm fork ready try -n 3         # try-1, try-2, try-3: running in ~0.6 s total
+./fcvm exec try-2 python -c 'import pandas; print(pandas.__version__)'
+./fcvm rm try-2 && ./fcvm fork ready try-2   # roll back: a fresh copy of the prepared state
+```
+
+What each fork gets:
+- **Its own disk:** a copy of the snapshot's writable layer. Images stay
+  shared and read-only.
+- **Network:** its own tap, IP and MAC in the snapshot's network mode (full,
+  restricted with the same allowlist, or none). Published ports aren't
+  carried over, since they would conflict with the source.
+- **Hostname:** its own, set after restore by the exec agent over vsock,
+  with plain ioctls, so it works in any image.
+- **Clock:** Firecracker's `clock_realtime` advances the guest clock by the
+  time since the snapshot.
+- **Randomness:** the kernel is built with VMGenID. Firecracker bumps the
+  generation ID on restore and the guest kernel reseeds its RNG, so forks
+  don't share random state. User-space programs that keep their own random
+  state in memory (a process-local PRNG seeded before the snapshot) will
+  still repeat it, which is inherent to cloning a running process.
+- **Memory:** loaded on demand from the snapshot's memory file and shared
+  copy-on-write between forks. A fork starts at about 20 MB of host RAM.
+
+Numbers on this machine (1 GiB VM): the snapshot pauses the source for about
+0.75 s, most of it writing the memory file. The memory file is then made
+sparse (1 GiB → ~50 MB on disk for an idle VM). A fork takes about 120 ms
+including re-addressing.
+
+**Limits:**
+- VMs with read-write volumes can't be snapshotted, because two forks can't
+  share a writable volume. Use `:ro` volumes, or copy data in.
+- A snapshot is tied to the Firecracker version and CPU model it was taken
+  on. After `fcvm firecracker` upgrades, old snapshots may not load; fork
+  says so.
+- A stopped fork is an ordinary VM: `fcvm start` cold-boots it from its own
+  disk. The hostname set at fork time is runtime state, so an app VM comes
+  back with its image's hostname, as any VM created from that image would.
+- A snapshot keeps its images in use (`rmi` refuses), and deleting it
+  doesn't affect running forks. Only VMs started with this version of
+  fcvm's initramfs can be re-addressed; older ones get a warning.
+
 ## Building images
 
 `fcvm build` takes a Dockerfile subset, from `Fcvmfile` or `Dockerfile` in
@@ -418,6 +474,7 @@ claude mcp add fcvm -- /path/to/fcvm mcp
 | `copy_to_vm`, `copy_from_vm` | host files and directories in or out (`fcvm cp`) |
 | `commit_vm` | save a VM's state as an image; new sandboxes start from it |
 | `build_image` | build an image from a Dockerfile in a host directory (cached per step) |
+| `snapshot_vm`, `fork`, `snapshots`, `remove_snapshot` | snapshot a prepared sandbox and fork running copies in ~0.1 s, for parallel attempts or rollback |
 | `egress_log` | a sandbox's network policy and its allowed/denied requests |
 | `logs`, `list_vms`, `start_vm`, `stop_vm`, `remove_vm`, `volumes` | lifecycle and state |
 
@@ -457,7 +514,7 @@ lib/console.py          per-VM serial console relay (attach/detach, logs)
 lib/net.sh              host bridge/taps/NAT
 init/fc-init.c          init for every VM (initramfs): root assembly, container PID 1, exec agent
 kernel/microvm-*.config kernel fragment
-bin/ kernels/ images/ vms/ volumes/ cache/ build/   generated
+bin/ kernels/ images/ vms/ volumes/ snapshots/ cache/ build/   generated
 ```
 
 ## Roadmap
@@ -482,10 +539,11 @@ Windows. fcvm needs KVM and never will.
   host-directory sync over vsock that behaves like a bind mount.
 - **A2. Snapshots and commit.** ✅ `fcvm commit VM IMAGE` saves a VM's
   writable layer as a new image layer (Docker-style stacking, instant,
-  rootless). Next: Firecracker memory snapshots, to prepare a VM once and
-  fork it per agent attempt in about 100–200 ms, or roll back after a bad
-  attempt. This needs a new tap and IP per fork (network overrides plus
-  re-addressing inside the guest) and entropy reseeding (VMGenID).
+  rootless). ✅ `fcvm snapshot` / `fcvm fork`: Firecracker memory snapshots,
+  forked into running VMs in ~120 ms, each with its own disk, IP, MAC and
+  hostname, and RNG reseeding through VMGenID. Still open: diff snapshots
+  (only dirty pages) to cut the ~0.75 s/GB pause, and snapshots of VMs with
+  read-write volumes.
 - **A3. Machine interface.** ✅ `--json` for `ls`/`images`, `fcvm inspect`,
   and ✅ an MCP server (`fcvm mcp`) that exposes sandbox tools to agents.
 - **A4. Egress control.** ✅ `--net none`, ✅ `--allow` allowlists enforced by

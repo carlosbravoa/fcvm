@@ -24,6 +24,15 @@ chmod 644 "$keys"
 tar=$BUILD_DIR/$name.rootfs.tar
 trap 'rm -f "$tar"' EXIT
 log "bootstrapping Ubuntu $UBUNTU_SUITE from $UBUNTU_MIRROR"
+# mmdebstrap's rootless mode needs unprivileged user namespaces with full
+# capabilities, which Ubuntu 24.04's AppArmor default withholds.
+userns_hint() {
+    [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] || return 0
+    warn "this host restricts unprivileged user namespaces (AppArmor), which mmdebstrap needs.
+    Allow them while building:  sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+    then: fcvm base;  and afterwards: sudo sysctl kernel.apparmor_restrict_unprivileged_userns=1"
+}
+trap 'rm -f "$tar"; [ $? = 0 ] || userns_hint' EXIT
 mmdebstrap \
     --mode=unshare --variant=minbase --format=tar \
     --components=main,universe \

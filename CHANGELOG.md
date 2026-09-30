@@ -16,11 +16,13 @@ to move across.
   See CONTRIBUTING.md.
 
 **Fixes**
-- Ubuntu 24.04 (e2fsprogs 1.47.0) works. Building disks from tarballs
-  (every import, every new VM's layer, the base image, builds) needs
-  e2fsprogs 1.47.1. With older ones, `lib/mkfs-tar.sh` unpacks the tarball
-  in a user namespace over your subuid range, keeping owners, and builds
-  from that.
+- Ubuntu 24.04 works. Building disks from tarballs (every import, every new
+  VM's layer, the base image, builds) needs e2fsprogs 1.47.1, and 24.04 has
+  1.47.0. There, `lib/tar2ext4.py` unpacks the tarball as you, builds from
+  the directory, and writes the real owners, modes, device nodes and file
+  capabilities with debugfs. No privileges or user namespaces are needed,
+  which 24.04 restricts. `fcvm base` (mmdebstrap) still needs unprivileged
+  user namespaces there, and says how to allow them for the build.
 - VMs unmount their disks cleanly at shutdown. A volume used read-write
   used to be left needing journal recovery, so the next VM that mounted it
   read-only failed to boot. Read-only mounts of such a disk now also fall

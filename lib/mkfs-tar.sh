@@ -24,27 +24,5 @@ if [ "${FCVM_MKFS_UNPACK:-0}" != 1 ] && reads_tarballs; then
     exec mkfs.ext4 "${opts[@]}" -d "$tar" "$@"
 fi
 
-need newuidmap newgidmap
-grep -q "^$(id -un):" /etc/subuid && grep -q "^$(id -un):" /etc/subgid ||
-    die "no subuid/subgid range for $(id -un) (run: fcvm host-setup)"
 mkdir -p "$BUILD_DIR"
-dir=$(mktemp -d "$BUILD_DIR/unpack.XXXXXX")
-# Inside: root is you, and the image's uids map onto your subuids. Unpack,
-# build, and clean up there (outside, you couldn't delete subuid-owned files).
-python3 "$FCVM_ROOT/lib/userns.py" bash -c '
-    set -uo pipefail
-    tar="$1" dir="$2"; shift 2
-    tar --numeric-owner --same-owner --same-permissions --xattrs --xattrs-include="*" \
-        -xf "$tar" -C "$dir" 2> "$dir.err"
-    rc=$?
-    if [ $rc != 0 ]; then
-        nodes=$(grep -c "Cannot mknod" "$dir.err" || true)
-        others=$(grep -v "Cannot mknod\|Exiting with failure status" "$dir.err" || true)
-        if [ -n "$others" ]; then echo "$others" >&2; rm -rf "$dir" "$dir.err"; exit 1; fi
-        [ "$nodes" = 0 ] || echo "==> skipped $nodes device node(s) (VMs get /dev from devtmpfs)" >&2
-    fi
-    mkfs.ext4 "$@" -d "$dir" 2>&1 | grep -v "^Copying files into the device" >&2
-    rc=${PIPESTATUS[0]}
-    rm -rf "$dir" "$dir.err"
-    exit $rc
-' mkfs-tar "$tar" "$dir" "${opts[@]}" "$@"
+TMPDIR=$BUILD_DIR exec python3 "$FCVM_ROOT/lib/tar2ext4.py" "$tar" "${opts[@]}" -- "$@"

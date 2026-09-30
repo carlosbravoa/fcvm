@@ -77,10 +77,14 @@ fleet view would be a separate control-plane product built on this API.
 - **W6. Service mode.** ✅ `fcvm service install`: the network and
   `fcvm serve` at boot (a system unit running as you). VMs with a restart
   policy come back after a reboot or crash (with E4).
-- **W7. Metrics.** Guest-level metrics through the agent (CPU, memory, disk
-  and processes inside the VM), longer history, and a Prometheus endpoint.
-- **W8. Templates.** Saved launch presets, e.g. "Python sandbox, @pypi only,
-  2 GB", shared with the MCP server's defaults.
+- **W7. Metrics.** ✅ Guest-level metrics through the exec agent (CPU,
+  memory, disk, load and processes inside the VM, in any image), a
+  Processes tab, 24 hours of one-minute history that survives restarts, and
+  a Prometheus endpoint (`/metrics`).
+- **W8. Templates.** ✅ Saved launch recipes (built-in Python, Node and
+  offline sandboxes, and your own) shared by the CLI (`--template`,
+  `fcvm template`), the web console (a picker, Save as template, a
+  Templates page) and the MCP server (`template`, `FCVM_MCP_TEMPLATE`).
 - **W9. Fleet view.** Several fcvm hosts in one console: a separate
   control-plane product using `fcvm serve` as the per-host agent.
 

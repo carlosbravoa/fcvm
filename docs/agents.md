@@ -34,7 +34,8 @@ The agent needs the images it will use. It can import them itself
 | tool | does |
 |---|---|
 | `images`, `pull_image` | list images; import from Docker Hub or any registry, or a local archive |
-| `create_sandbox` | create and boot a VM. App images stay idle for `exec` unless given a command |
+| `create_sandbox` | create and boot a VM from an `image` or a `template`. App images stay idle for `exec` unless given a command (or the template says otherwise) |
+| `templates` | list [templates](templates.md): saved recipes with an image, resources, network and process |
 | `exec` | run a shell command (`command`) or exact `argv`, with `workdir`, `env`, `user`, `stdin` and `timeout` (default 300 s). Returns `exit_code`, `stdout`, `stderr` |
 | `write_file`, `read_file` | text files in the VM |
 | `copy_to_vm`, `copy_from_vm` | host files and directories in or out (`fcvm cp`) |
@@ -54,6 +55,21 @@ allowlist such as `["@pypi", "github.com"]` (see
 registering the server, for example `@pypi,@github`. Every sandbox then
 gets that allowlist. The agent may only narrow it to `"none"`, and no tool
 widens it.
+
+## Templates
+
+`create_sandbox` takes `template` (see the `templates` tool), and the
+agent's other arguments override the template's. Set `FCVM_MCP_TEMPLATE`
+to the template sandboxes get when the agent names neither an image nor a
+template, for example:
+
+```sh
+claude mcp add fcvm -e FCVM_MCP_TEMPLATE=python-sandbox -- "$(command -v fcvm)" mcp
+```
+
+A pinned network (`FCVM_MCP_NETWORK`) still wins over a template's network,
+except that a template with no network stays without one. A template that
+asks for the jailer gets it.
 
 ## Jailing
 

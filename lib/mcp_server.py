@@ -14,6 +14,8 @@ import re
 import subprocess
 import sys
 
+import templates
+
 FCVM = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fcvm")
 PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 OUTPUT_CAP = 20000
@@ -26,13 +28,17 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PINNED_NETWORK = os.environ.get("FCVM_MCP_NETWORK", "").strip()
 # Sandboxes run under the jailer whenever fcvm-jaild is installed (FCVM_MCP_JAIL=0 opts out).
 JAIL = os.environ.get("FCVM_MCP_JAIL", "1") != "0" and os.path.exists("/run/fcvm/jaild.sock")
+# The template create_sandbox uses when the agent names neither an image nor a
+# template, e.g. FCVM_MCP_TEMPLATE=python-sandbox (see `fcvm template ls`).
+DEFAULT_TEMPLATE = os.environ.get("FCVM_MCP_TEMPLATE", "").strip()
 
 INSTRUCTIONS = """fcvm runs Firecracker microVMs: real kernel isolation, ~1 s to boot a container
 image, ~2 s for Ubuntu. Typical loop: images (or pull_image) -> create_sandbox ->
 exec / write_file / read_file / copy_* -> commit_vm to save a prepared state ->
 remove_vm. build_image turns a Dockerfile into a reusable image. snapshot_vm
 + fork give running copies of a prepared VM in ~0.1 s (parallel attempts,
-rollback). App sandboxes run as the image's USER; pass user="root" to exec
+rollback). templates lists saved launch recipes (image, resources, network)
+that create_sandbox takes as template=NAME. App sandboxes run as the image's USER; pass user="root" to exec
 for installs. Network: "full" (NAT), "none", or an allowlist of hosts/@presets
 (@pypi, @npm, @github, ...) enforced by a host-side HTTP(S) proxy; the sandbox's
 http(s)_proxy variables are preset, and egress_log shows what was allowed or
@@ -121,26 +127,54 @@ def network_args(network):
     return ["--allow", ",".join(a.strip() for a in allow if a.strip())]
 
 
-def t_create_sandbox(image, name=None, command=None, vcpus=None, mem_mib=None, ports=None, volumes=None,
-                     network=None):
+def t_templates():
+    return list(templates.all_templates().values())
+
+
+def t_create_sandbox(image=None, template=None, name=None, command=None, vcpus=None, mem_mib=None, ports=None,
+                     volumes=None, network=None):
+    if not image and not template:
+        template = DEFAULT_TEMPLATE
+        if not template:
+            raise ToolError("give an image (see images) or a template (see templates)")
+    if template:
+        # the template's recipe, with the agent's arguments over it; the network
+        # stays within a pinned policy, and a template that asks for the jail gets it
+        try:
+            t = templates.get(template)
+        except templates.Invalid as e:
+            raise ToolError(str(e))
+        if image and image != t["image"]:
+            raise ToolError(f"template '{template}' is for image '{t['image']}'; give one or the other")
+        image = t["image"]
+        if not any(i["name"] == image for i in t_images()):
+            if not t["ref"]:
+                raise ToolError(f"template '{template}' uses image '{image}', which isn't imported")
+            t_pull_image(t["ref"], image)
+    else:
+        t = templates.validate({"image": image})
     img = next((i for i in t_images() if i["name"] == image), None)
     if not img:
         raise ToolError(f"no image '{image}'; see the images tool or pull_image")
     if not name:
         name = f"{image.split('-')[0]}-{os.urandom(3).hex()}"
-    args = ["create", name, image]
-    if vcpus:
-        args += ["--vcpus", vcpus]
-    if mem_mib:
-        args += ["--mem", mem_mib]
-    for p in ports or []:
-        args += ["-p", p]
-    for v in volumes or []:
-        args += ["-v", v]
-    args += network_args(network)
-    args.append("--jail" if JAIL else "--no-jail")
+    t = {**t, "jail": bool(JAIL or t["jail"]), "vcpus": vcpus or t["vcpus"], "mem_mib": mem_mib or t["mem_mib"],
+         "ports": t["ports"] + list(ports or []), "volumes": t["volumes"] + list(volumes or [])}
+    if command:
+        t["process"], t["command"] = "command", list(command)
+    if PINNED_NETWORK or network is not None:
+        if network is None and t["network"] == "none":
+            network = "none"                    # a pinned policy never widens an offline template
+        t["network"], t["allow"] = "full", []
+        net = network_args(network)
+        if net[:1] == ["--net"]:
+            t["network"] = "none"
+        elif net:
+            t["network"], t["allow"] = "restricted", net[1].split(",")
+    args = ["create", name, image, *templates.options(t)]
     if img["type"] == "app":
-        args += ["--", *command] if command else ["--idle"]
+        # with no template, a container image stays up idle for exec
+        args += templates.process(t) if template or command else ["--idle"]
     fcvm(*args)
     fcvm("start", name)
     return inspect(name)
@@ -274,9 +308,12 @@ TOOLS = {
          "network": {"description": 'network for RUN steps: full (default), "none", or an allowlist', "anyOf": [S, {"type": "array", "items": S}]},
          "no_cache": {"type": "boolean"}}, ["context", "tag"]),
     "list_vms": (t_list_vms, "List VMs with state, IP, image, ports and volumes.", {}, []),
+    "templates": (t_templates, "List launch templates: saved recipes (image, vCPUs, memory, network, volumes, process) for create_sandbox's template argument.", {}, []),
     "create_sandbox": (t_create_sandbox,
-        "Create and boot a VM from an image. Container images stay up idle for exec unless a command is given. Returns the VM's details (name, ip).",
-        {"image": S, "name": S,
+        "Create and boot a VM from an image or a template. Container images stay up idle for exec unless a command is given (or the template says otherwise). Returns the VM's details (name, ip)."
+        + (f" With neither image nor template, the '{DEFAULT_TEMPLATE}' template is used." if DEFAULT_TEMPLATE else ""),
+        {"image": S, "template": {**S, "description": "a template name (see templates); your other arguments override it"},
+         "name": S,
          "command": {"type": "array", "items": S, "description": "run this instead of staying idle (app images)"},
          "vcpus": I, "mem_mib": I,
          "ports": {"type": "array", "items": S, "description": "publish TCP ports, [BIND:]HOST:GUEST"},
@@ -284,7 +321,7 @@ TOOLS = {
          "network": {"description": 'full (default), "none", or an allowlist: ["@pypi", "github.com", "*.example.com"]'
                      + (f". Pinned by the server to: {PINNED_NETWORK}" if PINNED_NETWORK else ""),
                      "anyOf": [S, {"type": "array", "items": S}]}},
-        ["image"]),
+        []),
     "exec": (t_exec, "Run a command in a running VM. Returns exit_code, stdout and stderr (capped).",
              {"vm": S, "command": {**S, "description": "shell command, run with sh -c"},
               "argv": {"type": "array", "items": S, "description": "exact argv, for images without a shell"},

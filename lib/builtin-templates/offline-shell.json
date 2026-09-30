@@ -1,0 +1,5 @@
+{
+  "description": "Alpine with no network at all: for code that must not reach anything",
+  "image": "alpine-latest", "ref": "alpine:latest",
+  "mem_mib": 512, "network": "none", "process": "idle"
+}

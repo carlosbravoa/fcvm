@@ -57,6 +57,7 @@ These use sudo.
 | command | what it does |
 |---|---|
 | `create VM IMAGE [opts] [-- CMD...]` | defines a VM on the shared image plus its own writable layer. Options below |
+| `create VM --template NAME [opts] [-- CMD...]` | the same from a [template](templates.md); your options win over its own. `run --template NAME` works too |
 | `start [-a] VM` | boots it in the background, like `docker start`; `-a` attaches the console |
 | `run IMAGE [-d] [opts] [-- CMD...]` | throwaway VM, deleted when it stops. App images: attached like `docker run` (output, Ctrl-C to the app, Ctrl-] detaches, the app's exit code). System images: a shell, or CMD, then stop and delete. `-d`: in the background |
 | `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s. Restart policies then leave it alone until you start it |
@@ -82,6 +83,15 @@ These use sudo.
 | `--entrypoint CMD` | app images: replaces the ENTRYPOINT (`""` clears it) |
 | `--jail`, `--no-jail` | run under the Firecracker jailer (default: `JAIL`, 0) |
 | `--restart POLICY` | `no`, `on-failure`, `unless-stopped`, `always` (`create` only) |
+
+## Templates
+
+| command | what it does |
+|---|---|
+| `template ls [--json]`, `template show NAME` | lists templates (`*` marks built-in ones), or shows one as JSON |
+| `template save NAME IMAGE [create opts] [-- CMD...] [-d DESC]` | saves a recipe, checked as `create` would check it; nothing is created. `-d` goes before IMAGE |
+| `template save NAME --from VM [-d DESC]` | saves an existing VM's configuration |
+| `template rm NAME` | deletes one of yours |
 
 ## Inside a VM
 

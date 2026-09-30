@@ -41,6 +41,7 @@
  * Build: lib/build-init.sh (static binary + initramfs)
  */
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -62,6 +63,7 @@
 #include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <termios.h>
@@ -1098,6 +1100,139 @@ static void entry_line(char *out, size_t cap, const char *dir, const char *name)
              (long long)st.st_size, (long long)st.st_mtime, clean, target);
 }
 
+/*
+ * Guest metrics for fcvm serve (file operation "metrics"): what the guest itself
+ * sees, which the host can't (its memory use, its CPU time, its processes).
+ * One text reply, a line per item:
+ *   cpu USER NICE SYSTEM IDLE IOWAIT IRQ SOFTIRQ STEAL   (clock ticks)
+ *   cpus N          mem TOTAL AVAILABLE (kB)       load 1 5 15
+ *   uptime SECONDS  disk TOTAL USED (bytes, the root filesystem)
+ *   p PID PPID UID STATE TICKS RSS_PAGES USER<TAB>COMM<TAB>CMDLINE
+ */
+static void metrics_line(int conn, char *out, size_t *n, size_t cap, const char *line)
+{
+    size_t l = strlen(line);
+    if (*n + l > cap) {
+        send_frame(conn, 'D', out, *n);
+        *n = 0;
+    }
+    memcpy(out + *n, line, l);
+    *n += l;
+}
+
+static int metrics_op(int conn)
+{
+    char out[65536], line[4096];
+    size_t n = 0;
+    char *stat = slurp("/proc/stat", NULL);
+    if (stat) {
+        unsigned long long v[8] = {0};
+        sscanf(stat, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
+        snprintf(line, sizeof(line), "cpu %llu %llu %llu %llu %llu %llu %llu %llu\ncpus %ld\n",
+                 v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], sysconf(_SC_NPROCESSORS_ONLN));
+        metrics_line(conn, out, &n, sizeof(out), line);
+        free(stat);
+    }
+    char *mi = slurp("/proc/meminfo", NULL);
+    if (mi) {
+        char *t = strstr(mi, "MemTotal:"), *a = strstr(mi, "MemAvailable:");
+        snprintf(line, sizeof(line), "mem %lu %lu\n", t ? strtoul(t + 9, NULL, 10) : 0,
+                 a ? strtoul(a + 13, NULL, 10) : 0);
+        metrics_line(conn, out, &n, sizeof(out), line);
+        free(mi);
+    }
+    char *la = slurp("/proc/loadavg", NULL), *up = slurp("/proc/uptime", NULL);
+    if (la) {
+        double l1 = 0, l5 = 0, l15 = 0;
+        sscanf(la, "%lf %lf %lf", &l1, &l5, &l15);
+        snprintf(line, sizeof(line), "load %.2f %.2f %.2f\n", l1, l5, l15);
+        metrics_line(conn, out, &n, sizeof(out), line);
+        free(la);
+    }
+    if (up) {
+        snprintf(line, sizeof(line), "uptime %ld\n", (long)strtod(up, NULL));
+        metrics_line(conn, out, &n, sizeof(out), line);
+        free(up);
+    }
+    struct statvfs fs;
+    if (statvfs("/", &fs) == 0) {
+        snprintf(line, sizeof(line), "disk %llu %llu\n", (unsigned long long)fs.f_blocks * fs.f_frsize,
+                 (unsigned long long)(fs.f_blocks - fs.f_bfree) * fs.f_frsize);
+        metrics_line(conn, out, &n, sizeof(out), line);
+    }
+    /* processes, with user names from the guest's own /etc/passwd (cached) */
+    struct { long uid; char name[33]; } names[64];
+    int nnames = 0;
+    DIR *d = opendir("/proc");
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        if (!isdigit((unsigned char)e->d_name[0]))
+            continue;
+        char path[300], *st, *status, *cmd;
+        size_t cmdlen = 0;
+        snprintf(path, sizeof(path), "/proc/%s/stat", e->d_name);
+        if (!(st = slurp(path, NULL)))
+            continue;
+        char *rp = strrchr(st, ')'), comm[64] = "";
+        char *lp = strchr(st, '(');
+        if (!rp || !lp) {
+            free(st);
+            continue;
+        }
+        snprintf(comm, sizeof(comm), "%.*s", (int)(rp - lp - 1), lp + 1);
+        char state = '?';
+        long ppid = 0;
+        unsigned long long ut = 0, stt = 0;
+        long rss = 0;
+        /* after "pid (comm) ": state ppid pgrp session tty tpgid flags minflt cminflt majflt
+         * cmajflt utime stime cutime cstime priority nice threads itreal starttime vsize rss */
+        sscanf(rp + 2, "%c %ld %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu %*d %*d %*d %*d %*d %*d %*u %*u %ld",
+               &state, &ppid, &ut, &stt, &rss);
+        free(st);
+        long uid = -1;
+        snprintf(path, sizeof(path), "/proc/%s/status", e->d_name);
+        if ((status = slurp(path, NULL))) {
+            char *u = strstr(status, "\nUid:");
+            if (u)
+                uid = strtol(u + 5, NULL, 10);
+            free(status);
+        }
+        const char *user = "?";
+        for (int i = 0; i < nnames; i++)
+            if (names[i].uid == uid)
+                user = names[i].name;
+        if (!strcmp(user, "?") && uid >= 0 && nnames < 64) {
+            char *pw[7];
+            names[nnames].uid = uid;
+            if (db_find("/etc/passwd", NULL, uid, pw) >= 1)
+                snprintf(names[nnames].name, sizeof(names[nnames].name), "%s", pw[0]);
+            else
+                snprintf(names[nnames].name, sizeof(names[nnames].name), "%ld", uid);
+            user = names[nnames++].name;
+        }
+        snprintf(path, sizeof(path), "/proc/%s/cmdline", e->d_name);
+        char args[1024] = "";
+        if ((cmd = slurp(path, &cmdlen))) {
+            size_t k = cmdlen < sizeof(args) - 1 ? cmdlen : sizeof(args) - 1;
+            for (size_t i = 0; i < k; i++)
+                args[i] = cmd[i] == '\0' || cmd[i] == '\t' || cmd[i] == '\n' ? ' ' : cmd[i];
+            args[k] = '\0';
+            while (k && args[k - 1] == ' ')
+                args[--k] = '\0';
+            free(cmd);
+        }
+        snprintf(line, sizeof(line), "p %s %ld %ld %c %llu %ld %s\t%s\t%s\n", e->d_name, ppid, uid, state,
+                 ut + stt, rss, user, comm, args);
+        metrics_line(conn, out, &n, sizeof(out), line);
+    }
+    if (d)
+        closedir(d);
+    if (n)
+        send_frame(conn, 'D', out, n);
+    return 0;
+}
+
 static int file_op(int conn, struct buf *b, char **f, int nf)
 {
     const char *op = f[1], *path = nf > 2 ? f[2] : "";
@@ -1105,6 +1240,8 @@ static int file_op(int conn, struct buf *b, char **f, int nf)
     int home_ok = !strcmp(op, "mount") || !strcmp(op, "umount");       /* ~ = the image user's home */
     if (*p != '/' && !(home_ok && *p == '~'))
         return EINVAL;
+    if (!strcmp(op, "metrics"))
+        return metrics_op(conn);
     if (!strcmp(op, "list")) {
         DIR *d = opendir(path);
         struct dirent *e;

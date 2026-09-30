@@ -1,0 +1,7 @@
+{
+  "description": "Node.js 22 sandbox: idle for exec, reaches only npm and GitHub",
+  "image": "node-22-slim", "ref": "node:22-slim",
+  "vcpus": 2, "mem_mib": 2048,
+  "network": "restricted", "allow": ["@npm", "@github"],
+  "process": "idle"
+}

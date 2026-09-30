@@ -27,12 +27,15 @@ stop wherever you have what you need.
   ports, volumes and host directories.
 - **[Networking and egress](networking.md).** The three network modes,
   egress allowlists and presets, isolation defaults, addresses.
+- **[Templates](templates.md).** Saved launch recipes (a Python sandbox
+  that reaches only PyPI, say) for the CLI, the web console and agents.
 - **[Snapshots and fork](snapshots.md).** Capturing running VMs and forking
   them; when to snapshot and when to commit.
 - **[The fcvm service](service.md).** Running at boot, restart policies,
   the supervisor, shutdown and recovery.
-- **[Web console](web-console.md).** The browser UI: what's in it, and how
-  it's secured.
+- **[Web console](web-console.md).** The browser UI: what's in it, metrics
+  (inside the guest too, 24 h of history, Prometheus), and how it's
+  secured.
 - **[Agents (MCP)](agents.md).** The MCP server's tools, network pinning,
   jailing, patterns.
 

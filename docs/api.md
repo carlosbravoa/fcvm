@@ -78,7 +78,8 @@ an SSH key.
 | `POST /vms/{vm}/snapshot` | `{"name": "snap"}` | `fcvm snapshot` |
 | `POST /vms/{vm}/commit` | `{"image": "name"}` | `fcvm commit` (the VM must be stopped) |
 | `DELETE /vms/{vm}` | | stop it if running, then delete it |
-| `GET /vms/{vm}/stats` | | `{"samples": [...]}`: the last 10 minutes, every 2 s. Fields: `cpu_pct`, `rss`, `disk_read_bps`, `disk_write_bps`, `net_rx_bps`, `net_tx_bps` |
+| `GET /vms/{vm}/stats` | `?range=10m\|1h\|6h\|24h` | `{"span", "samples": [...], "guest": [...]}`. `samples`, from the host: `cpu_pct`, `rss`, `disk_read_bps`, `disk_write_bps`, `net_rx_bps`, `net_tx_bps`. `guest`, from inside the VM: `g_cpu_pct` (100 = one vCPU), `g_mem_used`, `g_mem_total`, `g_disk_used`, `g_disk_total`, `g_load1`, `g_procs`. `10m` (the default) is every 2 s (guest: 10 s); longer ranges are one-minute averages, with both sets of fields in each point |
+| `GET /vms/{vm}/processes` | | the guest's processes: `{"t", "uptime", "load1", "mem_used", "mem_total", "cpus", "processes": [{pid, ppid, uid, user, state, comm, cmd, rss, ticks, cpu_pct, kernel, fcvm}]}`. `cpu_pct` is since the previous call (null on the first); `fcvm` labels fcvm's own processes |
 | `GET /vms/{vm}/logs` | | `{"log": "..."}`: console output, the last 200 KB |
 | `GET /vms/{vm}/egress` | | `{"text": "..."}`: a restricted VM's allowlist and recent decisions |
 
@@ -90,11 +91,13 @@ an SSH key.
   "network": "full | none | restricted", "allow": ["@pypi", "github.com"],
   "ports": ["8080:80"], "volumes": ["cache:/root/.cache", "/home/me/src:/work:ro"],
   "idle": true, "command": "shell command (app images, when not idle)",
-  "jail": true, "restart": "unless-stopped", "start": true
+  "jail": true, "restart": "unless-stopped", "start": true,
+  "disk": "16G", "copy": false, "entrypoint": null, "ref": "python:3.13-slim"
 }
 ```
 
-Only `name` and `image` are required. `allow` is used with
+Only `name` and `image` are required. `ref` imports the image first when
+it's missing. `allow` is used with
 `"network": "restricted"`. The response is the new VM, as `GET /vms/{vm}`.
 
 Fields worth knowing in a VM object (as `fcvm inspect`, plus `vm.json`):
@@ -134,6 +137,23 @@ even one without a shell.
 | `DELETE /snapshots/{snap}` | | `fcvm snapshot rm` |
 | `GET /volumes` | | `fcvm volume ls --json` |
 | `DELETE /volumes/{volume}` | | `fcvm volume rm` |
+
+## Templates
+
+| method, path | body | does |
+|---|---|---|
+| `GET /templates` | | every template, built-in and yours, each with `name` and `builtin` |
+| `POST /templates` | `{"name": "pydev", "image": "...", ...}` | save one (the fields of a [template](templates.md#managing-templates)); a 400 says what's wrong |
+| `DELETE /templates/{name}` | | delete one of yours (built-in ones can't be deleted) |
+
+To launch from a template, send its fields to `POST /vms` (the launch
+dialog does that). A template's `ref` in that body imports a missing image
+first.
+
+## Prometheus
+
+`GET /metrics` (not under `/api`) takes the same bearer token and returns
+the Prometheus text format. See [Metrics](web-console.md#metrics).
 
 ## Background jobs
 

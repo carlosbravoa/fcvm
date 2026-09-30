@@ -168,6 +168,7 @@ the name, then host patterns:
 | `--port` | `service install` | the console's port (default 8686) |
 | `FCVM_MCP_NETWORK` | `mcp` | pins sandboxes' network policy, e.g. `@pypi,@github` |
 | `FCVM_MCP_JAIL` (`1`) | `mcp` | `0`: don't jail sandboxes even when the helper is installed |
+| `FCVM_MCP_TEMPLATE` | `mcp` | the [template](templates.md) for sandboxes created with neither an image nor a template |
 
 ## Per-command variables
 

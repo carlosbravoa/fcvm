@@ -104,6 +104,9 @@ def sweep():
     for v in json.loads(fcvm("volume", "ls", "--json").stdout or "[]"):
         if v.get("name", "").startswith(PREFIX):
             fcvm("volume", "rm", v["name"], check=False)
+    for t in json.loads(fcvm("template", "ls", "--json").stdout or "[]"):
+        if t["name"].startswith(PREFIX):
+            fcvm("template", "rm", t["name"], check=False)
 
 
 def jail_usable():
@@ -208,6 +211,16 @@ class Server:
                 return r.status, json.loads(r.read() or b"null")
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b"null")
+
+    def raw(self, method, path, token=None):
+        """A non-JSON endpoint (e.g. /metrics): (status, text)."""
+        req = urllib.request.Request(f"{self.url}{path}", method=method,
+                                     headers={"Authorization": f"Bearer {token or self.token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode(errors="replace")
 
     def close(self):
         if self.proc:

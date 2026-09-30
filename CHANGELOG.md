@@ -4,6 +4,28 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## Unreleased
+
+Metrics and templates. After upgrading, run `fcvm service install` so the
+console serves the new version, and restart running VMs to get guest
+metrics (the new init is rebuilt automatically).
+
+- Metrics from inside each VM, through the exec agent: CPU, memory, root
+  disk, load and processes, in any image. The instance page charts them
+  next to the host-side charts, with 10 minute, 1 hour, 6 hour and 24 hour
+  ranges; one-minute history is kept for 24 hours and survives restarts.
+- Web console: a Processes tab per instance, like `top`.
+- A Prometheus endpoint, `GET /metrics`, with the API's bearer token.
+- Templates: saved launch recipes. `fcvm create VM --template NAME`,
+  `fcvm run --template NAME`, and `fcvm template ls|show|save|rm` (save
+  from an image and options, or `--from` an existing VM). Built in:
+  `python-sandbox`, `node-sandbox` and `offline-shell`. A template's image
+  is imported on first use.
+- Web console: a Templates page, a template picker in the launch dialog,
+  and Save as template. API: `GET/POST /templates`, `DELETE /templates/NAME`.
+- MCP: a `templates` tool, `create_sandbox` takes `template`, and
+  `FCVM_MCP_TEMPLATE` sets the default.
+
 ## 0.5.2 (2026-09-30)
 
 Web console improvements. Upgrade with `fcvm upgrade`, then run

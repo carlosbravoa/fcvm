@@ -270,7 +270,13 @@ frame carries the status.
 - **file operations** (list, stat, read, write, mkdir, remove, rename),
   used by the web console's file browser, so it needs no shell or `tar` in
   the image;
-- **mount/umount of host directories**, used by live `fcvm mount`.
+- **mount/umount of host directories**, used by live `fcvm mount`;
+- **metrics**, used by the console's sampler every 10 s: a few lines of
+  text read from the guest's `/proc` (CPU ticks, memory, load, uptime) and
+  `statvfs("/")`, then one line per process (pid, parent, uid and user
+  name from the guest's own `/etc/passwd`, state, CPU ticks, resident
+  pages, name and command line). The host turns successive readings into
+  rates.
 
 ## Host directories
 
@@ -374,6 +380,18 @@ WebSockets (RFC 6455) on asyncio.
 - **Stats** come straight from `/proc`: the Firecracker process's CPU time,
   resident memory and I/O. For jailed VMs, I/O comes from the cgroup's
   `io.stat`. Traffic comes from the tap or veth counters.
+- **Guest metrics** come from the exec agent's metrics operation, every
+  fifth sample (10 s), with a 3 s timeout so a busy guest can't stall the
+  sampler (`lib/web/metrics.py`).
+- **History:** 10 minutes in memory at 2 s; every minute, an average of
+  host and guest samples goes to `metrics/NAME.jsonl` (the host's to
+  `_host.jsonl`), kept for 24 hours and reloaded at start. A VM's file goes
+  when the VM is deleted.
+- **Templates** live in `lib/templates.py`, the one place that turns a
+  template into `create` arguments, used by the CLI (`--template`), the API
+  and the MCP server. `fcvm template save IMAGE ...` runs `create` itself in
+  a dry-run mode (`FCVM_TEMPLATE_OUT`), so a template is validated exactly
+  as a real `create` would be.
 - **The frontend** in `lib/web/static/` is plain HTML, CSS and JS with no
   build step. xterm.js is vendored (MIT, see `vendor/LICENSE.xterm`).
 
@@ -476,8 +494,11 @@ lib/jaild.py            fcvm-jaild, the root helper for jailed VMs
 lib/jail-setup.sh       installs/removes fcvm-jaild
 lib/service.sh          fcvm service install/remove/status
 lib/mcp_server.py       MCP server (fcvm mcp)
+lib/templates.py        launch templates: storage, validation, create arguments
+lib/builtin-templates/  the built-in templates (python-sandbox, node-sandbox, offline-shell)
 lib/web/server.py       web console backend and API (fcvm serve)
 lib/web/supervisor.py   restart policies and recovery after a crash or reboot
+lib/web/metrics.py      guest metrics, 24 h history, Prometheus output
 lib/web/static/         web console frontend (plain HTML/CSS/JS, vendored xterm.js)
 init/fc-init.c          init for every VM (initramfs): root assembly, PID 1, exec agent
 kernel/microvm-*.config kernel fragment

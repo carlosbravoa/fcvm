@@ -120,6 +120,45 @@ guest_arg() {
     else echo "$a"; fi
 }
 
+# A JSON list of strings; unlike jq --args, safe for strings that look like options.
+json_list() { [ $# -eq 0 ] && echo '[]' || printf '%s\0' "$@" | jq -Rsc 'split("\u0000")[:-1]'; }
+
+# fcvm create/run --template NAME [ARGS...]: the template's image and create
+# options, then yours (later options win), then the template's process unless
+# you give one (-- CMD, --idle or --entrypoint). A missing image is imported
+# when the template says from where. Sets TEMPLATE_ARGS=(IMAGE ARGS...).
+template_expand() {
+    local t=${1:?--template wants a template name} line image ref mine=() cmd=() own=0 topts=() tproc=()
+    shift
+    line=$(python3 "$FCVM_ROOT/lib/templates.py" image "$t") || exit 1
+    image=${line%%$'\t'*} ref=${line#*$'\t'}
+    if [ ! -f "$IMAGES_DIR/$image.json" ]; then
+        [ -n "$ref" ] || die "template '$t' uses image '$image', which isn't imported (fcvm import ...)"
+        log "template '$t': importing $ref as $image"
+        "$FCVM_ROOT/lib/import.sh" "$ref" "$image"
+    fi
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --)                  cmd=("$@"); own=1; break ;;
+            --idle|--entrypoint) own=1 ;;
+        esac
+        mine+=("$1"); shift
+    done
+    mapfile -d '' topts < <(python3 "$FCVM_ROOT/lib/templates.py" options "$t")
+    # your --net replaces the template's network; your --allow adds to its allowlist
+    local o drop=() kept=()
+    for o in "${mine[@]}"; do
+        case $o in --net) drop+=(--net --allow) ;; --allow) drop+=(--net) ;; esac
+    done
+    while [ ${#topts[@]} -gt 0 ]; do
+        if [[ " ${drop[*]} " == *" ${topts[0]} "* ]]; then topts=("${topts[@]:2}"); continue; fi
+        kept+=("${topts[0]}"); topts=("${topts[@]:1}")
+    done
+    topts=("${kept[@]}")
+    [ $own = 1 ] || mapfile -d '' tproc < <(python3 "$FCVM_ROOT/lib/templates.py" process "$t")
+    TEMPLATE_ARGS=("$image" "${topts[@]}" "${mine[@]}" "${tproc[@]}" "${cmd[@]}")
+}
+
 RESTART_POLICIES="no on-failure unless-stopped always"
 valid_restart() { [[ " $RESTART_POLICIES " == *" $1 "* ]] || die "--restart wants one of: $RESTART_POLICIES"; }
 
@@ -185,19 +224,21 @@ exit_code() {
 
 create() {
     local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [--restart POLICY] [-- CMD...]"
-    local vm=${1:?$usage} image=${2:?$usage}
+    local vm=${1:?$usage}
+    if [ "${2:-}" = --template ]; then template_expand "${@:3}"; set -- "$vm" "${TEMPLATE_ARGS[@]}"; fi
+    local image=${2:?$usage}
     shift 2
     local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full allow=()
-    local entrypoint=() set_entrypoint=0 jail=${JAIL:-0} restart=no
+    local entrypoint=() set_entrypoint=0 jail=${JAIL:-0} jail_set="" vcpus_set=null mem_set=null restart=no
     while [ $# -gt 0 ]; do
         case $1 in
-            --vcpus)        vcpus=$2; shift 2 ;;
-            --mem)          mem=$2; shift 2 ;;
+            --vcpus)        vcpus=$2 vcpus_set=$2; shift 2 ;;
+            --mem)          mem=$2 mem_set=$2; shift 2 ;;
             --disk)         disk=$2; shift 2 ;;
             --copy)         copy=1; shift ;;
             --idle)         idle=1; shift ;;
-            --jail)         jail=1; shift ;;
-            --no-jail)      jail=0; shift ;;
+            --jail)         jail=1 jail_set=1; shift ;;
+            --no-jail)      jail=0 jail_set=0; shift ;;
             --restart)      valid_restart "${2:-}"; restart=$2; shift 2 ;;
             --entrypoint)   set_entrypoint=1; [ -z "${2-}" ] || entrypoint=("$2"); shift 2 ;;
             -p|--publish)   ports+=("$2"); shift 2 ;;
@@ -213,11 +254,12 @@ create() {
         esac
     done
     [[ $vm =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid VM name '$vm'"
+    [[ $vcpus =~ ^[1-9][0-9]*$ && $mem =~ ^[1-9][0-9]*$ ]] || die "--vcpus and --mem want positive numbers"
     sock_room "$vm"
     lock_vm "$vm"
     vm_exists "$vm" && die "VM '$vm' already exists"
     [ "$restart" = no ] || [ -z "${EPHEMERAL:-}" ] || die "--restart doesn't apply to throwaway VMs (fcvm run); use create"
-    local meta type
+    local meta type raw_cmd=("${argv[@]}") raw_ep=("${entrypoint[@]}")
     meta=$(image_json "$image")
     type=$(jq -r '.type // "app"' "$meta")
     if [ $idle = 1 ]; then
@@ -252,8 +294,25 @@ create() {
     done
     for p in "${vols[@]}"; do
         [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:,]*(:ro)?$ ]] || die "bad volume spec '$p' (want NAME:/PATH[:ro] for a named volume, or HOST/DIR[:GUEST/PATH][:ro] for a host directory)"
-        [ -f "$VOLUMES_DIR/${p%%:*}.ext4" ] || volume_create "${p%%:*}"
+        [ -n "${FCVM_TEMPLATE_OUT:-}" ] || [ -f "$VOLUMES_DIR/${p%%:*}.ext4" ] || volume_create "${p%%:*}"
     done
+    if [ -n "${FCVM_TEMPLATE_OUT:-}" ]; then   # fcvm template save: the checked recipe, no VM
+        local proc=image; [ $idle = 0 ] || proc=idle; [ ${#raw_cmd[@]} -eq 0 ] || proc=command
+        jq -n --arg image "$image" --arg ref "$(jq -r '.ref // empty' "$meta")" --argjson vcpus "$vcpus_set" \
+            --argjson mem "$mem_set" --arg disk "$disk" --argjson copy "$([ $copy = 1 ] && echo true || echo false)" \
+            --argjson ports "$(json_list "${ports[@]}")" \
+            --argjson volumes "$(json_list "${vols[@]}" "${shares[@]}")" \
+            --arg net "$netmode" --argjson allow "$(json_list "${allow[@]}")" \
+            --arg proc "$proc" --argjson command "$(json_list "${raw_cmd[@]}")" \
+            --argjson ep_set "$set_entrypoint" --arg ep "${raw_ep[*]}" --arg jail "$jail_set" --arg restart "$restart" \
+            '{image: $image, ref: (if $ref == "" then null else $ref end), vcpus: $vcpus, mem_mib: $mem,
+              disk: (if $disk == "" then null else $disk end), copy: $copy, network: $net, allow: $allow,
+              ports: $ports, volumes: $volumes, process: $proc, command: $command,
+              entrypoint: (if $ep_set == 1 then $ep else null end),
+              jail: (if $jail == "" then null else ($jail == "1") end), restart: $restart}' > "$FCVM_TEMPLATE_OUT"
+        unlock_vm; rm -f "$VMS_DIR/.locks/vm-$vm"
+        return 0
+    fi
 
     local dir; dir=$(vm_dir "$vm")
     mkdir -p "$dir"
@@ -671,7 +730,8 @@ reap() {
 #   systemd image:   boots, then `fcvm shell` (or CMD via exec); the VM is
 #                    stopped and deleted when the shell/command ends
 run() {
-    local usage="usage: fcvm run IMAGE [-d] [-p [BIND:]HOST:GUEST]... [--vcpus N] [--mem MiB] [--disk SIZE] [-- CMD...]"
+    local usage="usage: fcvm run IMAGE|--template NAME [-d] [-p [BIND:]HOST:GUEST]... [--vcpus N] [--mem MiB] [--disk SIZE] [-- CMD...]"
+    if [ "${1:-}" = --template ]; then template_expand "${@:2}"; set -- "${TEMPLATE_ARGS[@]}"; fi
     local image=${1:?$usage}
     shift
     local bg=0 opts=() argv=()
@@ -1454,6 +1514,39 @@ shutdown_all() {
     log "stopped $n VM(s) for shutdown; they resume at the next boot"
 }
 
+# fcvm template ls|show|rm|save: launch templates (lib/templates.py).
+template_cmd() {
+    local usage="usage: fcvm template ls [--json] | show NAME | rm NAME | save NAME (--from VM | IMAGE [create options] [-- CMD]) [-d DESCRIPTION]"
+    local sub=${1:-ls}
+    [ $# -eq 0 ] || shift
+    case $sub in
+        ls|show)  python3 "$FCVM_ROOT/lib/templates.py" "$sub" "$@" ;;
+        rm)       python3 "$FCVM_ROOT/lib/templates.py" rm "${1:?$usage}" && log "removed template '$1'" ;;
+        save)
+            local name=${1:?$usage} desc="" from="" args=() json out
+            shift
+            while [ $# -gt 0 ]; do
+                case $1 in
+                    -d|--description) desc=${2?$usage}; shift 2 ;;
+                    --from)           from=${2:?$usage}; shift 2 ;;
+                    --)               args+=("$@"); break ;;
+                    *)                args+=("$1"); shift ;;
+                esac
+            done
+            if [ -n "$from" ]; then
+                json=$(python3 "$FCVM_ROOT/lib/templates.py" from-vm "$name" "$from" "$desc") || exit 1
+            else
+                [ ${#args[@]} -gt 0 ] || die "$usage"
+                out=$(mktemp)
+                (FCVM_TEMPLATE_OUT=$out create "_template-$$" "${args[@]}") || { rm -f "$out"; exit 1; }
+                json=$(jq --arg d "$desc" '.description = $d' "$out"); rm -f "$out"
+            fi
+            python3 "$FCVM_ROOT/lib/templates.py" save "$name" <<<"$json" >/dev/null
+            log "saved template '$name'. Use it: fcvm create VM --template $name" ;;
+        *) die "$usage" ;;
+    esac
+}
+
 rm_vm() {
     local vm=${1:?usage: fcvm rm VM}
     lock_vm "$vm"
@@ -1490,5 +1583,6 @@ case $cmd in
     umount)  umount_cmd "$@" ;;
     rm)      rm_vm "$@" ;;
     update)  update "$@" ;;
+    template) template_cmd "$@" ;;
     _shutdown) shutdown_all "$@" ;;
 esac

@@ -13,9 +13,15 @@ A cloud-console-like UI for this host:
 - **Dashboard:** host CPU, memory and disk; VM memory actually in use vs
   allocated; network slots; running instances with their CPU and memory.
 - **Instances:** start, stop, restart, delete, snapshot, commit to image.
-  Each instance page has live charts (CPU, memory, disk I/O, network; the
-  last 10 minutes, sampled every 2 s) with a table view, details, the
-  restart policy, logs, and the egress policy with its allow/deny log.
+  Each instance page has details, the restart policy, logs, and the egress
+  policy with its allow/deny log, and:
+  - charts from the host (CPU, memory, disk I/O, network) and from inside
+    the guest (CPU, memory used, root disk used, load), over 10 minutes,
+    1 hour, 6 hours or 24 hours, each with a table view (see
+    [Metrics](#metrics));
+  - a **Processes** tab: the guest's processes with their user, CPU,
+    memory, state and command, like `top`. fcvm's own process in the guest
+    is labelled, and kernel threads are hidden unless you ask.
 - **Browser terminals:** a **Shell** tab (an interactive shell through the
   exec agent, optionally as another user) and a **Console** tab (the live
   serial console).
@@ -26,7 +32,10 @@ A cloud-console-like UI for this host:
   - published ports, volumes and host directories;
   - for app images: run the image's command, stay idle for the shell, or
     run a custom command;
-  - a restart policy, and the jailer (checked by default when installed).
+  - a restart policy, and the jailer (checked by default when installed);
+  - a template picker that fills in the form, and **Save as template**.
+- **Templates:** saved launch recipes, built-in and yours: launch, delete
+  ([Templates](templates.md)).
 - **Images:** import from a registry or a local archive (a background job
   with progress), launch from an image, delete.
 - **Files** (instance tab):
@@ -49,6 +58,36 @@ A cloud-console-like UI for this host:
 
 Light and dark themes follow your OS, with a toggle. Everything works
 offline: xterm.js is vendored, and there's no build step or CDN.
+
+## Metrics
+
+The console samples every running VM every 2 seconds from the host (the
+Firecracker process's CPU, memory and I/O, and its network traffic), and
+every 10 seconds from inside the guest, through the exec agent: CPU, memory,
+root disk, load and processes, as the guest sees them. That works in any
+image, with nothing installed in it.
+
+- **History.** The last 10 minutes are kept at full resolution. Every
+  minute is also averaged into one point, kept for 24 hours in
+  `metrics/` in fcvm's state directory, so the longer views survive
+  restarts of the console and of the host.
+- **Guest CPU** counts one busy vCPU as 100%, like the host-side chart, so
+  a 2-vCPU VM can reach 200%.
+- **VMs started before fcvm 0.5.3** show guest metrics after a restart,
+  which gives them the new init.
+
+**Prometheus.** `GET /metrics` serves the latest values in the Prometheus
+text format, with the same bearer token as the API: host CPU and memory,
+VMs by state, and per VM `fcvm_vm_up`, memory, CPU seconds, disk and
+network byte counters, and the `fcvm_guest_*` gauges from inside the guest.
+A scrape job:
+
+```yaml
+scrape_configs:
+  - job_name: fcvm
+    authorization: { credentials: "TOKEN" }     # fcvm service status prints it
+    static_configs: [{ targets: ["127.0.0.1:8686"] }]
+```
 
 ## Security
 

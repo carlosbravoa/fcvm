@@ -39,7 +39,11 @@ import time
 import urllib.parse
 from collections import deque
 
+import metrics
 from supervisor import Supervisor
+
+sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # lib/
+import templates  # noqa: E402  (lib/templates.py, shared with the CLI and MCP)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # the code
 STATE = os.environ.get("FCVM_HOME") or ROOT   # set by the fcvm command (lib/common.sh)
@@ -54,6 +58,9 @@ NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"   # RFC 6455
 SAMPLE_EVERY = 2.0
 HISTORY = 300           # samples kept per VM (10 minutes)
+GUEST_EVERY = 5         # guest metrics every 5 samples (10 s)
+MINUTE = 30             # samples per minute: the long history's resolution
+RANGES = {"10m": 600, "1h": 3600, "6h": 21600, "24h": 86400}
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 R_PREFIX = "172.30.1"   # restricted network prefix (fcvm passes NET_R_PREFIX)
 
@@ -166,9 +173,12 @@ class Stats:
 
     def __init__(self):
         self.vms = {}            # name -> deque of samples
-        self.prev = {}           # name -> (t, cpu_ticks, rbytes, wbytes, rx, tx)
+        self.prev = {}           # name -> (pid, t, cpu_ticks, rbytes, wbytes, rx, tx)
         self.host = deque(maxlen=HISTORY)
         self.host_prev = None
+        self.guest = {}          # name -> deque of guest samples (every GUEST_EVERY s)
+        self.guest_meter = metrics.Guest()
+        self.history = metrics.History(os.path.join(STATE, "metrics"))   # 1-minute points, 24 h
 
     def host_sample(self, now):
         cpu = [int(x) for x in read("/proc/stat").split("\n", 1)[0].split()[1:]]
@@ -212,7 +222,30 @@ class Stats:
         self.prev[name] = (pid, now, ticks, rb, wb, rx, tx)
         self.vms.setdefault(name, deque(maxlen=HISTORY)).append(sample)
 
+    async def guest_sample(self, name, now):
+        """The guest's own view, through the exec agent (VMs booted with an
+        older initramfs don't know the operation: then there's just nothing)."""
+        try:
+            raw = await asyncio.wait_for(agent_op(os.path.join(VMS, name), "metrics", "/"), 3)
+        except (HTTPError, OSError, asyncio.TimeoutError):
+            return
+        s = self.guest_meter.sample(name, metrics.parse_guest(raw), now)
+        self.guest.setdefault(name, deque(maxlen=HISTORY // 5)).append(s)
+
+    def minute(self, names):
+        """Average the last minute into one point per VM (and the host), for 24 h."""
+        cutoff = time.time() - 60
+        recent = [s for s in self.host if s["t"] >= cutoff]
+        if recent:
+            self.history.add("_host", metrics.average(recent))
+        for n in names:
+            vm = [s for s in self.vms.get(n, ()) if s["t"] >= cutoff]
+            g = [s for s in self.guest.get(n, ()) if s["t"] >= cutoff]
+            if vm or g:
+                self.history.add(n, metrics.average(vm + g))
+
     async def run(self):
+        tick = 0
         while True:
             now = time.time()
             try:
@@ -222,8 +255,18 @@ class Stats:
                     self.vm_sample(n, now)
                 for gone in set(self.vms) - set(names):
                     self.vms.pop(gone, None)
+                    self.guest.pop(gone, None)
+                    self.guest_meter.forget(gone)
+                for gone in set(self.history.points) - set(names) - {"_host"}:
+                    self.history.forget(gone)       # a deleted VM's history goes with it
+                if tick % GUEST_EVERY == 0:
+                    running = [n for n in names if n in self.prev]
+                    await asyncio.gather(*(self.guest_sample(n, now) for n in running))
+                if tick % MINUTE == MINUTE - 1:
+                    self.minute(names)
             except Exception as e:      # stats must never take the server down
                 print(f"stats: {e}", file=sys.stderr)
+            tick += 1
             await asyncio.sleep(SAMPLE_EVERY)
 
 
@@ -465,7 +508,7 @@ class App:
         if host not in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
             raise HTTPError(403, "bad Host header")
         auth = headers.get("authorization", "")
-        if auth.startswith("Bearer ") and path.startswith("/api/"):   # scripts: no cookie, no Origin
+        if auth.startswith("Bearer ") and (path.startswith("/api/") or path == "/metrics"):   # scripts, Prometheus
             if not secrets.compare_digest(auth[7:].strip(), self.token):
                 raise HTTPError(401, "wrong token")
             return
@@ -491,6 +534,8 @@ class App:
             return self.static("index.html" if path == "/" else path[len("/static/"):])
         if path.startswith("/ws/"):
             return await self.websocket(path, headers, reader, writer)
+        if path == "/metrics" and method == "GET":
+            return 200, {"Content-Type": "text/plain; version=0.0.4; charset=utf-8"}, (await self.prometheus()).encode()
         if not path.startswith("/api/"):
             raise HTTPError(404, "not found")
         m = re.fullmatch(r"/api/(vms|builds)/([A-Za-z0-9_][A-Za-z0-9_.-]*)/file", path)
@@ -539,7 +584,18 @@ class App:
                     await fcvm_ok("rm", name)
                 return {"removed": name}
             case ("GET", "vms", 3) if parts[2] == "stats":
-                return {"samples": list(self.stats.vms.get(name, []))}
+                span = RANGES.get(q.get("range", "10m"), 600)
+                if span <= 600:
+                    return {"span": span, "samples": list(self.stats.vms.get(name, [])),
+                            "guest": list(self.stats.guest.get(name, []))}
+                points = self.stats.history.since(name, span)   # one-minute points, host and guest keys
+                return {"span": span, "samples": points, "guest": points}
+            case ("GET", "vms", 3) if parts[2] == "processes":
+                raw = await asyncio.wait_for(agent_op(os.path.join(VMS, name), "metrics", "/"), 5)
+                g = metrics.parse_guest(raw)
+                return {"t": time.time(), "uptime": g.get("uptime"), "load1": g.get("load1"),
+                        "mem_used": g.get("mem_used"), "mem_total": g.get("mem_total"), "cpus": g.get("cpus"),
+                        "processes": self.stats.guest_meter.processes(name, g, time.time())}
             case ("GET", "vms", 3) if parts[2] == "logs":
                 out, _ = await fcvm_ok("logs", name)
                 return {"log": out[-200000:]}
@@ -556,6 +612,20 @@ class App:
                 return self.jobs.start("import", f"import {ref}", args)
             case ("DELETE", "images", 2):
                 await fcvm_ok("rmi", name)
+                return {"removed": name}
+            case ("GET", "templates", 1):
+                return list(templates.all_templates().values())
+            case ("POST", "templates", 1):
+                tname = d.get("name", "")
+                try:
+                    return templates.save(tname, {k: v for k, v in d.items() if k not in ("name", "builtin")})
+                except templates.Invalid as e:
+                    raise HTTPError(400, str(e))
+            case ("DELETE", "templates", 2):
+                try:
+                    templates.remove(name)
+                except templates.Invalid as e:
+                    raise HTTPError(400, str(e))
                 return {"removed": name}
             case ("GET", "snapshots", 1):
                 return await fcvm_json("snapshot", "ls", "--json")
@@ -788,6 +858,13 @@ class App:
         os.replace(tmp, full)
         return {"written": q["path"], "bytes": length}
 
+    async def prometheus(self):
+        st = self.stats
+        latest = {n: d[-1] for n, d in st.vms.items() if d}
+        guest = {n: d[-1] for n, d in st.guest.items() if d}
+        return metrics.prometheus(self.version, st.host[-1] if st.host else {}, await fcvm_json("ls", "--json"),
+                                  st.prev, latest, guest, CLK_TCK)
+
     async def host_info(self):
         st = os.statvfs(ROOT)
         load = read("/proc/loadavg").split()[:3]
@@ -808,7 +885,19 @@ class App:
         name, image = d.get("name", "").strip(), d.get("image", "")
         if not NAME.match(name or "-"):
             raise HTTPError(400, "a VM name is required (letters, digits, . _ -)")
+        images = await fcvm_json("images", "--json")
+        if image and not any(i["name"] == image for i in images):
+            # a template's image that isn't here yet: import it first (from the template's ref)
+            ref = d.get("ref") or ""
+            if not ref or ref.startswith("-"):
+                raise HTTPError(400, f"no image '{image}'")
+            await fcvm_ok("import", ref, image, timeout=1800)
+            images = await fcvm_json("images", "--json")
         args = ["create", name, image, "--vcpus", int(d.get("vcpus") or 2), "--mem", int(d.get("mem_mib") or 1024)]
+        if d.get("disk"):
+            args += ["--disk", str(d["disk"])]
+        if d.get("copy"):
+            args.append("--copy")
         net = d.get("network", "full")
         if net == "none":
             args += ["--net", "none"]
@@ -824,7 +913,7 @@ class App:
             if v.strip():
                 args += ["-v", v.strip()]
         # idle and a command only apply to app images (system images boot systemd)
-        itype = next((i.get("type", "app") for i in await fcvm_json("images", "--json") if i["name"] == image), "app")
+        itype = next((i.get("type", "app") for i in images if i["name"] == image), "app")
         if itype != "app":
             d = {**d, "idle": False, "command": ""}
         if d.get("idle"):
@@ -833,6 +922,8 @@ class App:
             args.append("--jail")
         if d.get("restart") and d["restart"] != "no":
             args += ["--restart", d["restart"]]
+        if itype == "app" and d.get("entrypoint") is not None:
+            args += ["--entrypoint", str(d["entrypoint"])]
         cmd = d.get("command", "").strip()
         if cmd and not d.get("idle"):
             args += ["--", "sh", "-c", cmd]

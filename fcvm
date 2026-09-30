@@ -50,6 +50,8 @@ VMs:
                              --jail (run under the Firecracker jailer; see jail-setup)
                              --restart no|on-failure|unless-stopped|always (applied by
                              fcvm serve / the fcvm service, like docker's)
+  create VM --template NAME [opts] [-- CMD...]
+                             create from a saved template; your options override its
   start [-a] VM              boot a VM in the background; -a attaches its console
   run IMAGE [-d] [opts] [-- CMD...]
                              throwaway VM, deleted when it stops. App images: attached
@@ -74,6 +76,9 @@ VMs:
   fork SNAPSHOT [NAME] [-n N]  new running VM(s) from a snapshot in ~150 ms, with their own
                              disk, IP, MAC and hostname (processes keep running)
   update VM --restart POLICY change a VM's restart policy
+  template ls|show NAME|rm NAME   launch templates (* = built in)
+  template save NAME --from VM | IMAGE [create opts] [-- CMD]  [-d DESCRIPTION]
+                             save a recipe: create/run --template NAME use it
   inspect VM                 VM details as JSON
   ls [--all] [--json]        list VMs (--all: include build VMs)
   rm VM                      delete a VM
@@ -111,7 +116,7 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|snapshot|fork|mount|umount|update|_reap|_shutdown)
+    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|snapshot|fork|mount|umount|update|template|_reap|_shutdown)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     serve)              exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;

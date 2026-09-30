@@ -44,7 +44,8 @@ Linux with KVM), or a way to run desktop GUIs.
   with Ubuntu 26.04 included.
 - **Container ergonomics.** `run`, `exec`, `cp`, `logs`, published ports,
   named volumes, live host directories, `commit` to layered images, restart
-  policies.
+  policies, and templates: saved launch recipes such as "Python sandbox,
+  PyPI only, 2 GB".
 - **Speed.** A new VM takes 0.1 s to create and about 0.5 s to boot. A fork
   from a snapshot takes about 150 ms.
 - **Isolation.**
@@ -54,14 +55,16 @@ Linux with KVM), or a way to run desktop GUIs.
     pins each VM to its own address.
   - Egress allowlists through a logging proxy.
 - **A web console.** A cloud-console-like GUI for your host:
-  - a live dashboard, and per-VM charts for CPU, memory, disk and network;
+  - a live dashboard, and per-VM charts for CPU, memory, disk and network,
+    from the host and from inside the guest, with its processes and 24 h
+    of history;
   - launch forms, browser terminals and a file browser with an editor;
   - image imports and Dockerfile builds;
   - snapshots and forks.
 
   Anything you can do from the CLI, you can do from the browser.
-- **Other ways in.** The CLI, an HTTP API for scripts, and an MCP server
-  for agents.
+- **Other ways in.** The CLI, an HTTP API for scripts, an MCP server for
+  agents, and a Prometheus endpoint.
 - **Stays up.** A boot-time service brings VMs back after crashes and
   reboots.
 - **Small and auditable.** Bash and standard-library Python, a small static
@@ -158,7 +161,7 @@ Start with **[Getting started](docs/getting-started.md)** and
 
 | | |
 |---|---|
-| **Using fcvm** | [Images](docs/images.md) · [Running VMs](docs/vms.md) · [Networking and egress](docs/networking.md) · [Snapshots and fork](docs/snapshots.md) · [The fcvm service](docs/service.md) · [Web console](docs/web-console.md) · [Agents (MCP)](docs/agents.md) |
+| **Using fcvm** | [Images](docs/images.md) · [Running VMs](docs/vms.md) · [Networking and egress](docs/networking.md) · [Templates](docs/templates.md) · [Snapshots and fork](docs/snapshots.md) · [The fcvm service](docs/service.md) · [Web console](docs/web-console.md) · [Agents (MCP)](docs/agents.md) |
 | **Reference** | [Commands](docs/cli.md) · [Configuration](docs/configuration.md) · [HTTP API](docs/api.md) · [Changelog](CHANGELOG.md) |
 | **In depth** | [How it works](docs/internals.md) · [Security and isolation](docs/security.md) · [Roadmap](docs/roadmap.md) |
 
@@ -182,6 +185,7 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ Published TCP ports, bound to localhost by default
 - ✅ Snapshots of running VMs, and forks in ~150 ms with their own disk, IP, MAC and hostname
 - ✅ Restart policies (`no`, `on-failure`, `unless-stopped`, `always`), recovery after crashes and reboots
+- ✅ Templates: saved launch recipes, built-in sandboxes for Python, Node and offline work, shared by the CLI, console and MCP
 - ✅ JSON output everywhere (`--json`, `inspect`)
 - ✅ One-line install (per user, or `--system`), `fcvm upgrade` with rollback, versioned releases
 - ✅ Guided setup (`fcvm setup`) and a health check (`fcvm status`) that says what to update and how
@@ -197,6 +201,7 @@ The [documentation index](docs/README.md) describes each page.
 **Interfaces**
 - ✅ CLI
 - ✅ Web console (GUI): dashboard, live charts, launch forms, browser terminals, file browser and editor, image builds, snapshots
+- ✅ Metrics from inside each VM (CPU, memory, disk, processes), 24 h of history, and a Prometheus endpoint
 - ✅ HTTP API with token auth
 - ✅ MCP server for agents, jailed by default, with an optional pinned network policy
 - ✅ Boot-time systemd service

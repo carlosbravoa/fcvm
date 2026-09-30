@@ -39,6 +39,9 @@ fcvm run nginx-latest -d -p 8080:80        # the same in the background; deleted
 
 `run` takes the same options as `create`.
 
+Both take a [template](templates.md) instead of an image, for recipes you
+launch often: `fcvm create box --template python-sandbox`.
+
 ## App VMs: the command, --idle, exit codes
 
 An app VM runs its image's command as its only process, like a container:

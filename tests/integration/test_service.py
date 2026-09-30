@@ -58,6 +58,45 @@ class Service(VMTestCase):
         time.sleep(5)
         self.assertNotEqual(self.inspect(vm)["state"], "running")
 
+    def new_api(self, path):
+        code, body = self.server.api("GET", path)
+        if code == 404:
+            self.skipTest("the running fcvm service predates this code: fcvm service install")
+        return code, body
+
+    def test_guest_metrics_and_processes(self):
+        vm = self.vm()
+        self.new_api("templates")
+        body = wait_for(lambda: (lambda r: r[1] if r[0] == 200 else None)(self.server.api("GET", f"vms/{vm}/processes")),
+                        30, what="the guest's processes")      # once the exec agent is up
+        self.assertTrue(any(p["fcvm"] == "fc-init (init)" for p in body["processes"]))
+        self.assertGreater(body["mem_total"], 0)
+        # the sampler's guest readings (every 10 s)
+        guest = wait_for(lambda: self.server.api("GET", f"vms/{vm}/stats")[1]["guest"], 30, what="guest samples")
+        self.assertGreater(guest[-1]["g_mem_total"], 0)
+        code, body = self.server.api("GET", f"vms/{vm}/stats?range=1h")
+        self.assertEqual((code, body["span"]), (200, 3600))
+
+    def test_prometheus(self):
+        vm = self.vm()
+        self.new_api("templates")
+        text = wait_for(lambda: (lambda r: r[1] if f'fcvm_vm_up{{vm="{vm}"' in r[1] else None)(
+            self.server.raw("GET", "/metrics")), 15, what="the VM in /metrics")
+        self.assertIn("# TYPE fcvm_vm_cpu_seconds_total counter", text)
+        self.assertEqual(self.server.raw("GET", "/metrics", token="wrong")[0], 401)
+
+    def test_templates_api(self):
+        self.new_api("templates")
+        name = unique("tpl")
+        self.addCleanup(fcvm, "template", "rm", name, check=False)
+        code, body = self.server.api("POST", "templates", {"name": name, "image": IMAGE, "network": "restricted"})
+        self.assertEqual(code, 400)                                   # an allowlist is required
+        code, body = self.server.api("POST", "templates", {"name": name, "image": IMAGE, "mem_mib": 256})
+        self.assertEqual((code, body["mem_mib"]), (200, 256), body)
+        self.assertIn(name, [t["name"] for t in self.server.api("GET", "templates")[1]])
+        self.assertEqual(self.server.api("DELETE", "templates/python-sandbox")[0], 400)   # built in
+        self.assertEqual(self.server.api("DELETE", f"templates/{name}")[0], 200)
+
     def test_throwaway_vms_take_no_policy(self):
         r = fcvm("run", IMAGE, "--restart", "always", "--", "true", check=False)
         self.assertNotEqual(r.returncode, 0)

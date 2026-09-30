@@ -4,7 +4,9 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
-## Unreleased
+## 0.6.1 (2026-09-30)
+
+Per-VM SSH identity. Upgrade with `fcvm upgrade`; nothing else to run.
 
 - SSH keys are no longer baked into the Ubuntu base image. Each system VM
   gets its `authorized_keys` (fcvm's key and your `~/.ssh/id_*.pub`) and its

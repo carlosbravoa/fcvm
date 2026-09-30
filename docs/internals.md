@@ -462,6 +462,7 @@ lib/build-init.sh       fc-init and the initramfs
 lib/build-base.sh       Ubuntu 26.04 base image
 lib/oci_import.py       registry client + layer flattening (stdlib only)
 lib/import.sh           import wrapper (sizes and creates the ext4)
+lib/mkfs-tar.sh         ext4 from a tarball, owners kept, without root (unpacks in a user namespace on e2fsprogs < 1.47.1)
 lib/build.py            fcvm build (Dockerfile subset)
 lib/vm.sh               VM lifecycle
 lib/console.py          per-VM serial console relay (attach/detach, logs, reaping)

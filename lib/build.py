@@ -219,7 +219,7 @@ def make_empty_layer(path):
                 ti.type, ti.mode = tarfile.DIRTYPE, 0o755
                 tf.addfile(ti)
         subprocess.run(["truncate", "-s", "64M", path], check=True)
-        subprocess.run(["mkfs.ext4", "-q", "-F", "-d", tar, path], check=True)
+        subprocess.run([os.path.join(ROOT, "lib", "mkfs-tar.sh"), tar, "-q", "-F", "--", path], check=True)
 
 
 class Builder:

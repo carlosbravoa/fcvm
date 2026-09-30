@@ -42,7 +42,7 @@ page covers the same steps by hand.
   you need nested virtualization or a bare-metal instance. aarch64 isn't
   supported yet.
 - **A Debian-family host** for the automatic setup (`host-setup` uses apt).
-  fcvm is developed on Ubuntu 26.04. On other distributions, install the
+  fcvm is developed on Ubuntu 26.04, and CI runs on Ubuntu 24.04 LTS. On other distributions, install the
   equivalent packages by hand (listed in `lib/host-setup.sh`).
 - **sudo** for the one-time steps: `host-setup`, `net-up`, and optionally
   `jail-setup` and `service install`. Everything else, including starting

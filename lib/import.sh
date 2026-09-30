@@ -29,7 +29,7 @@ read -r bytes entries < <(jq -r '"\(.content_bytes) \(.entries)"' "$meta")
 size_mb=$(( (bytes + entries * 4096) * 11 / 10 / 1048576 + IMPORT_FREE_MB ))
 inodes=$(( entries * 2 + 16384 ))
 rm -f "$new"
-mkfs.ext4 -q -F -L rootfs -N "$inodes" -d "$tar" "$new" "${size_mb}M"
+"$FCVM_ROOT/lib/mkfs-tar.sh" "$tar" -q -F -L rootfs -N "$inodes" -- "$new" "${size_mb}M"
 chmod a-w "$new"   # shared read-only by every VM created from it
 jq --arg type app --arg size "${size_mb}M" '. + {type: $type, disk_size: $size}' "$meta" > "$meta.tmp"
 mv -f "$new" "$img"

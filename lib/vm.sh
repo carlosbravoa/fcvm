@@ -124,7 +124,7 @@ make_rw() {
     tar -C "$stage" --owner=0 --group=0 --numeric-owner -cf "$stage.tar" upper work
     truncate -s "$size" "$disk"
     # fresh sparse file is all zeros, so skipping journal/inode-table init is safe
-    mkfs.ext4 -q -F -L fcvm-rw -E lazy_itable_init=1,lazy_journal_init=1 -d "$stage.tar" "$disk"
+    "$FCVM_ROOT/lib/mkfs-tar.sh" "$stage.tar" -q -F -L fcvm-rw -E lazy_itable_init=1,lazy_journal_init=1 -- "$disk"
     rm -rf "$stage" "$stage.tar"
 }
 

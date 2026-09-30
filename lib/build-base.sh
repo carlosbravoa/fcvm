@@ -74,7 +74,7 @@ ln -sf /etc/systemd/system/fcvm-agent.service "$1/etc/systemd/system/multi-user.
 
 log "creating $img ($BASE_SIZE)"
 rm -f "$img"
-mkfs.ext4 -q -F -L rootfs -d "$tar" "$img" "$BASE_SIZE"
+"$FCVM_ROOT/lib/mkfs-tar.sh" "$tar" -q -F -L rootfs -- "$img" "$BASE_SIZE"
 chmod a-w "$img"   # shared read-only by every VM created from it
 jq -n --arg suite "$UBUNTU_SUITE" --arg size "$BASE_SIZE" \
     '{type: "system", ref: ("ubuntu:" + $suite), disk_size: $size}' > "$IMAGES_DIR/$name.json"

@@ -16,6 +16,11 @@ to move across.
   See CONTRIBUTING.md.
 
 **Fixes**
+- Ubuntu 24.04 (e2fsprogs 1.47.0) works. Building disks from tarballs
+  (every import, every new VM's layer, the base image, builds) needs
+  e2fsprogs 1.47.1. With older ones, `lib/mkfs-tar.sh` unpacks the tarball
+  in a user namespace over your subuid range, keeping owners, and builds
+  from that.
 - VMs unmount their disks cleanly at shutdown. A volume used read-write
   used to be left needing journal recovery, so the next VM that mounted it
   read-only failed to boot. Read-only mounts of such a disk now also fall

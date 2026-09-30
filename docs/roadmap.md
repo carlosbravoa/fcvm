@@ -203,11 +203,18 @@ Jailed VMs have cgroup v2 limits on CPU, memory and pids (E1). Still open:
   can fill the host disk);
 - disk encryption at rest.
 
-### E7. Credentials in images
+### E7. Credentials in images ✅
 
-The Ubuntu base image contains the project SSH key and the builder's public
-keys, and `fcvm ssh` skips host-key checking. That is fine on a laptop, not in
-shared images. Keys should be injected per VM at boot instead.
+Before 0.6.1, the Ubuntu base image contained fcvm's SSH key and the
+builder's public keys, and `fcvm ssh` skipped host-key checking. Now images
+carry no keys:
+- each system VM gets `authorized_keys` and its own host key at `create`,
+  in its writable layer;
+- `fcvm ssh` checks that host key strictly from the first connection;
+- `commit` scrubs `authorized_keys` along with the host keys.
+
+Still open: a per-VM or per-user choice of keys (today: fcvm's key and your
+`~/.ssh/id_*.pub`).
 
 ### E8. Engineering maturity
 

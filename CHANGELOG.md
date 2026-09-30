@@ -4,6 +4,17 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## Unreleased
+
+- SSH keys are no longer baked into the Ubuntu base image. Each system VM
+  gets its `authorized_keys` (fcvm's key and your `~/.ssh/id_*.pub`) and its
+  own host key at `create`, and `fcvm ssh` checks that host key strictly
+  instead of skipping the check. `commit` also scrubs `authorized_keys`.
+  VMs created earlier keep working; `fcvm ssh` warns that it can't check
+  their host key. An existing base image still holds the old
+  `authorized_keys`, but each new VM's own file replaces it; a base image
+  built from now on has none.
+
 ## 0.6.0 (2026-09-30)
 
 Metrics from inside your VMs, and launch templates. Upgrade with

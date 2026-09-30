@@ -13,14 +13,6 @@ mkdir -p "$IMAGES_DIR" "$BUILD_DIR" "$SSH_DIR"
 users=$(image_users "$name" | tr "\n" " ")
 [ -z "$users" ] || die "image '$name' is the shared base of VMs: $users (remove them, or build under another name)"
 
-# Project SSH key (used by `fcvm ssh`) plus the user's own public keys.
-key=$SSH_DIR/id_ed25519
-[ -f "$key" ] || ssh-keygen -q -t ed25519 -N '' -C fcvm -f "$key"
-keys=$BUILD_DIR/authorized_keys
-cat "$key.pub" > "$keys"
-cat ~/.ssh/id_*.pub >> "$keys" 2>/dev/null || true
-chmod 644 "$keys"
-
 tar=$BUILD_DIR/$name.rootfs.tar
 trap 'rm -f "$tar"' EXIT
 log "bootstrapping Ubuntu $UBUNTU_SUITE from $UBUNTU_MIRROR"
@@ -43,9 +35,6 @@ mmdebstrap \
     --customize-hook='ln -sf /proc/net/pnp "$1/etc/resolv.conf"' \
     --customize-hook=': > "$1/etc/machine-id"; rm -f "$1/var/lib/dbus/machine-id"' \
     --customize-hook='rm -f "$1"/etc/ssh/ssh_host_*' \
-    --customize-hook='mkdir -p -m 700 "$1/root/.ssh"' \
-    --customize-hook="upload $keys /root/.ssh/authorized_keys" \
-    --customize-hook='chmod 600 "$1/root/.ssh/authorized_keys"' \
     --customize-hook='cat > "$1/etc/systemd/system/ssh-hostkeys.service" <<EOF
 [Unit]
 Description=Generate SSH host keys on first boot

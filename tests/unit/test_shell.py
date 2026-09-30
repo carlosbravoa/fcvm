@@ -61,6 +61,21 @@ class VmHelpers(unittest.TestCase):
         self.assertIn("--restart wants one of", r.stderr)
 
 
+class SshIdentity(unittest.TestCase):
+    """A system VM's SSH identity goes into its own writable layer, not the image."""
+
+    def test_written_into_the_layer(self):
+        r = bash(f'eval "$(sed -n \'/^make_rw()/,/^# Exit status/p\' "{LIB}/vm.sh")"; '
+                 'd=$(mktemp -d); make_rw "$d/rw.ext4" 64M >/dev/null && key=$(ssh_identity "$d/rw.ext4" /upper) && '
+                 'echo "$key"; for f in root root/.ssh root/.ssh/authorized_keys etc/ssh/ssh_host_ed25519_key; do '
+                 'debugfs -R "stat /upper/$f" "$d/rw.ext4" 2>/dev/null | grep -oE "Mode: +[0-7]+|User: +[0-9]+" | tr -s " " | tr "\n" " "; echo; done; '
+                 'debugfs -R "cat /upper/etc/ssh/ssh_host_ed25519_key.pub" "$d/rw.ext4" 2>/dev/null')
+        out = r.stdout.splitlines()
+        self.assertTrue(out[0].startswith("ssh-ed25519 "), r.stdout + r.stderr)
+        self.assertEqual(out[1:5], ["Mode: 0700 User: 0 ", "Mode: 0700 User: 0 ", "Mode: 0600 User: 0 ", "Mode: 0600 User: 0 "])
+        self.assertTrue(out[5].startswith(out[0]))                         # vm.json's key is the one in the VM
+
+
 class PortSpecs(unittest.TestCase):
     def test_parse(self):
         self.assertEqual(portfwd.parse("8080:80"), ("127.0.0.1", 8080, 80))          # local by default

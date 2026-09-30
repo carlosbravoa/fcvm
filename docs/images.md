@@ -140,8 +140,12 @@ fcvm base myubuntu           # under another name
 - **Other settings.** Suite, mirror and disk size come from
   `UBUNTU_SUITE`, `UBUNTU_MIRROR` and `BASE_SIZE`. See
   [Configuration](configuration.md#images).
-- **In the VM.** It boots systemd, and `fcvm ssh VM` logs in with the
-  project key in `ssh/`. `fcvm shell` needs no network or ssh at all.
+- **In the VM.** It boots systemd, and `fcvm ssh VM` logs in as root.
+  `fcvm shell` needs no network or ssh at all.
+- **No keys in the image.** The image carries no SSH keys. Each system VM
+  gets its own at `create`, in its writable layer: `authorized_keys` with
+  fcvm's key (in `ssh/`) and your `~/.ssh/id_*.pub`, and a host key that
+  `fcvm ssh` checks ([details](vms.md#exec-and-shell)).
 
 ## Building images
 
@@ -213,8 +217,8 @@ fcvm run box-ready                 # starts from that state
 - **`--copy` VMs** have a private full disk, which becomes a standalone
   image instead.
 - **Identity scrubbing.** Committing a VM that has booted systemd removes
-  its machine-id, SSH host keys, random seed and journal from the layer.
-  Every VM from the new image generates its own at first boot.
+  its machine-id, SSH host keys, `/root/.ssh/authorized_keys`, random seed
+  and journal from the layer. Every VM from the new image gets its own.
 
 ## Layers and squash
 

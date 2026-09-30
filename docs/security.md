@@ -442,8 +442,12 @@ Every one of these gives a guest access to something outside it:
   secrets included. They're stored mode 0600 under `snapshots/`. Treat
   them like the VM itself.
 - **Committed images** (`fcvm commit`) keep whatever was on disk. Identity
-  files (machine-id, SSH host keys) are scrubbed, but credentials you put
-  there aren't.
+  files (machine-id, SSH host keys, `authorized_keys`) are scrubbed, but
+  credentials you put there aren't.
+- **SSH keys** aren't part of any image. Each system VM gets
+  `authorized_keys` and its own host key at `create`, and `fcvm ssh`
+  verifies that host key strictly. VMs created before fcvm 0.6.1 have no
+  recorded host key: `fcvm ssh` warns and skips the check for them.
 
 ## Web console and MCP server
 

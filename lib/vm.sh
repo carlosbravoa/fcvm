@@ -237,6 +237,60 @@ EOF
     rm -f "$tmp"
 }
 
+# fcvm ssh's key pair (on the host only; VMs get its public half).
+ssh_key() {
+    local key=$SSH_DIR/id_ed25519
+    [ -f "$key" ] || { mkdir -p "$SSH_DIR"; ssh-keygen -q -t ed25519 -N '' -C fcvm -f "$key"; }
+    echo "$key"
+}
+
+# SSH identity for a new system VM, written into its disk (DISK, PREFIX "/upper"
+# for a writable layer, "" for a --copy disk) instead of living in the image:
+#  - /root/.ssh/authorized_keys: fcvm ssh's key and your own public keys;
+#  - a host key made here, so fcvm ssh can check it from the first connection.
+# Prints the host key's public half (for vm.json).
+ssh_identity() {
+    local disk=$1 pre=$2 tmp; tmp=$(mktemp -d)
+    cat "$(ssh_key).pub" > "$tmp/keys"
+    cat "$HOME"/.ssh/id_*.pub >> "$tmp/keys" 2>/dev/null || true
+    ssh-keygen -q -t ed25519 -N '' -C fcvm-vm -f "$tmp/host"
+    debugfs -w -f - "$disk" >/dev/null 2>&1 <<DEBUGFS
+mkdir $pre/root
+sif $pre/root mode 040700
+sif $pre/root uid 0
+sif $pre/root gid 0
+mkdir $pre/root/.ssh
+sif $pre/root/.ssh mode 040700
+sif $pre/root/.ssh uid 0
+sif $pre/root/.ssh gid 0
+rm $pre/root/.ssh/authorized_keys
+write $tmp/keys $pre/root/.ssh/authorized_keys
+sif $pre/root/.ssh/authorized_keys mode 0100600
+sif $pre/root/.ssh/authorized_keys uid 0
+sif $pre/root/.ssh/authorized_keys gid 0
+mkdir $pre/etc
+sif $pre/etc mode 040755
+sif $pre/etc uid 0
+sif $pre/etc gid 0
+mkdir $pre/etc/ssh
+sif $pre/etc/ssh mode 040755
+sif $pre/etc/ssh uid 0
+sif $pre/etc/ssh gid 0
+rm $pre/etc/ssh/ssh_host_ed25519_key
+write $tmp/host $pre/etc/ssh/ssh_host_ed25519_key
+sif $pre/etc/ssh/ssh_host_ed25519_key mode 0100600
+sif $pre/etc/ssh/ssh_host_ed25519_key uid 0
+sif $pre/etc/ssh/ssh_host_ed25519_key gid 0
+rm $pre/etc/ssh/ssh_host_ed25519_key.pub
+write $tmp/host.pub $pre/etc/ssh/ssh_host_ed25519_key.pub
+sif $pre/etc/ssh/ssh_host_ed25519_key.pub mode 0100644
+sif $pre/etc/ssh/ssh_host_ed25519_key.pub uid 0
+sif $pre/etc/ssh/ssh_host_ed25519_key.pub gid 0
+DEBUGFS
+    cut -d' ' -f1,2 "$tmp/host.pub"
+    rm -rf "$tmp"
+}
+
 # Exit status fc-init recorded for the container's main process (empty if none).
 exit_code() {
     local dir; dir=$(vm_dir "$1")
@@ -358,6 +412,10 @@ create() {
     else
         make_rw "$dir/rw.ext4" "${disk:-$VM_DISK}" "${argv[@]}"
     fi
+    local hostkey=""
+    if [ "$type" = system ]; then
+        if [ $copy = 1 ]; then hostkey=$(ssh_identity "$dir/disk.ext4" ""); else hostkey=$(ssh_identity "$dir/rw.ext4" /upper); fi
+    fi
     jq -n --arg image "$image" --arg type "$type" --argjson vcpus "$vcpus" --argjson mem "$mem" \
         --argjson ephemeral "${EPHEMERAL:-false}" \
         --argjson ports "$(jq -n '$ARGS.positional' --args "${ports[@]}")" \
@@ -366,7 +424,8 @@ create() {
         --argjson net "$(jq -n --arg mode "$netmode" '{mode: $mode, allow: $ARGS.positional}' --args "${allow[@]}")" \
         '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
           shares: $shares, net: $net, jail: $jail, restart: $restart, ephemeral: $ephemeral, created: (now | todate)}
-         + (if $agent then {} else {agent: false} end)' --argjson agent "$([ $agent = 1 ] && echo true || echo false)" > "$dir/vm.json"
+         + (if $agent then {} else {agent: false} end) + (if $hostkey == "" then {} else {ssh_host_key: $hostkey} end)' \
+        --arg hostkey "$hostkey" --argjson agent "$([ $agent = 1 ] && echo true || echo false)" > "$dir/vm.json"
     [ -n "${EPHEMERAL:-}" ] || log "created VM '$vm' from $image ($([ $copy = 1 ] && echo 'private copy' || echo 'shared image + writable layer'))"
 }
 
@@ -825,8 +884,16 @@ logs() {
 ssh_vm() {
     local vm=${1:?usage: fcvm ssh VM [args]}; shift
     local ip; ip=$(cat "$(vm_dir "$vm")/ip" 2>/dev/null) || die "VM '$vm' has no network"
-    exec ssh -i "$SSH_DIR/id_ed25519" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o LogLevel=ERROR "root@$ip" "$@"
+    local hostkey; hostkey=$(jq -r '.ssh_host_key // empty' "$(vm_dir "$vm")/vm.json")
+    if [ -z "$hostkey" ]; then   # created before fcvm 0.6.1: its host key was made at first boot, unknown here
+        warn "'$vm' predates per-VM host keys, so its host key isn't checked (recreate it to get one)"
+        exec ssh -i "$(ssh_key)" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR "root@$ip" "$@"
+    fi
+    local known; known="$(vm_dir "$vm")/known_hosts"
+    echo "fcvm-$vm $hostkey" > "$known"
+    exec ssh -i "$(ssh_key)" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known" \
+        -o HostKeyAlias="fcvm-$vm" -o LogLevel=ERROR "root@$ip" "$@"
 }
 
 # fcvm exec [-i] [-t] [-u USER] VM [CMD...]: like `docker exec`, over vsock
@@ -1044,7 +1111,7 @@ prune() {
 scrub_identity() {   # disk path-prefix ("/upper" for a layer, "" for a --copy disk)
     local disk=$1 pre=$2 f d sub cmds=()
     for f in /etc/machine-id /var/lib/dbus/machine-id /var/lib/systemd/random-seed \
-             /etc/ssh/ssh_host_{rsa,ecdsa,ed25519}_key{,.pub}; do
+             /etc/ssh/ssh_host_{rsa,ecdsa,ed25519}_key{,.pub} /root/.ssh/authorized_keys; do
         cmds+=("rm $pre$f")
     done
     for d in $(debugfs -R "ls -p $pre/var/log/journal" "$disk" 2>/dev/null | awk -F/ '$6 != "." && $6 != ".." && $6 != "" {print $6}'); do

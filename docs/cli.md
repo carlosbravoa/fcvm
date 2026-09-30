@@ -103,7 +103,7 @@ These use sudo.
 | `cp [-L] SRC DST` | copies files or directories in or out of a running VM (`VM:PATH` on one side), like `docker cp` |
 | `console VM` | attaches to the live serial console. Ctrl-] detaches; the VM keeps running |
 | `logs [-f] VM` | console output of the current or last boot |
-| `ssh VM [args]` | ssh as root (system images, with the key in `ssh/`) |
+| `ssh VM [args]` | ssh as root (system images), checking the VM's own host key |
 
 ## Storage
 

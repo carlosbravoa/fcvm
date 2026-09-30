@@ -97,7 +97,10 @@ fcvm shell -u root unpriv                    # root shell in an image whose USER
   guest, so users created after import work too. The PTY belongs to that
   user, so `sudo` and `less` work.
 - **System VMs** get the user's home as the working directory.
-- **`fcvm ssh VM`** also works for system images, with the key in `ssh/`.
+- **`fcvm ssh VM`** also works for system images. Each VM gets its keys
+  at `create` (fcvm's key in `ssh/` and your `~/.ssh/id_*.pub`), and its
+  own host key, which `fcvm ssh` checks. So `ssh root@IP` with your own key
+  works too.
 
 ## Copying files
 

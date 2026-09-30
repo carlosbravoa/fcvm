@@ -193,8 +193,18 @@ initramfs, in `fc-init`'s merge mode:
   hardlinks, symlinks, device nodes and timestamps are preserved.
 
 **Identity scrubbing.** Committing a VM that has booted systemd removes its
-machine-id, SSH host keys, random seed and journal from the layer. The base
-image's blank versions show through again.
+machine-id, SSH host keys, `authorized_keys`, random seed and journal from
+the layer. The base image's blank versions show through again.
+
+**SSH identity.** Images carry no SSH keys. `create` writes each system VM's
+identity into its writable layer with debugfs (under `upper/`, or into a
+`--copy` disk): `/root/.ssh/authorized_keys` (fcvm's key from `ssh/` and
+your `~/.ssh/id_*.pub`) and an ed25519 host key generated on the host.
+The host key's public half goes into `vm.json` (`ssh_host_key`), so
+`fcvm ssh` checks it strictly from the first connection, under the alias
+`fcvm-VM`. The image's first-boot key generator then finds a key and
+skips. Snapshots copy `vm.json`, so forks, which are the same machine,
+keep the same pin.
 
 ## App VMs and exit codes
 

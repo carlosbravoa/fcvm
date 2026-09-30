@@ -4,7 +4,10 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
-## Unreleased
+## 0.5.2 (2026-09-30)
+
+Web console improvements. Upgrade with `fcvm upgrade`, then run
+`fcvm service install` so the console serves the new version.
 
 - Web console: a "jailed" tag next to jailed VMs in the Instances list and
   the dashboard, and on the instance page. Instance rows stay on one line.

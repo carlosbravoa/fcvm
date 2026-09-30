@@ -8,6 +8,10 @@ to move across.
 
 - Web console: a "jailed" tag next to jailed VMs in the Instances list and
   the dashboard, and on the instance page. Instance rows stay on one line.
+- Web console: titled "fcvm Web Manager". The bottom of the sidebar shows
+  the user and host it runs as, and the fcvm version (linking to the
+  changelog). The Instances page no longer repeats the Launch button that's
+  already in the top bar.
 
 ## 0.5.1 (2026-09-30)
 

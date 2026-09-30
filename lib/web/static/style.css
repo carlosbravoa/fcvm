@@ -100,6 +100,10 @@ nav a:hover { background: var(--surface-2); text-decoration: none; }
 nav a.active { background: var(--surface-2); color: var(--text-primary); }
 nav .count { margin-left: auto; font-size: 12px; color: var(--text-muted); }
 nav .foot { margin-top: auto; font-size: 12px; color: var(--text-muted); padding: 8px 10px; }
+nav .about { font-size: 12px; color: var(--text-muted); padding: 8px 10px 2px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+nav .about a { padding: 0; color: var(--text-muted); font-weight: 400; }
+nav .about a:hover { background: none; color: var(--accent); }
 main { grid-area: main; overflow: auto; padding: 22px 26px 60px; }
 
 h1 { font-size: 20px; margin: 0 0 4px; font-weight: 650; }
@@ -233,7 +237,7 @@ pre.log {
 @media (max-width: 760px) {
   body { grid-template-columns: 1fr; grid-template-areas: "brand" "top" "nav" "main"; grid-template-rows: 52px 52px auto 1fr; }
   nav { flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--border); }
-  nav .foot { display: none; }
+  nav .foot, nav .about { display: none; }
   main { padding: 16px; }
   .modal .form { grid-template-columns: 1fr; }
 }

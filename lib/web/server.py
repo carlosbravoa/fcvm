@@ -28,10 +28,12 @@ import hashlib
 import json
 import mimetypes
 import os
+import pwd
 import re
 import secrets
 import shutil
 import struct
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -451,6 +453,10 @@ class App:
         self.supervisor = Supervisor(FCVM, VMS)
         self.jobs = Jobs()
         self.stats = Stats()
+        # who runs this console, and which fcvm (for the sidebar's footer)
+        self.user = pwd.getpwuid(os.getuid()).pw_name
+        v = subprocess.run([FCVM, "-V"], capture_output=True, text=True).stdout.split()
+        self.version = v[1] if len(v) > 1 else "?"
         self.last_builds = {}
 
     # auth -------------------------------------------------------------------------
@@ -789,6 +795,7 @@ class App:
         locks = os.path.join(VMS, ".locks")
         return {
             "hostname": os.uname().nodename, "cpus": os.cpu_count(), "load": [float(x) for x in load],
+            "user": self.user, "version": self.version,
             "kernel": os.path.basename(os.path.realpath(os.path.join(STATE, "kernels", "vmlinux"))),
             "disk_total": st.f_blocks * st.f_frsize, "disk_free": st.f_bavail * st.f_frsize,
             "taps_full": taps("fctap"), "taps_restricted": taps("fcrtap"),

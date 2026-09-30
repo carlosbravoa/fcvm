@@ -15,6 +15,7 @@ them, moving files, publishing ports and attaching storage.
 - [Host directories](#host-directories)
 - [Restart policies](#restart-policies)
 - [Jailed VMs](#jailed-vms)
+- [Without the exec agent](#without-the-exec-agent)
 - [Listing and inspecting](#listing-and-inspecting)
 
 ## create, start, run
@@ -230,6 +231,26 @@ fcvm create box alpine-latest --idle --jail      # or JAIL=1 for every new VM
 cgroup limits and a network namespace. It needs `fcvm jail-setup` once.
 Everything on this page works the same for jailed VMs. See
 [Security](security.md#jailed-vms-in-detail).
+
+## Without the exec agent
+
+```sh
+fcvm create appliance my-image --no-agent
+```
+
+Every VM normally runs fcvm's exec agent, which comes from fcvm's init, not
+the image. Only the host can reach it (see [Security](security.md#the-virtual-machine-boundary)).
+For the very specific case of a VM with nothing inside that accepts
+commands, `--no-agent` leaves it out. You lose `exec`, `shell` and `cp`,
+live `mount`/`umount` on the running VM, snapshots and forks, metrics from
+inside the guest, and the MCP server's tools. Host directories given at
+create time, the serial console, logs, published ports and host-side stats
+still work. `fcvm ls` marks it `no-agent`.
+
+`create` lists all that and asks before going on (`FCVM_NO_AGENT_OK=1`
+answers yes, for scripts). It can't be changed later: recreate the VM to
+get the agent back. It's a command-line option only, and `run` takes it for
+app images.
 
 ## Listing and inspecting
 

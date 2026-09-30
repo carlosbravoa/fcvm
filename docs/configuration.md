@@ -176,4 +176,5 @@ the name, then host patterns:
 |---|---|---|
 | `FORCE=1` | `kernel` | rebuild a version that's already built |
 | `JAIL=1` | `create`, `run` | jail by default |
+| `FCVM_NO_AGENT_OK=1` | `create`, `run` | answer yes to `--no-agent`'s question, for scripts |
 | `VM_KERNEL_ARGS` | `start` | extra kernel arguments for this boot |

@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-from fcvmtest import VMTestCase, fcvm, IMAGE, unique
+from fcvmtest import VMTestCase, fcvm, IMAGE, unique, wait_for, VMS
 
 
 class Run(VMTestCase):
@@ -91,6 +91,33 @@ class Names(VMTestCase):
         r = fcvm("create", "fcvmtest-" + "x" * 110, IMAGE, "--idle", check=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("too long", r.stderr)
+
+
+class NoAgent(VMTestCase):
+    """create --no-agent: asks first, boots without the exec agent, and the
+    commands that need it refuse clearly."""
+
+    def test_needs_confirmation(self):
+        r = fcvm("create", unique("vm"), IMAGE, "--no-agent", "--idle", check=False, input="")   # no terminal to ask
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("You lose", r.stderr)
+        self.assertIn("needs confirmation", r.stderr)
+
+    def test_runs_without_the_agent(self):
+        name = unique("vm")
+        fcvm("create", name, IMAGE, "--no-agent", "--", "sh", "-c", "echo no-agent-ran; sleep 60",
+             env={"FCVM_NO_AGENT_OK": "1"})
+        self.addCleanup(self.remove_vm, name)
+        fcvm("start", name)
+        self.assertFalse(self.inspect(name)["agent"])
+        self.assertIn("no-agent", fcvm("ls").stdout)
+        wait_for(lambda: "no-agent-ran" in fcvm("logs", name).stdout, 20, what="the app's output")
+        for args in (["exec", name, "true"], ["cp", f"{name}:/etc/hostname", "/tmp/x"],
+                     ["snapshot", name, unique("snap")]):
+            r = fcvm(*args, check=False)
+            self.assertNotEqual(r.returncode, 0, args)
+            self.assertIn("--no-agent", r.stderr)
+        self.assertIn("fcvm.agent=0", open(os.path.join(VMS, name, "fc.json")).read())
 
 
 if __name__ == "__main__":

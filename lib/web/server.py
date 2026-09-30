@@ -369,6 +369,12 @@ async def read_frame(r):
 
 async def agent_open(vmdir, *fields):
     """Connect to the VM's agent and send a file-operation request."""
+    try:
+        with open(os.path.join(vmdir, "vm.json")) as f:
+            if json.load(f).get("agent") is False:
+                raise HTTPError(409, "this instance was created with --no-agent: it has no exec agent")
+    except (OSError, ValueError):
+        pass
     if not os.path.exists(os.path.join(vmdir, "vsock.sock")):
         raise HTTPError(409, "the instance is not running")
     try:

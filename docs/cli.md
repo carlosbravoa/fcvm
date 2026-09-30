@@ -82,6 +82,7 @@ These use sudo.
 | `-- CMD...` | app images: replaces the image's CMD, keeps its ENTRYPOINT |
 | `--entrypoint CMD` | app images: replaces the ENTRYPOINT (`""` clears it) |
 | `--jail`, `--no-jail` | run under the Firecracker jailer (default: `JAIL`, 0) |
+| `--no-agent` | no exec agent in the VM: no `exec`, `cp`, snapshots or guest metrics. Says what you lose and asks first ([details](vms.md#without-the-exec-agent)) |
 | `--restart POLICY` | `no`, `on-failure`, `unless-stopped`, `always` (`create` only) |
 
 ## Templates

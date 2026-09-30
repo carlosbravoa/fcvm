@@ -243,6 +243,11 @@ Every VM has a vsock device, and `fc-init` runs an exec agent on vsock port
 - **System images:** it runs as `fcvm-agent.service`, from a copy of
   `fc-init` placed on a tmpfs at boot.
 
+With `create --no-agent`, `fcvm.agent=0` on the kernel command line tells
+`fc-init` not to start it (system images keep `fcvm-agent.service` up, idle,
+so systemd doesn't restart it), and the CLI and the console refuse what
+needs it.
+
 **The connection.** The host side (`lib/exec_client.py`) connects through
 Firecracker's vsock Unix socket (`vms/<vm>/vsock.sock`) with
 `CONNECT 1024`.

@@ -12,6 +12,7 @@
  *   fcvm.exec=PATH         then exec PATH as PID 1 (systemd images) ...
  *   fcvm.shares=PORT:PATH[:ro],...  live host directories over vsock + 9P
  *   fcvm.proxy=URL         restricted network: http(s)_proxy for the container
+ *   fcvm.agent=0           no exec agent (fcvm create --no-agent)
  *                          command and exec sessions (systemd images get it via
  *                          systemd.setenv=)
  *
@@ -1566,6 +1567,13 @@ static void agent_session(int conn)
     _exit(0);
 }
 
+/* fcvm.agent=0: the VM was created with --no-agent. */
+static int no_agent(void)
+{
+    char *v = karg("fcvm.agent");
+    return v && !strcmp(v, "0");
+}
+
 static int agent_main(void)
 {
     int s = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -1597,8 +1605,12 @@ static void idle_stop(int sig)
 
 int main(int argc, char **argv_)
 {
-    if (argc > 1 && strcmp(argv_[1], "--agent") == 0)
-        return agent_main(); /* systemd images run the agent as a service */
+    if (argc > 1 && strcmp(argv_[1], "--agent") == 0) {
+        if (no_agent())         /* created with --no-agent: the unit stays up, and nothing listens */
+            for (;;)            /* (exiting would only have systemd restart it) */
+                pause();
+        return agent_main();    /* systemd images run the agent as a service */
+    }
     if (argc > 1 && strcmp(argv_[1], "--idle") == 0) {
         /* `fcvm create --idle`: keep a container VM up for exec, stop cleanly */
         signal(SIGTERM, idle_stop);
@@ -1659,7 +1671,7 @@ int main(int argc, char **argv_)
     sigfillset(&all);
     sigprocmask(SIG_BLOCK, &all, &old);
 
-    if (fork() == 0) { /* exec agent for `fcvm exec` / `fcvm shell` */
+    if (!no_agent() && fork() == 0) { /* exec agent for `fcvm exec` / `fcvm shell` */
         sigprocmask(SIG_SETMASK, &old, NULL);
         _exit(agent_main());
     }

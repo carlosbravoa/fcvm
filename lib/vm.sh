@@ -159,6 +159,31 @@ template_expand() {
     TEMPLATE_ARGS=("$image" "${topts[@]}" "${mine[@]}" "${tproc[@]}" "${cmd[@]}")
 }
 
+# VMs created with --no-agent have no exec agent: refuse what needs it, clearly.
+need_agent() {   # vm what
+    jq -e '.agent == false' "$(vm_dir "$1")/vm.json" >/dev/null 2>&1 &&
+        die "'$1' was created with --no-agent: $2 needs the exec agent" || true
+}
+
+# create --no-agent: say what goes, and ask (FCVM_NO_AGENT_OK=1 answers yes, for scripts).
+confirm_no_agent() {
+    cat >&2 <<'EOF2'
+[1;33mwarning:[0m --no-agent starts this VM without fcvm's exec agent. You lose:
+  - fcvm exec, shell and cp (and the web console's Shell, Files and Processes tabs)
+  - live fcvm mount/umount on the running VM (host directories given at create still work)
+  - snapshots and forks (forks are re-addressed through the agent)
+  - metrics from inside the guest (host-side stats still work)
+  - agents: the MCP server works through the agent
+You keep: the serial console (fcvm console), logs, published ports, stop, host-side stats.
+This can't be changed later: recreate the VM to get the agent back.
+EOF2
+    [ "${FCVM_NO_AGENT_OK:-}" = 1 ] && return 0
+    local answer=""
+    { [ -t 0 ] && read -r -p "Continue without the agent? [y/N] " answer; } ||
+        die "--no-agent needs confirmation: run it in a terminal (or set FCVM_NO_AGENT_OK=1)"
+    [[ $answer =~ ^[Yy]([Ee][Ss])?$ ]] || die "cancelled"
+}
+
 RESTART_POLICIES="no on-failure unless-stopped always"
 valid_restart() { [[ " $RESTART_POLICIES " == *" $1 "* ]] || die "--restart wants one of: $RESTART_POLICIES"; }
 
@@ -229,7 +254,7 @@ create() {
     local image=${2:?$usage}
     shift 2
     local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full allow=()
-    local entrypoint=() set_entrypoint=0 jail=${JAIL:-0} jail_set="" vcpus_set=null mem_set=null restart=no
+    local entrypoint=() set_entrypoint=0 jail=${JAIL:-0} jail_set="" vcpus_set=null mem_set=null restart=no agent=1
     while [ $# -gt 0 ]; do
         case $1 in
             --vcpus)        vcpus=$2 vcpus_set=$2; shift 2 ;;
@@ -238,6 +263,7 @@ create() {
             --copy)         copy=1; shift ;;
             --idle)         idle=1; shift ;;
             --jail)         jail=1 jail_set=1; shift ;;
+            --no-agent)     agent=0; shift ;;
             --no-jail)      jail=0 jail_set=0; shift ;;
             --restart)      valid_restart "${2:-}"; restart=$2; shift 2 ;;
             --entrypoint)   set_entrypoint=1; [ -z "${2-}" ] || entrypoint=("$2"); shift 2 ;;
@@ -296,6 +322,10 @@ create() {
         [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:,]*(:ro)?$ ]] || die "bad volume spec '$p' (want NAME:/PATH[:ro] for a named volume, or HOST/DIR[:GUEST/PATH][:ro] for a host directory)"
         [ -n "${FCVM_TEMPLATE_OUT:-}" ] || [ -f "$VOLUMES_DIR/${p%%:*}.ext4" ] || volume_create "${p%%:*}"
     done
+    [ -z "${FCVM_TEMPLATE_OUT:-}" ] || [ $agent = 1 ] || die "--no-agent can't be saved in a template"
+    [ $agent = 1 ] || [ -z "${EPHEMERAL:-}" ] || [ "$type" = app ] ||
+        die "run needs the agent for a system image's shell; use create --no-agent, then fcvm console"
+    [ $agent = 1 ] || [ -n "${FCVM_TEMPLATE_OUT:-}" ] || confirm_no_agent
     if [ -n "${FCVM_TEMPLATE_OUT:-}" ]; then   # fcvm template save: the checked recipe, no VM
         local proc=image; [ $idle = 0 ] || proc=idle; [ ${#raw_cmd[@]} -eq 0 ] || proc=command
         jq -n --arg image "$image" --arg ref "$(jq -r '.ref // empty' "$meta")" --argjson vcpus "$vcpus_set" \
@@ -335,7 +365,8 @@ create() {
         --argjson jail "$([ "$jail" = 1 ] && echo true || echo false)" --arg restart "$restart" \
         --argjson net "$(jq -n --arg mode "$netmode" '{mode: $mode, allow: $ARGS.positional}' --args "${allow[@]}")" \
         '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
-          shares: $shares, net: $net, jail: $jail, restart: $restart, ephemeral: $ephemeral, created: (now | todate)}' > "$dir/vm.json"
+          shares: $shares, net: $net, jail: $jail, restart: $restart, ephemeral: $ephemeral, created: (now | todate)}
+         + (if $agent then {} else {agent: false} end)' --argjson agent "$([ $agent = 1 ] && echo true || echo false)" > "$dir/vm.json"
     [ -n "${EPHEMERAL:-}" ] || log "created VM '$vm' from $image ($([ $copy = 1 ] && echo 'private copy' || echo 'shared image + writable layer'))"
 }
 
@@ -535,6 +566,7 @@ start() {
     done
     [ $nshares = 0 ] || args+=" fcvm.shares=$(IFS=,; echo "${gspecs[*]}")"
     [ "$type" = system ] && args+=" fcvm.exec=/sbin/init"
+    [ "$(jq -r '.agent != false' "$DIR/vm.json")" = true ] || args+=" fcvm.agent=0"
     if [ "$type" = app ]; then
         args+=" quiet loglevel=1"   # keep the console to the app's output
     else
@@ -814,6 +846,7 @@ exec_vm() {
     local vm=${1:?$usage}; shift
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" || die "VM '$vm' is not running"
+    need_agent "$vm" exec
     [ "$(jq -r '.net.mode // "full"' "$(vm_dir "$vm")/vm.json")" != restricted ] || ensure_proxy
     python3 "$FCVM_ROOT/lib/exec_client.py" "${flags[@]}" "$(vm_dir "$vm")/vsock.sock" -- "$@"
 }
@@ -1047,6 +1080,7 @@ cp_cmd() {
     local src=${1:?$usage} dst=${2:?$usage} vm path base parent newbase xform
     if [[ $dst == *:* && $src != *:* ]]; then          # host -> VM
         vm=${dst%%:*} path=${dst#*:}
+        need_agent "$vm" cp
         [ -e "$src" ] || die "no such file: $src"
         vm_running "$vm" || die "VM '$vm' is not running"
         src=$(realpath -s "$src"); base=$(basename "$src"); parent=$(dirname "$src")
@@ -1062,6 +1096,7 @@ cp_cmd() {
     elif [[ $src == *:* && $dst != *:* ]]; then        # VM -> host
         vm=${src%%:*} path=${src#*:}
         vm_running "$vm" || die "VM '$vm' is not running"
+        need_agent "$vm" cp
         path=${path%/}; base=$(basename "$path"); parent=$(dirname "$path")
         if [ -d "$dst" ]; then
             xform=()
@@ -1095,6 +1130,7 @@ snapshot_create() {
     lock_vm "$vm"
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" || die "VM '$vm' is not running (snapshots capture a running VM's memory)"
+    need_agent "$vm" "a snapshot (its forks)"
     [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid snapshot name '$name'"
     local dir=$SNAPSHOTS_DIR/$name vdir disk drive t0 ms
     [ ! -e "$dir" ] || die "snapshot '$name' already exists"
@@ -1290,6 +1326,7 @@ mount_cmd() {
     jq -e --arg g "$gpath" '(.shares // []) | any(.path == $g)' "$dir/vm.json" >/dev/null &&
         die "'$vm' already has something mounted at $gpath (fcvm umount $vm $gpath first)"
     if vm_running "$vm"; then
+        need_agent "$vm" "mounting on a running VM (stop it first; it's mounted from the next start)"
         local uds; uds=$(vsock_prefix "$dir")
         for ((port = 10000; port < 10100; port++)); do [ -e "${uds}_$port" ] || break; done
         (
@@ -1321,6 +1358,7 @@ umount_cmd() {
         '[(.shares // [])[] | select(.path == $g or .path == $gh or .host == $h)][0].path // empty' "$dir/vm.json")
     [ -n "$gpath" ] || die "nothing from the host is mounted at $arg in '$vm'"
     if vm_running "$vm"; then
+        need_agent "$vm" "unmounting on a running VM (stop it first)"
         python3 "$FCVM_ROOT/lib/exec_client.py" --fileop "$dir/vsock.sock" -- umount "$gpath" ||
             warn "the guest could not unmount $gpath"
         if [ -f "$dir/share.live" ]; then   # a live mount has its own server; boot-time ones share one
@@ -1442,7 +1480,7 @@ list_vms() {
         used=$(du -h "$d"/*.ext4 2>/dev/null | awk '{print $1; exit}')
         [ -f "$d/disk.ext4" ] && used+=" copy"
         printf "$fmt" "$vm" "$state" "$ip" "$(jq -r .image "$d/vm.json")" "$mem" "$used" \
-            "$(jq -r '[(if .jail then "jail" else empty end), (if (.restart // "no") != "no" then "restart:\(.restart)" else empty end), (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
+            "$(jq -r '[(if .jail then "jail" else empty end), (if .agent == false then "no-agent" else empty end), (if (.restart // "no") != "no" then "restart:\(.restart)" else empty end), (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
                 + (.ports // []) + ((.volumes // []) | map("-v " + .))
                 + ((.shares // []) | map("-v \(.host):\(.path)\(if .ro then ":ro" else "" end)")) | join(" ")' "$d/vm.json")"
     done

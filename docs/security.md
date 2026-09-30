@@ -101,6 +101,11 @@ deliberately small:
   The host only ever connects *to* the guest. The guest can't open a vsock
   connection to anything on the host except the 9P servers you explicitly
   exported to it (see [Host directories](#host-directories-volumes-and-snapshots)).
+  Processes inside the guest can't reach the agent either: the guest kernel
+  has no vsock loopback. For the rare VM that must have nothing inside that
+  accepts commands, `fcvm create --no-agent` boots it without the agent,
+  at the cost of exec, cp, snapshots and guest metrics
+  ([Running VMs](vms.md#without-the-exec-agent)).
 
 ## Rootless and jailed VMMs
 

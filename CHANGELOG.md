@@ -25,6 +25,11 @@ metrics (the new init is rebuilt automatically).
   and Save as template. API: `GET/POST /templates`, `DELETE /templates/NAME`.
 - MCP: a `templates` tool, `create_sandbox` takes `template`, and
   `FCVM_MCP_TEMPLATE` sets the default.
+- `create --no-agent` (command line only): a VM without fcvm's exec agent,
+  for the rare case where nothing inside may accept commands. It lists what
+  you lose (exec, cp, snapshots, guest metrics...) and asks first. Commands
+  that need the agent refuse clearly, and the console hides its Shell,
+  Files and Processes tabs for such VMs.
 
 ## 0.5.2 (2026-09-30)
 

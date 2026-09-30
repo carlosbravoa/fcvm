@@ -73,7 +73,7 @@ image, with nothing installed in it.
   restarts of the console and of the host.
 - **Guest CPU** counts one busy vCPU as 100%, like the host-side chart, so
   a 2-vCPU VM can reach 200%.
-- **VMs started before fcvm 0.5.3** show guest metrics after a restart,
+- **VMs started before fcvm 0.6.0** show guest metrics after a restart,
   which gives them the new init.
 
 **Prometheus.** `GET /metrics` serves the latest values in the Prometheus

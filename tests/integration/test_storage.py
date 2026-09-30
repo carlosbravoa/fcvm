@@ -46,6 +46,31 @@ class HostDirectories(VMTestCase):
         self.assertNotEqual(self.sh(vm, "touch /share/x", check=False).returncode, 0)
         self.assertFalse(os.path.exists(os.path.join(d, "x")))
 
+    def test_home_directory_shorthand(self):
+        # just a host directory in your home: the same place in the guest user's home
+        d = tempfile.mkdtemp(prefix="fcvmtest-", dir=os.path.expanduser("~"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        with open(os.path.join(d, "f"), "w") as f:
+            f.write("home")
+        vm = self.vm("-v", d)
+        rel = os.path.relpath(d, os.path.realpath(os.path.expanduser("~")))
+        self.assertEqual(self.inspect(vm)["shares"][0]["path"], f"~/{rel}")
+        self.assertEqual(self.sh(vm, f"cat /root/{rel}/f").stdout, "home")     # alpine runs as root
+        fcvm("umount", vm, d)                                                   # by host directory
+        self.assertEqual(self.inspect(vm)["shares"], [])
+
+    def test_same_path_outside_home(self):
+        d = tempfile.mkdtemp(prefix="fcvmtest-abs-")
+        with open(os.path.join(d, "f"), "w") as f:
+            f.write("abs")
+        vm = self.vm("-v", d)
+        self.assertEqual(self.sh(vm, f"cat {d}/f").stdout, "abs")
+
+    def test_guest_home_path(self):
+        d = tempfile.mkdtemp(prefix="fcvmtest-share-")
+        vm = self.vm("-v", f"{d}:~/data:ro")
+        self.assertIn("data", self.sh(vm, "ls /root").stdout)
+
     def test_live_mount_and_umount(self):
         d = tempfile.mkdtemp(prefix="fcvmtest-share-")
         with open(os.path.join(d, "f"), "w") as f:

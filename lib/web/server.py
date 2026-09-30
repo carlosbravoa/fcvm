@@ -586,13 +586,21 @@ class App:
                     raise HTTPError(400, "op must be mkdir, remove or rename")
                 return {"ok": True}
             case ("POST", "vms", 3) if parts[2] == "mounts":
-                host, path = os.path.expanduser(d.get("host", "").strip()), guest_path(d)
+                # HOST[:GUEST][:ro]; ~ works on both sides, and without GUEST a
+                # directory in the home goes to the guest user's home (fcvm mount)
+                host = os.path.expanduser(d.get("host", "").strip())
                 if not os.path.isabs(host):
-                    raise HTTPError(400, "the host directory must be an absolute path")
-                await fcvm_ok("mount", name, f"{host}:{path}" + (":ro" if d.get("ro") else ""))
+                    raise HTTPError(400, "the host directory must be an absolute path or start with ~")
+                path = d.get("path", "").strip()
+                if path and not re.fullmatch(r"(/|~/|~$)[^:,\0]*", path):
+                    raise HTTPError(400, "the path in the VM must start with / or ~ (or be left empty)")
+                await fcvm_ok("mount", name, host + (f":{path}" if path else "") + (":ro" if d.get("ro") else ""))
                 return await fcvm_json("inspect", name)
             case ("DELETE", "vms", 3) if parts[2] == "mounts":
-                await fcvm_ok("umount", name, guest_path(q))
+                path = q.get("path", "")
+                if not re.fullmatch(r"(/|~/|~$)[^:,\0]*", path):
+                    raise HTTPError(400, "a path is required")
+                await fcvm_ok("umount", name, path)
                 return await fcvm_json("inspect", name)
             # --- build projects (W3)
             case ("GET", "builds", 1):
@@ -808,6 +816,10 @@ class App:
         for v in d.get("volumes", []):
             if v.strip():
                 args += ["-v", v.strip()]
+        # idle and a command only apply to app images (system images boot systemd)
+        itype = next((i.get("type", "app") for i in await fcvm_json("images", "--json") if i["name"] == image), "app")
+        if itype != "app":
+            d = {**d, "idle": False, "command": ""}
         if d.get("idle"):
             args.append("--idle")
         if d.get("jail"):

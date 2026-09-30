@@ -168,14 +168,26 @@ fcvm volume rm cache
 ## Host directories
 
 A value starting with `/`, `./`, `../` or `~` mounts a host directory live,
-both ways, like a bind mount:
+both ways, like a bind mount: `HOST/DIR[:GUEST/PATH][:ro]`.
 
 ```sh
-fcvm run python-3.13-slim -v ./myproject:/work -- python /work/main.py
-fcvm create dev ubuntu-26.04 -v ~/src:/src          # edit on the host, run in the VM
-fcvm mount dev ~/data:/data:ro                      # add one to a VM, running or not
-fcvm umount dev /data
+fcvm create dev ubuntu-26.04 -v ~/src               # your ~/src, at ~/src in the VM (/root/src)
+fcvm create box alpine-latest -v /srv/data          # a directory outside your home: the same path
+fcvm run python-3.13-slim -v ./myproject:/work -- python /work/main.py   # or say where
+fcvm mount dev ~/notes:~/notes:ro                   # add one to a VM, running or not
+fcvm umount dev ~/notes                             # by its path in the VM, or its host directory
 ```
+
+**Where it goes in the VM.** Name only the host directory, and fcvm picks
+the guest path:
+- **A directory inside your home** goes to the same place inside the home of
+  the image's user: `~/src` is `/root/src` for an image that runs as root,
+  and `/home/app/src` for one whose user is `app`. That home comes from the
+  image's own `/etc/passwd`.
+- **Any other directory** goes to the same path: `/srv/data` is
+  `/srv/data`.
+- **Saying where:** a guest path after a `:` is either absolute (`/work`) or
+  starts with `~`, the image user's home (`~/data`).
 
 - **Live.** Changes on either side are visible on the other at once, with
   no cache to go stale. git, editors and servers work.

@@ -119,8 +119,8 @@ even one without a shell.
 | `GET /vms/{vm}/file` | `?path=/etc/hosts[&download=1]` | the file's bytes, streamed (`download=1` sets `Content-Disposition: attachment`) |
 | `PUT /vms/{vm}/file` | `?path=/work/a.txt[&mode=644]`, raw body | write a file atomically. Existing files keep their owner and mode; new ones take their folder's owner |
 | `POST /vms/{vm}/files` | `{"op": "mkdir\|remove\|rename", "path": "...", "to": "..."}` | directory operations; `remove` is recursive |
-| `POST /vms/{vm}/mounts` | `{"host": "/abs/dir", "path": "/guest/path", "ro": false}` | `fcvm mount`: a live host directory |
-| `DELETE /vms/{vm}/mounts` | `?path=/guest/path` | `fcvm umount` |
+| `POST /vms/{vm}/mounts` | `{"host": "~/dir", "path": "/guest/path", "ro": false}` | `fcvm mount`: a live host directory. `host` may start with `~`; `path` may be empty (a directory in the home goes to the image user's home, any other to the same path) or start with `~` |
+| `DELETE /vms/{vm}/mounts` | `?path=/guest/path` | `fcvm umount` (the guest path, e.g. `~/dir`) |
 
 ## Images, snapshots, volumes
 

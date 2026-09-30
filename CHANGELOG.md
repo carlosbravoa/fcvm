@@ -25,6 +25,18 @@ to move across.
   offers to add it to your shell's rc file. `fcvm setup` also warns at the
   end if `fcvm` isn't on your PATH.
 
+**Web console and host directories**
+- Launch: the "Process" options are hidden for system images, which boot
+  systemd. They used to show, and "Stay idle" then failed the launch. The
+  server ignores them for system images too.
+- Host directories take `~` on both sides, and the guest path is optional:
+  `-v ~/project` mounts your folder at the same place in the image user's
+  home (`/root/project`, `/home/app/project`), and a directory outside your
+  home at the same path. `umount` takes the guest path or the host
+  directory. This works the same in the CLI (`-v`, `mount`) and in the web
+  console's launch form and Files tab.
+- A new icon: a flame inside small walls.
+
 **Fixes**
 - Ubuntu 24.04 works. Building disks from tarballs (every import, every new
   VM's layer, the base image, builds) needs e2fsprogs 1.47.1, and 24.04 has

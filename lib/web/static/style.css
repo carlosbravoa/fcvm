@@ -80,7 +80,7 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
   background: var(--surface-1);
 }
 .brand .logo {
-  width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, #eb6834, #2a78d6);
+  width: 24px; height: 24px; background: url(favicon.svg) center / contain no-repeat;
 }
 .top {
   grid-area: top; display: flex; align-items: center; gap: 12px; padding: 0 20px;

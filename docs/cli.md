@@ -74,7 +74,7 @@ These use sudo.
 | `--copy` | a private full copy of the image instead of a layer |
 | `-p [BIND:]HOST:GUEST` | publish a TCP port, on `127.0.0.1` unless BIND is given. Repeatable |
 | `-v NAME:/PATH[:ro]` | a named volume, created on first use. Repeatable |
-| `-v /HOST/DIR:/PATH[:ro]` | a live host directory (any value starting with `/`, `./`, `../` or `~`). Repeatable |
+| `-v HOST/DIR[:GUEST/PATH][:ro]` | a live host directory (any value starting with `/`, `./`, `../` or `~`). Without a guest path, a directory in your home goes to the same place in the image user's home, any other to the same path. A guest path is `/PATH` or `~/PATH`. Repeatable |
 | `--net none` | no network card |
 | `--allow HOST,*.DOMAIN,HOST:PORT,@PRESET` | restricted network: only these, through the egress proxy. Repeatable |
 | `--idle` | app images: run nothing, stay up for `exec` |
@@ -99,7 +99,7 @@ These use sudo.
 | command | what it does |
 |---|---|
 | `volume create NAME [SIZE]`, `volume ls [--json]`, `volume rm NAME` | named volumes: persistent ext4 disks attached with `-v` |
-| `mount VM /HOST/DIR:/PATH[:ro]`, `umount VM /PATH` | adds or removes a live host directory: at once on a running VM, and from the next start |
+| `mount VM HOST/DIR[:GUEST/PATH][:ro]`, `umount VM PATH` | adds or removes a live host directory (same forms as `-v`): at once on a running VM, and from the next start. `umount` takes the guest path or the host directory |
 
 ## Snapshots
 

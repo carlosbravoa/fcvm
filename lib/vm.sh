@@ -90,6 +90,36 @@ daemon_api() {   # METHOD PATH [JSON]: prints the reply; 1 = refused (message on
     return 1
 }
 
+# A host directory spec, HOST[:GUEST][:ro]; sets SHARE_HOST (resolved),
+# SHARE_GUEST and SHARE_RO. HOST may start with ~. Without GUEST, a directory
+# in your home goes to the same place in the guest user's home (~/..., which
+# the guest resolves against its own /etc/passwd), and any other directory to
+# the same path. GUEST is /PATH, ~ or ~/PATH.
+parse_share() {
+    local spec=$1 host guest="" ro=false home re='^(/[^:,]+|~|~/[^:,]*)$'
+    if [[ $spec == *:ro ]]; then ro=true; spec=${spec%:ro}; fi
+    host=${spec%%:*}
+    [[ $spec != *:* ]] || guest=${spec#*:}
+    host=${host/#\~/$HOME}
+    [ -d "$host" ] || die "not a directory: $host"
+    host=$(realpath "$host") home=$(realpath "$HOME")
+    if [ -z "$guest" ]; then
+        if [ "$host" = "$home" ]; then guest="~"
+        elif [[ $host == "$home"/* ]]; then guest="~/${host#"$home"/}"
+        else guest=$host; fi
+    fi
+    [[ $guest =~ $re ]] && [ "$guest" != / ] || die "bad guest path '$guest' (want /PATH, ~ or ~/PATH)"
+    SHARE_HOST=$host SHARE_GUEST=${guest%/} SHARE_RO=$ro
+}
+# The guest path a user means by ARG: as given (/PATH, ~/PATH), or for a
+# directory in the host home (a shell turns ~/x into /home/you/x) its ~/ form.
+guest_arg() {
+    local a=${1%/} home; home=$(realpath "$HOME")
+    if [ "$a" = "$home" ]; then echo "~"
+    elif [[ $a == "$home"/* ]]; then echo "~/${a#"$home"/}"
+    else echo "$a"; fi
+}
+
 RESTART_POLICIES="no on-failure unless-stopped always"
 valid_restart() { [[ " $RESTART_POLICIES " == *" $1 "* ]] || die "--restart wants one of: $RESTART_POLICIES"; }
 
@@ -215,15 +245,13 @@ create() {
     done
     local sharejson='[]' hdir gpath sro
     for p in "${shares[@]}"; do
-        [[ $p =~ ^([^:]+):(/[^:,]*)(:ro)?$ ]] || die "bad mount '$p' (want /HOST/DIR:/GUEST/PATH[:ro])"
-        hdir=${BASH_REMATCH[1]} gpath=${BASH_REMATCH[2]} sro=${BASH_REMATCH[3]}
-        hdir=${hdir/#\~/$HOME}
-        [ -d "$hdir" ] || die "not a directory: $hdir"
-        sharejson=$(jq --arg h "$(realpath "$hdir")" --arg g "$gpath" --argjson ro "$([ -n "$sro" ] && echo true || echo false)" \
+        parse_share "$p"
+        jq -e --arg g "$SHARE_GUEST" 'any(.path == $g)' <<<"$sharejson" >/dev/null && die "two host directories at $SHARE_GUEST"
+        sharejson=$(jq --arg h "$SHARE_HOST" --arg g "$SHARE_GUEST" --argjson ro "$SHARE_RO" \
             '. + [{host: $h, path: $g, ro: $ro}]' <<<"$sharejson")
     done
     for p in "${vols[@]}"; do
-        [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:,]*(:ro)?$ ]] || die "bad volume spec '$p' (want NAME:/PATH[:ro] for a named volume, or /HOST/DIR:/PATH[:ro] for a host directory)"
+        [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:,]*(:ro)?$ ]] || die "bad volume spec '$p' (want NAME:/PATH[:ro] for a named volume, or HOST/DIR[:GUEST/PATH][:ro] for a host directory)"
         [ -f "$VOLUMES_DIR/${p%%:*}.ext4" ] || volume_create "${p%%:*}"
     done
 
@@ -1192,13 +1220,12 @@ vsock_prefix() {
 # VM it's mounted live (a new share9p server + the agent's mount op); on a
 # stopped one it's mounted at the next start.
 mount_cmd() {
-    local usage="usage: fcvm mount VM /HOST/DIR:/GUEST/PATH[:ro]"
+    local usage="usage: fcvm mount VM HOST/DIR[:GUEST/PATH][:ro]"
     local vm=${1:?$usage} spec=${2:?$usage} dir hdir gpath ro port pid i
     vm_exists "$vm" || die "no VM '$vm'"
-    [[ $spec =~ ^([^:]+):(/[^:,]*)(:ro)?$ ]] || die "$usage"
-    hdir=${BASH_REMATCH[1]/#\~/$HOME} gpath=${BASH_REMATCH[2]} ro=${BASH_REMATCH[3]:+true}
-    [ -d "$hdir" ] || die "not a directory: $hdir"
-    hdir=$(realpath "$hdir")
+    parse_share "$spec"
+    hdir=$SHARE_HOST gpath=$SHARE_GUEST ro=""
+    [ "$SHARE_RO" = false ] || ro=true
     dir=$(vm_dir "$vm")
     jq -e --arg g "$gpath" '(.shares // []) | any(.path == $g)' "$dir/vm.json" >/dev/null &&
         die "'$vm' already has something mounted at $gpath (fcvm umount $vm $gpath first)"
@@ -1225,11 +1252,14 @@ mount_cmd() {
 
 # fcvm umount VM /path
 umount_cmd() {
-    local vm=${1:?usage: fcvm umount VM /GUEST/PATH} gpath=${2:?usage: fcvm umount VM /GUEST/PATH} dir line
+    local usage="usage: fcvm umount VM GUEST/PATH|HOST/DIR"
+    local vm=${1:?$usage} arg=${2:?$usage} dir line gpath
     vm_exists "$vm" || die "no VM '$vm'"
     dir=$(vm_dir "$vm")
-    jq -e --arg g "$gpath" '(.shares // []) | any(.path == $g)' "$dir/vm.json" >/dev/null ||
-        die "nothing from the host is mounted at $gpath in '$vm'"
+    # by guest path (as given, or a home directory in its ~/ form), or by host directory
+    gpath=$(jq -r --arg g "$arg" --arg gh "$(guest_arg "$arg")" --arg h "$(realpath -m "${arg/#\~/$HOME}")" \
+        '[(.shares // [])[] | select(.path == $g or .path == $gh or .host == $h)][0].path // empty' "$dir/vm.json")
+    [ -n "$gpath" ] || die "nothing from the host is mounted at $arg in '$vm'"
     if vm_running "$vm"; then
         python3 "$FCVM_ROOT/lib/exec_client.py" --fileop "$dir/vsock.sock" -- umount "$gpath" ||
             warn "the guest could not unmount $gpath"

@@ -429,8 +429,28 @@ static void merge_main(void)
  * to, passed to the server as the attach name.
  */
 /* Mount one host directory: vsock port -> 9P mount at path. 0 or -errno. */
+static int db_find(const char *path, const char *name, long id, char *f[7]);
+
+/* "~" or "~/x" in a guest mount path: the home, from the image's own
+ * /etc/passwd, of the user owning the share ("uid:gid"), so a host
+ * directory can be mounted in whatever user's home the image has. */
+static const char *home_path(const char *path, const char *owner, char *buf, size_t n)
+{
+    if (path[0] != '~' || (path[1] && path[1] != '/'))
+        return path;
+    long uid = strtol(owner, NULL, 10);
+    char *pw[7];
+    const char *home = uid == 0 ? "/root" : "/";
+    if (db_find("/etc/passwd", NULL, uid, pw) >= 6 && pw[5][0] == '/')
+        home = pw[5];
+    snprintf(buf, n, "%s%s", strcmp(home, "/") ? home : "", path[1] ? path + 1 : (strcmp(home, "/") ? "" : "/"));
+    return buf;
+}
+
 static int mount_share(unsigned port, const char *path, int ro, const char *owner)
 {
+    char expanded[4096];
+    path = home_path(path, owner, expanded, sizeof(expanded));
     struct sockaddr_vm addr = {.svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST, .svm_port = port};
     int s = -1, ok = 0;
     /* The host's server may still be starting (jailed VMs get it after launch): retry ~3 s. */
@@ -1081,7 +1101,9 @@ static void entry_line(char *out, size_t cap, const char *dir, const char *name)
 static int file_op(int conn, struct buf *b, char **f, int nf)
 {
     const char *op = f[1], *path = nf > 2 ? f[2] : "";
-    if (*(strcmp(op, "mount") ? path : nf > 3 ? f[3] : "") != '/')   /* mount: PORT PATH ro|rw */
+    const char *p = strcmp(op, "mount") ? path : nf > 3 ? f[3] : "";   /* mount: PORT PATH ro|rw */
+    int home_ok = !strcmp(op, "mount") || !strcmp(op, "umount");       /* ~ = the image user's home */
+    if (*p != '/' && !(home_ok && *p == '~'))
         return EINVAL;
     if (!strcmp(op, "list")) {
         DIR *d = opendir(path);
@@ -1212,16 +1234,18 @@ static int file_op(int conn, struct buf *b, char **f, int nf)
     }
     if (!strcmp(op, "rename") && nf > 3)
         return rename(path, f[3]) < 0 ? errno : 0;
-    if (!strcmp(op, "mount") && nf > 4) {
-        char *u = config_user(), owner[64] = "0:0";
+    char owner[64] = "0:0", expanded[4096];
+    {   /* whose home a "~" mount path means: the image's user (root for system images) */
+        char *u = config_user();
         if (u && *u) {
             unsigned long uid = strtoul(u, &u, 10), gid = *u == ':' ? strtoul(u + 1, NULL, 10) : 0;
             snprintf(owner, sizeof(owner), "%lu:%lu", uid, gid);
         }
-        return -mount_share((unsigned)atoi(f[2]), f[3], strcmp(f[4], "ro") == 0, owner);
     }
+    if (!strcmp(op, "mount") && nf > 4)
+        return -mount_share((unsigned)atoi(f[2]), f[3], strcmp(f[4], "ro") == 0, owner);
     if (!strcmp(op, "umount"))
-        return umount2(path, MNT_DETACH) < 0 ? errno : 0;
+        return umount2(home_path(path, owner, expanded, sizeof(expanded)), MNT_DETACH) < 0 ? errno : 0;
     return ENOSYS;
 }
 

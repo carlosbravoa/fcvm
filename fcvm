@@ -42,8 +42,9 @@ VMs:
                              create a VM: IMAGE's disk is shared read-only, writes go to
                              a per-VM layer. opts: --vcpus N --mem MiB --disk SIZE
                              --copy (private full copy) -p [BIND:]HOST:GUEST (publish TCP)
-                             -v VOLUME:/PATH[:ro] (named volume) or -v /HOST/DIR:/PATH[:ro]
-                             (live host directory) --idle (app images: no
+                             -v VOLUME:/PATH[:ro] (named volume) or -v HOST/DIR[:GUEST/PATH][:ro]
+                             (live host directory; without GUEST/PATH, a directory in your
+                             home goes to the guest user's home, any other to the same path) --idle (app images: no
                              command, stays up for exec) --net none (no network)
                              --allow HOST,*.DOMAIN,@PRESET (egress allowlist via proxy)
                              --jail (run under the Firecracker jailer; see jail-setup)
@@ -66,8 +67,8 @@ VMs:
   commit VM IMAGE            save a stopped VM's changes as a new image (a layer)
   squash IMAGE NEW           merge IMAGE's layers into one (same base image)
   prune                      delete the build cache and leftover build VMs
-  mount VM /HOST/DIR:/PATH[:ro]  add a live host directory (at once if running)
-  umount VM /PATH            remove it
+  mount VM HOST/DIR[:GUEST/PATH][:ro]  add a live host directory (at once if running)
+  umount VM PATH             remove it (by its guest path or host directory)
   snapshot VM NAME           save a running VM's memory + disk (it keeps running)
   snapshot ls [--json] | rm NAME
   fork SNAPSHOT [NAME] [-n N]  new running VM(s) from a snapshot in ~150 ms, with their own

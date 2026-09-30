@@ -24,13 +24,14 @@ if [ "${FCVM_MKFS_UNPACK:-0}" != 1 ] && reads_tarballs; then
     exec mkfs.ext4 "${opts[@]}" -d "$tar" "$@"
 fi
 
-need unshare newuidmap
-grep -q "^$(id -un):" /etc/subuid || die "no subuid range for $(id -un) (run: fcvm host-setup)"
+need newuidmap newgidmap
+grep -q "^$(id -un):" /etc/subuid && grep -q "^$(id -un):" /etc/subgid ||
+    die "no subuid/subgid range for $(id -un) (run: fcvm host-setup)"
 mkdir -p "$BUILD_DIR"
 dir=$(mktemp -d "$BUILD_DIR/unpack.XXXXXX")
 # Inside: root is you, and the image's uids map onto your subuids. Unpack,
 # build, and clean up there (outside, you couldn't delete subuid-owned files).
-unshare --map-auto --map-root-user -- bash -c '
+python3 "$FCVM_ROOT/lib/userns.py" bash -c '
     set -uo pipefail
     tar="$1" dir="$2"; shift 2
     tar --numeric-owner --same-owner --same-permissions --xattrs --xattrs-include="*" \

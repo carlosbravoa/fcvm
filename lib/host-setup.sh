@@ -28,7 +28,8 @@ if [ "${1:-}" = --check ]; then
     mapfile -t miss < <(missing_pkgs)
     [ ${#miss[@]} -eq 0 ] || todo+=("packages: ${miss[*]}")
     { [ -r /dev/kvm ] && [ -w /dev/kvm ]; } || todo+=("access to /dev/kvm (kvm group)")
-    grep -q "^$USER:" /etc/subuid 2>/dev/null || todo+=("a subuid/subgid range for $USER")
+    grep -q "^$USER:" /etc/subuid 2>/dev/null || todo+=("a subuid range for $USER")
+    grep -q "^$USER:" /etc/subgid 2>/dev/null || todo+=("a subgid range for $USER")
     [ ${#todo[@]} -eq 0 ] && exit 0
     printf '%s\n' "${todo[@]}"; exit 1
 fi
@@ -45,5 +46,6 @@ else
     sudo usermod -aG kvm "$USER"
 fi
 
-grep -q "^$USER:" /etc/subuid || { log "adding subuid/subgid range for $USER"; sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"; }
+grep -q "^$USER:" /etc/subuid || { log "adding a subuid range for $USER"; sudo usermod --add-subuids 100000-165535 "$USER"; }
+grep -q "^$USER:" /etc/subgid || { log "adding a subgid range for $USER"; sudo usermod --add-subgids 100000-165535 "$USER"; }
 log "done. Next: fcvm setup (or by hand: fcvm net-up && fcvm firecracker && fcvm kernel)"

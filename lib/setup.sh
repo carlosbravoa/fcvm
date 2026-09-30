@@ -118,41 +118,76 @@ else
 fi
 initramfs_current || "$FCVM_ROOT/lib/build-init.sh"
 
-# --- 6. the Ubuntu system image (optional) ------------------------------------------------
-bold "6/7  Ubuntu 26.04 system image (optional)"
-if [ -f "$IMAGES_DIR/ubuntu-26.04.json" ]; then
-    ok "ubuntu-26.04"
-else
-    note "A full-OS image that boots systemd, for dev machines and services. Container images"
-    note "(fcvm import IMAGE) don't need it."
-    if ask "Build it now (a few minutes)?" n; then
-        "$FCVM_ROOT/lib/build-base.sh"
+# --- 6. images --------------------------------------------------------------------------------
+bold "6/7  Images"
+# ref | fcvm image name | what it is
+IMAGES=("alpine:latest|alpine-latest|a tiny Linux with busybox (~4 MB)"
+        "ubuntu:latest|ubuntu-latest|Ubuntu's userland, with apt (~30 MB)"
+        "debian:stable-slim|debian-stable-slim|Debian's userland, with apt (~30 MB)"
+        "python:3.13-slim|python-3.13-slim|Python 3.13 (~45 MB)"
+        "node:22-slim|node-22-slim|Node.js 22 (~75 MB)")
+SYSTEM=$(( ${#IMAGES[@]} + 1 ))
+note "Container images to start with (any other image later: fcvm import IMAGE):"
+for k in "${!IMAGES[@]}"; do
+    IFS='|' read -r ref name what <<<"${IMAGES[$k]}"
+    printf '    %d) %-20s %s%s\n' $((k + 1)) "$ref" "$what" "$([ -f "$IMAGES_DIR/$name.json" ] && echo "  [imported]")"
+done
+printf '    %d) %-20s %s%s\n' $SYSTEM "Ubuntu 26.04 system" "boots systemd like a server; built here (a few minutes)" \
+    "$([ -f "$IMAGES_DIR/ubuntu-26.04.json" ] && echo "  [built]")"
+default=1; [ ! -f "$IMAGES_DIR/alpine-latest.json" ] || default=none
+while :; do
+    if [ $YES = 1 ] || ! { : </dev/tty; } 2>/dev/null; then
+        picks=$default; note "Choose [$default]: $default"
     else
-        note "skipped; fcvm base any time"
+        read -rp "  Choose one or more (e.g. 1 4), all, or none [$default]: " picks </dev/tty || picks=""
+        picks=${picks:-$default}
     fi
+    case $picks in all) picks=$(seq -s ' ' 1 $SYSTEM) ;; none) picks="" ;; esac
+    bad=$(tr ' ,' '\n\n' <<<"$picks" | grep -v '^$' | grep -vxE "[1-9][0-9]*" || true)
+    for n in $(tr ',' ' ' <<<"$picks"); do [ "$n" -ge 1 ] 2>/dev/null && [ "$n" -le $SYSTEM ] || bad+=" $n"; done
+    [ -z "$bad" ] && break
+    note "not a choice:$bad"
+    [ $YES = 0 ] || break
+done
+FIRST=""
+for n in $(tr ',' ' ' <<<"$picks"); do
+    if [ "$n" = $SYSTEM ]; then
+        if [ -f "$IMAGES_DIR/ubuntu-26.04.json" ]; then ok "ubuntu-26.04"; else "$FCVM_ROOT/lib/build-base.sh"; fi
+        FIRST=${FIRST:-ubuntu-26.04}
+        continue
+    fi
+    IFS='|' read -r ref name _ <<<"${IMAGES[$((n - 1))]}"
+    if [ -f "$IMAGES_DIR/$name.json" ]; then ok "$name"; else "$FCVM_ROOT/lib/import.sh" "$ref"; fi
+    FIRST=${FIRST:-$name}
+done
+if [ -z "$FIRST" ]; then   # nothing picked: test with whatever is already there
+    for name in alpine-latest $(ls "$IMAGES_DIR" 2>/dev/null | sed -n 's/\.json$//p' | grep -v '^_'); do
+        [ -f "$IMAGES_DIR/$name.json" ] && { FIRST=$name; break; }
+    done
 fi
 
 # --- 7. a first VM ------------------------------------------------------------------------
 bold "7/7  A first microVM"
 if [ $RELOGIN = 1 ] && ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then
     note "skipped: you were just added to the kvm group; log out and back in first"
-elif ask "Import alpine:latest and boot a test VM?" y; then
-    [ -f "$IMAGES_DIR/alpine-latest.json" ] || "$FCVM_ROOT/lib/import.sh" alpine:latest
+elif [ -z "$FIRST" ]; then
+    note "skipped: no image yet (fcvm import alpine:latest)"
+elif ask "Boot a test VM from $FIRST?" y; then
     t0=$(date +%s%N)
     # the console interleaves the guest's own messages, so match just the marker
-    out=$("$FCVM_ROOT/lib/vm.sh" run alpine-latest -- sh -c 'echo "fcvm-ok $(uname -r)"' 2>/dev/null |
+    out=$("$FCVM_ROOT/lib/vm.sh" run "$FIRST" -- sh -c 'echo "fcvm-ok $(uname -r)"' 2>/dev/null |
         grep -ao 'fcvm-ok [0-9][0-9.]*' | head -1 || true)
     if [ -n "$out" ]; then
         ok "a VM booted Linux ${out#fcvm-ok }, ran a command and was deleted in $(( ($(date +%s%N) - t0) / 1000000 )) ms"
     else
-        warn "the test VM didn't answer; try: fcvm run alpine-latest"
+        warn "the test VM didn't answer; try: fcvm run $FIRST"
     fi
 fi
 
 # --- next steps ---------------------------------------------------------------------------
 bold "Done. Next:"
 [ $RELOGIN = 0 ] || printf '  \e[1;33mLog out and back in first\e[0m (for /dev/kvm access)\n'
-note "fcvm run alpine-latest                   a shell in a throwaway VM"
+[ -z "$FIRST" ] || note "$(printf '%-41s' "fcvm run $FIRST")a shell in a throwaway VM"
 if [ -f "$VMS_DIR/.serve.json" ] && systemctl is-active -q fcvm.service 2>/dev/null; then
     note "web console: $(jq -r .url "$VMS_DIR/.serve.json")"
 else
@@ -161,3 +196,12 @@ fi
 note "claude mcp add fcvm -- $(fcvm_entry) mcp    sandboxes for your coding agent"
 note "fcvm status                              what's installed, current and running"
 note "docs: docs/README.md, starting with docs/use-cases.md"
+
+# The command itself: an installed fcvm lives in ~/.local/bin, which a
+# shell only has on its PATH if its profile adds it.
+if [ "$(command -v fcvm 2>/dev/null)" = "" ]; then
+    bin=$(dirname "$(fcvm_entry)")
+    [ -L "$HOME/.local/bin/fcvm" ] && bin=$HOME/.local/bin
+    printf '\n  \e[1;33mfcvm isn\x27t on your PATH\e[0m, so the commands above need %s/fcvm.\n' "$bin"
+    note "Add it:  echo 'export PATH=\"$bin:\$PATH\"' >> ~/.bashrc && . ~/.bashrc"
+fi

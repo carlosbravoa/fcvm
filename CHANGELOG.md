@@ -15,6 +15,16 @@ to move across.
 - GitHub Actions runs lint, unit and integration tests on every push.
   See CONTRIBUTING.md.
 
+**Setup**
+- `fcvm setup` offers a choice of first images: Alpine, Ubuntu, Debian,
+  Python and Node container images, and the Ubuntu 26.04 system image. Any
+  number can be picked, and the test VM boots from the first one. Alpine is
+  the default.
+- The installer says clearly when `~/.local/bin` isn't on your PATH. It
+  checks whether your profile adds it at the next login, and otherwise
+  offers to add it to your shell's rc file. `fcvm setup` also warns at the
+  end if `fcvm` isn't on your PATH.
+
 **Fixes**
 - Ubuntu 24.04 works. Building disks from tarballs (every import, every new
   VM's layer, the base image, builds) needs e2fsprogs 1.47.1, and 24.04 has

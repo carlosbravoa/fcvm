@@ -90,9 +90,39 @@ done
 
 say "installed fcvm $version in $dest"
 [ $link = 1 ] || exit 0
+# The command's directory must be on PATH. ~/.local/bin often isn't yet: many
+# profiles add it at login only if it already existed then.
+next="fcvm setup"
 case ":$PATH:" in
-    *":$bin:"*) next="fcvm setup" ;;
-    *)          next="$bin/fcvm setup"
-                printf '   (%s isn'"'"'t on your PATH yet; new login shells usually add ~/.local/bin)\n' "$bin" >&2 ;;
+    *":$bin:"*) ;;
+    *)
+        next="$bin/fcvm setup"
+        printf '\n\033[1;33m%s isn'"'"'t on your PATH\033[0m, so `fcvm` alone won'"'"'t be found yet.\n' "$bin" >&2
+        profiles=""
+        for f in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile"; do
+            if grep -qs '\.local/bin' "$f"; then profiles="$profiles ${f#"$HOME"/}"; fi
+        done
+        if [ $system = 0 ] && [ -n "$profiles" ]; then
+            printf '   Your profile (%s ) adds it at login: open a new login shell, or for this one:\n' "$profiles" >&2
+        else
+            case $(basename "${SHELL:-sh}") in
+                zsh)  rc=$HOME/.zshrc ;;
+                bash) rc=$HOME/.bashrc ;;
+                *)    rc=$HOME/.profile ;;
+            esac
+            line="export PATH=\"$bin:\$PATH\""
+            answer=n
+            if [ -t 2 ] && (: </dev/tty) 2>/dev/null; then   # someone is watching
+                printf '   Add it to %s? [Y/n] ' "$rc" >&2
+                read -r answer </dev/tty || answer=n
+                answer=${answer:-y}
+            fi
+            case $answer in
+                [Yy]*) printf '\n# added by the fcvm installer\n%s\n' "$line" >> "$rc"
+                       printf '   Added to %s: new shells will have it. For this one:\n' "$rc" >&2 ;;
+                *)     printf '   To add it for new shells:  echo '"'"'%s'"'"' >> %s\n   For this one:\n' "$line" "$rc" >&2 ;;
+            esac
+        fi
+        printf '      export PATH="%s:$PATH"\n' "$bin" >&2 ;;
 esac
 printf '\nNext: %s    (guided setup: packages, network, kernel, a first VM)\n' "$next" >&2

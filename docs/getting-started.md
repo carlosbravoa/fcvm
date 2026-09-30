@@ -74,6 +74,10 @@ curl -fsSL https://raw.githubusercontent.com/carlosbravoa/fcvm/main/install.sh |
   points at the active one. `fcvm upgrade` installs a newer release and
   switches over; the previous one is kept for going back
   (`fcvm upgrade 0.5.0`).
+- **PATH.** The command goes in `~/.local/bin`. If that isn't on your PATH
+  yet (common on a fresh machine, where profiles add it only at the next
+  login), the installer says so. It offers to add it to your shell's rc
+  file, and shows the `export` line for the current shell.
 - **Offline.** `--source PATH` installs from a release tarball or directory
   you already have.
 - **Your data.** The install holds only code. Your state (images, VMs,
@@ -160,6 +164,10 @@ series, set `KERNEL_CHANNEL=longterm` or `mainline`, or name a version
 has the details.
 
 ## 4. A first image and VM
+
+`fcvm setup` offers a few images to start with: Alpine, Ubuntu, Debian,
+Python and Node container images, and the Ubuntu system image. It imports
+the ones you pick and boots a test VM. By hand:
 
 ```sh
 fcvm import alpine:latest       # pull from Docker Hub; the image is named "alpine-latest"

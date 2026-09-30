@@ -51,12 +51,21 @@ Linux with KVM), or a way to run desktop GUIs.
   - VMs can't reach each other or your host's services, and anti-spoofing
     pins each VM to its own address.
   - Egress allowlists through a logging proxy.
-- **Many ways in.** CLI, a web console with terminals and file browsing, an
-  HTTP API, and an MCP server for agents.
+- **A web console.** A cloud-console-like GUI for your host:
+  - a live dashboard, and per-VM charts for CPU, memory, disk and network;
+  - launch forms, browser terminals and a file browser with an editor;
+  - image imports and Dockerfile builds;
+  - snapshots and forks.
+
+  Anything you can do from the CLI, you can do from the browser.
+- **Other ways in.** The CLI, an HTTP API for scripts, and an MCP server
+  for agents.
 - **Stays up.** A boot-time service brings VMs back after crashes and
   reboots.
 - **Small and auditable.** Bash and standard-library Python, a small static
   init in C, and a guest kernel you build yourself from kernel.org sources.
+
+![The fcvm web console: dashboard with host and VM resource use](docs/img/console-dashboard.png)
 
 ## Requirements
 
@@ -141,7 +150,7 @@ The [documentation index](docs/README.md) describes each page.
 
 **Interfaces**
 - ✅ CLI
-- ✅ Web console: dashboard, live charts, launch forms, browser terminals, file browser, image builds
+- ✅ Web console (GUI): dashboard, live charts, launch forms, browser terminals, file browser and editor, image builds, snapshots
 - ✅ HTTP API with token auth
 - ✅ MCP server for agents, jailed by default, with an optional pinned network policy
 - ✅ Boot-time systemd service

@@ -7,6 +7,8 @@
 With the [fcvm service](service.md) installed, the console is always
 running. `./fcvm service status` prints its URL.
 
+![Dashboard](img/console-dashboard.png)
+
 A cloud-console-like UI for this host:
 - **Dashboard:** host CPU, memory and disk; VM memory actually in use vs
   allocated; network slots; running instances with their CPU and memory.
@@ -42,6 +44,8 @@ A cloud-console-like UI for this host:
     log streams live beside a step list that shows cached steps;
   - "Launch it" opens the launch dialog on the result.
 - **Snapshots:** fork, delete. **Volumes:** list, delete.
+
+![An instance: details, restart policy and live charts](img/console-instance.png)
 
 Light and dark themes follow your OS, with a toggle. Everything works
 offline: xterm.js is vendored, and there's no build step or CDN.

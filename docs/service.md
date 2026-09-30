@@ -18,10 +18,10 @@ stay available, and VMs with a restart policy stay up.
 ## Install
 
 ```sh
-./fcvm service install              # sudo, once; --port N for another console port
-./fcvm create web nginx-latest -p 8080:80 --restart unless-stopped
-./fcvm start web                    # from now on it survives crashes and reboots
-./fcvm service status               # units, console URL, API token
+fcvm service install              # sudo, once; --port N for another console port
+fcvm create web nginx-latest -p 8080:80 --restart unless-stopped
+fcvm start web                    # from now on it survives crashes and reboots
+fcvm service status               # units, console URL, API token
 ```
 
 ## What gets installed
@@ -43,8 +43,8 @@ Set a policy at `create`, change it with `fcvm update`, or pick it in the
 web console:
 
 ```sh
-./fcvm create web nginx-latest --restart unless-stopped
-./fcvm update web --restart on-failure
+fcvm create web nginx-latest --restart unless-stopped
+fcvm update web --restart on-failure
 ```
 
 | policy | the supervisor restarts the VM when... |
@@ -99,7 +99,7 @@ the VM themselves, with a warning.
 ## Status, logs and the console URL
 
 ```sh
-./fcvm service status          # fcvm-net, fcvm-jaild and fcvm; the console URL and API token
+fcvm service status          # fcvm-net, fcvm-jaild and fcvm; the console URL and API token
 journalctl -u fcvm -f          # the supervisor's decisions ("web: exited ...; restarting in 2 s")
 ```
 
@@ -117,9 +117,9 @@ bookmarked console URL keeps working. The URL and token are also in
 ## Updating and removing
 
 ```sh
-./fcvm service install      # after updating fcvm or changing NET_* settings: refreshes the copies and units
-./fcvm service remove       # removes both units; running VMs keep running
+fcvm service install      # after updating fcvm or changing NET_* settings: refreshes the copies and units
+fcvm service remove       # removes both units; running VMs keep running
 ```
 
-After `service remove`, you're back to running `./fcvm net-up` after each
+After `service remove`, you're back to running `fcvm net-up` after each
 reboot.

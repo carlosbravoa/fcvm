@@ -48,14 +48,14 @@ containerd or runc is involved. The type only says what runs as PID 1:
 **Example: Ubuntu both ways.** The same distribution can be either type:
 
 ```sh
-./fcvm import ubuntu:latest   # app image "ubuntu-latest", from Docker Hub
-./fcvm run ubuntu-latest      # a bash prompt; `exit` and the VM is gone
+fcvm import ubuntu:latest   # app image "ubuntu-latest", from Docker Hub
+fcvm run ubuntu-latest      # a bash prompt; `exit` and the VM is gone
 
-./fcvm base                   # system image "ubuntu-26.04", built with mmdebstrap
-./fcvm run ubuntu-26.04       # boots systemd, then a root shell
+fcvm base                   # system image "ubuntu-26.04", built with mmdebstrap
+fcvm run ubuntu-26.04       # boots systemd, then a root shell
 ```
 
-| | `./fcvm import ubuntu:latest` | `./fcvm base` |
+| | `fcvm import ubuntu:latest` | `fcvm base` |
 |---|---|---|
 | type | **app** (like any Docker image) | **system** |
 | PID 1 | fcvm's small init, which runs `bash` | systemd |
@@ -79,10 +79,10 @@ containerd or runc is involved. The type only says what runs as PID 1:
 ## Importing from a registry
 
 ```sh
-./fcvm import nginx:latest                 # -> nginx-latest
-./fcvm import ghcr.io/org/app:v1.2         # -> app-v1.2
-./fcvm import python:3.13-slim mypython    # choose the name
-./fcvm import redis@sha256:<digest>        # pinned to an exact image
+fcvm import nginx:latest                 # -> nginx-latest
+fcvm import ghcr.io/org/app:v1.2         # -> app-v1.2
+fcvm import python:3.13-slim mypython    # choose the name
+fcvm import redis@sha256:<digest>        # pinned to an exact image
 ```
 
 **Naming.** An image is named after the last component of the reference
@@ -102,7 +102,7 @@ unless you give a name.
 token works as the password) for the import:
 
 ```sh
-REGISTRY_USER=me REGISTRY_PASSWORD="$(cat ~/.ghcr-token)" ./fcvm import ghcr.io/me/private:1.0
+REGISTRY_USER=me REGISTRY_PASSWORD="$(cat ~/.ghcr-token)" fcvm import ghcr.io/me/private:1.0
 ```
 
 Docker's `config.json`, credential helpers and signature verification
@@ -117,9 +117,9 @@ another name.
 Images never have to be pushed to a registry:
 
 ```sh
-docker save myorg/tool:1.0 -o tool.tar && ./fcvm import tool.tar   # -> tool-1.0
-./fcvm import oci:./layout:v2 mytool                               # a tag from an OCI layout directory
-./fcvm import oci-archive:./image.tar                              # an OCI archive
+docker save myorg/tool:1.0 -o tool.tar && fcvm import tool.tar   # -> tool-1.0
+fcvm import oci:./layout:v2 mytool                               # a tag from an OCI layout directory
+fcvm import oci-archive:./image.tar                              # an OCI archive
 ```
 
 `docker save` and `podman save` tarballs work in both the classic format and
@@ -128,8 +128,8 @@ Docker 25+'s OCI-style one.
 ## The Ubuntu base image
 
 ```sh
-./fcvm base                    # images/ubuntu-26.04.ext4
-./fcvm base myubuntu           # under another name
+fcvm base                    # images/ubuntu-26.04.ext4
+fcvm base myubuntu           # under another name
 ```
 
 `fcvm base` builds a minimal Ubuntu 26.04 system image, rootless:
@@ -164,9 +164,9 @@ CMD ["--greeting", "hello"]
 ```
 
 ```sh
-./fcvm build -t myapp --allow @pypi ./myapp   # RUN steps get only PyPI
-./fcvm run myapp                               # python -m src.main --greeting hello
-./fcvm run myapp -- --greeting hi              # replaces CMD, keeps ENTRYPOINT
+fcvm build -t myapp --allow @pypi ./myapp   # RUN steps get only PyPI
+fcvm run myapp                               # python -m src.main --greeting hello
+fcvm run myapp -- --greeting hi              # replaces CMD, keeps ENTRYPOINT
 ```
 
 - **Supported:** `FROM` (a single stage), `RUN` (shell and JSON forms),
@@ -199,9 +199,9 @@ log ([Web console](web-console.md)). How caching works is in
 ## Commit a VM as an image
 
 ```sh
-./fcvm stop box
-./fcvm commit box box-ready          # box's changes, as a new image on top of box's image
-./fcvm run box-ready                 # starts from that state
+fcvm stop box
+fcvm commit box box-ready          # box's changes, as a new image on top of box's image
+fcvm run box-ready                 # starts from that state
 ```
 
 - **Speed.** `commit` saves the stopped VM's writable layer as a read-only
@@ -223,7 +223,7 @@ Each committed layer is a separate virtual disk, and Firecracker has about
 layer chains short:
 
 ```sh
-./fcvm squash box-ready box-flat      # merge all of box-ready's layers into one
+fcvm squash box-ready box-flat      # merge all of box-ready's layers into one
 ```
 
 Squash merges layers in a throwaway VM, keeping deletions, owners, modes,
@@ -233,10 +233,10 @@ A three-layer chain merges in about a second.
 ## Managing images
 
 ```sh
-./fcvm images                  # NAME, TYPE, SIZE, USED-BY, SOURCE
-./fcvm images --json
-./fcvm rmi old-image           # refuses while VMs, snapshots or other images use it
-./fcvm prune                   # the build cache and leftover build VMs
+fcvm images                  # NAME, TYPE, SIZE, USED-BY, SOURCE
+fcvm images --json
+fcvm rmi old-image           # refuses while VMs, snapshots or other images use it
+fcvm prune                   # the build cache and leftover build VMs
 ```
 
 ## Images and the kernel

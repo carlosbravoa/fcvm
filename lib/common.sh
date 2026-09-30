@@ -1,8 +1,26 @@
-# Shared settings and helpers. Sourced by ./fcvm and every lib/*.sh script.
+# Shared settings and helpers. Sourced by fcvm and every lib/*.sh script.
 set -euo pipefail
 
+# FCVM_ROOT is the code (a git checkout, or an installed release); FCVM_HOME is
+# the state: images, VMs, volumes, snapshots, kernels, Firecracker. A checkout
+# that already holds state keeps using it (as before 0.5); anything else uses
+# ~/.local/share/fcvm. Settings come from fcvm.conf next to the state in a
+# checkout, else from ~/.config/fcvm/fcvm.conf (FCVM_CONF overrides).
 FCVM_ROOT=${FCVM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
-[ -f "$FCVM_ROOT/fcvm.conf" ] && . "$FCVM_ROOT/fcvm.conf"
+if [ -z "${FCVM_HOME:-}" ]; then
+    if [ -d "$FCVM_ROOT/vms" ] || [ -d "$FCVM_ROOT/images" ] || [ -d "$FCVM_ROOT/kernels" ]; then
+        FCVM_HOME=$FCVM_ROOT
+    else
+        FCVM_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/fcvm
+    fi
+fi
+export FCVM_ROOT FCVM_HOME
+if [ "$FCVM_HOME" = "$FCVM_ROOT" ]; then
+    : "${FCVM_CONF:=$FCVM_ROOT/fcvm.conf}"
+else
+    : "${FCVM_CONF:=${XDG_CONFIG_HOME:-$HOME/.config}/fcvm/fcvm.conf}"
+fi
+[ -f "$FCVM_CONF" ] && . "$FCVM_CONF"
 
 # --- Tunables (override in fcvm.conf or the environment) ---
 : "${ARCH:=$(uname -m)}"                       # x86_64 (aarch64 untested)
@@ -28,27 +46,61 @@ FCVM_ROOT=${FCVM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 : "${VM_DISK:=8G}"                              # per-VM writable layer (sparse)
 : "${IMPORT_FREE_MB:=64}"                      # free space added to imported disks (for --copy VMs)
 
-BIN_DIR=$FCVM_ROOT/bin
-BUILD_DIR=$FCVM_ROOT/build
-CACHE_DIR=$FCVM_ROOT/cache
-KERNELS_DIR=$FCVM_ROOT/kernels
-IMAGES_DIR=$FCVM_ROOT/images
-VMS_DIR=$FCVM_ROOT/vms
-VOLUMES_DIR=$FCVM_ROOT/volumes
-SNAPSHOTS_DIR=$FCVM_ROOT/snapshots
+BIN_DIR=$FCVM_HOME/bin
+BUILD_DIR=$FCVM_HOME/build
+CACHE_DIR=$FCVM_HOME/cache
+KERNELS_DIR=$FCVM_HOME/kernels
+IMAGES_DIR=$FCVM_HOME/images
+VMS_DIR=$FCVM_HOME/vms
+VOLUMES_DIR=$FCVM_HOME/volumes
+SNAPSHOTS_DIR=$FCVM_HOME/snapshots
+SSH_DIR=$FCVM_HOME/ssh
 FIRECRACKER=$BIN_DIR/firecracker
+[ -d "$FCVM_HOME" ] || mkdir -p "$FCVM_HOME"
+
+# The path to run this fcvm by, for things that outlive a release (systemd
+# units, MCP registrations): an installed release's stable `current` link
+# rather than one version's directory, so `fcvm upgrade` carries them along.
+fcvm_entry() {
+    local cur; cur=$(dirname "$FCVM_ROOT")/current
+    if [ -L "$cur" ] && [ "$(readlink -f "$cur")" = "$(readlink -f "$FCVM_ROOT")" ]; then echo "$cur/fcvm"
+    else echo "$FCVM_ROOT/fcvm"; fi
+}
+
+# Is build/initramfs.cpio built from this code's init/fc-init.c? (After an
+# upgrade it isn't, and VMs must not boot an init older than the host side.)
+initramfs_current() {
+    [ -f "$BUILD_DIR/initramfs.cpio" ] &&
+        [ "$(cat "$BUILD_DIR/initramfs.src" 2>/dev/null)" = "$(sha256sum < "$FCVM_ROOT/init/fc-init.c" | cut -d' ' -f1)" ]
+}
+
+# The release (VERSION), plus the commit when this is a git checkout that isn't
+# exactly at that release's tag: 0.5.0, 0.5.0+12.gabc1234, 0.5.0+12.gabc1234.dirty
+fcvm_version() {
+    local v d
+    v=$(cat "$FCVM_ROOT/VERSION" 2>/dev/null || echo unknown)
+    if [ -e "$FCVM_ROOT/.git" ] && command -v git >/dev/null; then
+        if d=$(git -C "$FCVM_ROOT" describe --tags --match "v$v" --dirty 2>/dev/null); then
+            d=${d#"v$v"}; d=${d#-}
+        else
+            d=$(git -C "$FCVM_ROOT" describe --always --dirty 2>/dev/null) && d="g$d"
+        fi
+        [ -z "$d" ] || v="$v+${d//-/.}"
+    fi
+    echo "$v"
+}
 
 log()  { printf '\e[1;34m==>\e[0m %s\n' "$*" >&2; }
 warn() { printf '\e[1;33mwarning:\e[0m %s\n' "$*" >&2; }
 die()  { printf '\e[1;31merror:\e[0m %s\n' "$*" >&2; exit 1; }
 need() {
     local c
-    for c; do command -v "$c" >/dev/null || die "missing command '$c' (run: ./fcvm host-setup)"; done
+    for c; do command -v "$c" >/dev/null || die "missing command '$c' (run: fcvm host-setup)"; done
 }
 
 # Default kernel: the newest one built, via the kernels/vmlinux symlink.
 default_kernel() {
-    [ -e "$KERNELS_DIR/vmlinux" ] || die "no kernel built yet (run: ./fcvm kernel)"
+    [ -e "$KERNELS_DIR/vmlinux" ] || die "no kernel built yet (run: fcvm kernel)"
     readlink -f "$KERNELS_DIR/vmlinux"
 }
 

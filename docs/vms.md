@@ -20,12 +20,12 @@ them, moving files, publishing ports and attaching storage.
 ## create, start, run
 
 ```sh
-./fcvm create web nginx-latest -p 8080:80    # define the VM (0.1 s, a few MB)
-./fcvm start web                             # boot it in the background
-./fcvm start -a web                          # ... or boot it and attach the console
+fcvm create web nginx-latest -p 8080:80    # define the VM (0.1 s, a few MB)
+fcvm start web                             # boot it in the background
+fcvm start -a web                          # ... or boot it and attach the console
 
-./fcvm run alpine-latest                     # create + start + attach; deleted when it ends
-./fcvm run nginx-latest -d -p 8080:80        # the same in the background; deleted when stopped
+fcvm run alpine-latest                     # create + start + attach; deleted when it ends
+fcvm run nginx-latest -d -p 8080:80        # the same in the background; deleted when stopped
 ```
 
 - **`create`** defines a VM from an image: its own writable layer on the
@@ -44,9 +44,9 @@ them, moving files, publishing ports and attaching storage.
 An app VM runs its image's command as its only process, like a container:
 
 ```sh
-./fcvm run alpine-latest -- echo hi               # -- CMD replaces the image's CMD, keeps its ENTRYPOINT
-./fcvm run nginx-latest --entrypoint sh -- -c 'nginx -v'   # --entrypoint replaces it ("" clears it)
-./fcvm create box python-3.13-slim --idle         # run nothing; stay up for exec
+fcvm run alpine-latest -- echo hi               # -- CMD replaces the image's CMD, keeps its ENTRYPOINT
+fcvm run nginx-latest --entrypoint sh -- -c 'nginx -v'   # --entrypoint replaces it ("" clears it)
+fcvm create box python-3.13-slim --idle         # run nothing; stay up for exec
 ```
 
 - **Lifetime.** When the command exits, the VM stops. `fcvm ls` shows
@@ -76,13 +76,13 @@ Every VM runs an exec agent over vsock. It needs no network or sshd, so it
 works in any image, even distroless ones:
 
 ```sh
-./fcvm exec web nginx -t                       # one command; exits with its status
-./fcvm exec -it web bash                       # interactive, on a TTY
-./fcvm exec -u postgres db psql                # as another user (name, uid, name:group, uid:gid)
-./fcvm exec -w /work -e DEBUG=1 box make test  # working directory and extra environment
-./fcvm exec --timeout 60 box ./long-task       # killed after 60 s; exit code 124
-./fcvm shell web                               # = exec -it web bash (or sh)
-./fcvm shell -u root unpriv                    # root shell in an image whose USER isn't root
+fcvm exec web nginx -t                       # one command; exits with its status
+fcvm exec -it web bash                       # interactive, on a TTY
+fcvm exec -u postgres db psql                # as another user (name, uid, name:group, uid:gid)
+fcvm exec -w /work -e DEBUG=1 box make test  # working directory and extra environment
+fcvm exec --timeout 60 box ./long-task       # killed after 60 s; exit code 124
+fcvm shell web                               # = exec -it web bash (or sh)
+fcvm shell -u root unpriv                    # root shell in an image whose USER isn't root
 ```
 
 - **Output.** Without `-t`, stdout and stderr stay separate, which suits
@@ -98,9 +98,9 @@ works in any image, even distroless ones:
 ## Copying files
 
 ```sh
-./fcvm cp ./site web:/usr/share/nginx/html     # host -> VM (files or directories)
-./fcvm cp web:/var/log/nginx ./logs            # VM -> host
-./fcvm cp -L ./link web:/tmp                   # follow symlinks on the host side
+fcvm cp ./site web:/usr/share/nginx/html     # host -> VM (files or directories)
+fcvm cp web:/var/log/nginx ./logs            # VM -> host
+fcvm cp -L ./link web:/tmp                   # follow symlinks on the host side
 ```
 
 `cp` works like `docker cp`: tar over exec. It needs `sh` and `tar` in the
@@ -110,9 +110,9 @@ files in any image, without needing either.
 ## Console and logs
 
 ```sh
-./fcvm console web      # the live serial console; Ctrl-] detaches, the VM keeps running
-./fcvm logs web         # console output of the current or last boot
-./fcvm logs -f web      # follow
+fcvm console web      # the live serial console; Ctrl-] detaches, the VM keeps running
+fcvm logs web         # console output of the current or last boot
+fcvm logs -f web      # follow
 ```
 
 For app VMs, the console is the app's output. For system VMs, it shows boot
@@ -121,16 +121,16 @@ messages and a `login:` prompt (no autologin), so use `fcvm shell` instead.
 ## Stopping and removing
 
 ```sh
-./fcvm stop web         # Ctrl-Alt-Del: the app gets SIGTERM, systemd shuts down; killed after 20 s
-./fcvm rm web           # delete the VM and its writable layer (volumes are kept)
+fcvm stop web         # Ctrl-Alt-Del: the app gets SIGTERM, systemd shuts down; killed after 20 s
+fcvm rm web           # delete the VM and its writable layer (volumes are kept)
 ```
 
 ## Published ports
 
 ```sh
-./fcvm create web nginx-latest -p 8080:80                  # 127.0.0.1:8080 -> VM port 80
-./fcvm create web nginx-latest -p 0.0.0.0:8080:80          # every interface: your LAN too
-./fcvm create web nginx-latest -p 192.168.1.5:8080:80      # one interface
+fcvm create web nginx-latest -p 8080:80                  # 127.0.0.1:8080 -> VM port 80
+fcvm create web nginx-latest -p 0.0.0.0:8080:80          # every interface: your LAN too
+fcvm create web nginx-latest -p 192.168.1.5:8080:80      # one interface
 ```
 
 - **Local by default.** Ports listen on `127.0.0.1`, reachable only from
@@ -151,11 +151,11 @@ Named volumes are ext4 disks in `volumes/`, attached as block devices. They
 outlive VMs:
 
 ```sh
-./fcvm create db postgres-17 -v pgdata:/var/lib/postgresql/data   # created on first use (10G sparse)
-./fcvm create box alpine-latest -v tools:/opt/tools:ro             # read-only
-./fcvm volume create cache 20G
-./fcvm volume ls
-./fcvm volume rm cache
+fcvm create db postgres-17 -v pgdata:/var/lib/postgresql/data   # created on first use (10G sparse)
+fcvm create box alpine-latest -v tools:/opt/tools:ro             # read-only
+fcvm volume create cache 20G
+fcvm volume ls
+fcvm volume rm cache
 ```
 
 - **Ownership.** A new, empty volume takes the owner and mode of the
@@ -171,10 +171,10 @@ A value starting with `/`, `./`, `../` or `~` mounts a host directory live,
 both ways, like a bind mount:
 
 ```sh
-./fcvm run python-3.13-slim -v ./myproject:/work -- python /work/main.py
-./fcvm create dev ubuntu-26.04 -v ~/src:/src          # edit on the host, run in the VM
-./fcvm mount dev ~/data:/data:ro                      # add one to a VM, running or not
-./fcvm umount dev /data
+fcvm run python-3.13-slim -v ./myproject:/work -- python /work/main.py
+fcvm create dev ubuntu-26.04 -v ~/src:/src          # edit on the host, run in the VM
+fcvm mount dev ~/data:/data:ro                      # add one to a VM, running or not
+fcvm umount dev /data
 ```
 
 - **Live.** Changes on either side are visible on the other at once, with
@@ -197,8 +197,8 @@ both ways, like a bind mount:
 ## Restart policies
 
 ```sh
-./fcvm create web nginx-latest -p 8080:80 --restart unless-stopped
-./fcvm update web --restart on-failure
+fcvm create web nginx-latest -p 8080:80 --restart unless-stopped
+fcvm update web --restart on-failure
 ```
 
 `no` (default), `on-failure`, `unless-stopped` or `always`, as in Docker.
@@ -208,7 +208,7 @@ service. See [The fcvm service](service.md).
 ## Jailed VMs
 
 ```sh
-./fcvm create box alpine-latest --idle --jail      # or JAIL=1 for every new VM
+fcvm create box alpine-latest --idle --jail      # or JAIL=1 for every new VM
 ```
 
 `--jail` runs the VM's Firecracker under the jailer: its own uid, a chroot,
@@ -219,7 +219,7 @@ Everything on this page works the same for jailed VMs. See
 ## Listing and inspecting
 
 ```sh
-./fcvm ls                 # NAME, STATE, IP, IMAGE, MEM (used/allocated), DISK, network/ports/volumes
-./fcvm ls --json
-./fcvm inspect web        # everything about one VM, as JSON (including its last exit)
+fcvm ls                 # NAME, STATE, IP, IMAGE, MEM (used/allocated), DISK, network/ports/volumes
+fcvm ls --json
+fcvm inspect web        # everything about one VM, as JSON (including its last exit)
 ```

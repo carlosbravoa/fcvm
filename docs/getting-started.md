@@ -1,25 +1,29 @@
 # Getting started
 
-This page takes you from a fresh clone to a working setup, and explains
-what each step does.
+This page takes you from nothing to a working setup, and explains what
+each step does.
 
-**The short way.** `./fcvm setup` walks through the steps below
-interactively:
+**The short way.** Install fcvm, then let `fcvm setup` walk through the
+steps below:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/carlosbravoa/fcvm/main/install.sh | sh
+fcvm setup
+```
+
+`fcvm setup` works interactively:
 - it checks what's already done, and skips it;
 - it asks before each optional step;
 - it does the sudo steps first, so the long kernel build runs unattended;
 - it ends by booting a test VM.
 
-```sh
-git clone https://github.com/carlosbravoa/fcvm ~/fcvm && cd ~/fcvm && ./fcvm setup
-```
-
 It's safe to run again at any time (for example after an update), and
-`./fcvm setup -y` takes the default answer everywhere. Afterwards,
-`./fcvm status` shows the state of everything at a glance. The rest of this
+`fcvm setup -y` takes the default answer everywhere. Afterwards,
+`fcvm status` shows the state of everything at a glance. The rest of this
 page covers the same steps by hand.
 
 - [Requirements](#requirements)
+- [Installing fcvm](#installing-fcvm)
 - [1. Host setup](#1-host-setup)
 - [2. The network](#2-the-network)
 - [3. Firecracker and the guest kernel](#3-firecracker-and-the-guest-kernel)
@@ -50,16 +54,54 @@ page covers the same steps by hand.
   - a few MB per VM, because VMs share their image and write to a sparse
     layer.
 
-fcvm lives entirely in its checkout directory: binaries, images, VMs and
-state. Clone it where you have space, at a reasonably short path such as
-`~/fcvm`. VMs keep Unix sockets under `vms/`, and Linux limits socket paths
-to 107 bytes, so a deeply nested checkout leaves little room for VM names.
-fcvm tells you if a path is too long.
+## Installing fcvm
+
+**The installer** (`install.sh` in the repository) downloads the newest
+tagged release and installs it:
+
+| | code | command | needs |
+|---|---|---|---|
+| for you (default) | `~/.local/lib/fcvm/VERSION` | `~/.local/bin/fcvm` | nothing |
+| `--system` | `/opt/fcvm/VERSION` | `/usr/local/bin/fcvm` | sudo |
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/carlosbravoa/fcvm/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/carlosbravoa/fcvm/main/install.sh | sh -s -- --system
+curl -fsSL https://raw.githubusercontent.com/carlosbravoa/fcvm/main/install.sh | sh -s -- --version 0.5.0
+```
+
+- **Layout.** Each release gets its own directory, and a `current` link
+  points at the active one. `fcvm upgrade` installs a newer release and
+  switches over; the previous one is kept for going back
+  (`fcvm upgrade 0.5.0`).
+- **Offline.** `--source PATH` installs from a release tarball or directory
+  you already have.
+- **Your data.** The install holds only code. Your state (images, VMs,
+  volumes, snapshots, kernels, Firecracker) lives in `~/.local/share/fcvm`
+  (`FCVM_HOME`). Settings live in `~/.config/fcvm/fcvm.conf`. So
+  upgrading or reinstalling never touches your data.
+- **With `--system`**, every user runs the same code, each with their own
+  state in their home. The network, jailer helper and service are set up
+  per user, and serve one user at a time (see
+  [Where things live](#where-things-live)).
+
+**From a git checkout.** For development, run `./fcvm` from the clone, or
+link it onto your PATH. A checkout that already holds state (from before
+0.5) keeps using its own directory, as before. A fresh clone uses
+`~/.local/share/fcvm` like an install.
+
+```sh
+git clone https://github.com/carlosbravoa/fcvm ~/src/fcvm
+ln -s ~/src/fcvm/fcvm ~/.local/bin/fcvm
+```
+
+`fcvm version` shows the version, and where the code, state and settings
+are.
 
 ## 1. Host setup
 
 ```sh
-./fcvm host-setup
+fcvm host-setup
 ```
 
 This installs the build and runtime packages:
@@ -74,7 +116,7 @@ namespaces.
 ## 2. The network
 
 ```sh
-./fcvm net-up
+fcvm net-up
 ```
 
 This creates two bridges and the firewall rules around them:
@@ -97,8 +139,8 @@ which does it for you.
 ## 3. Firecracker and the guest kernel
 
 ```sh
-./fcvm firecracker     # the latest release into bin/, checksum-verified
-./fcvm kernel          # builds kernels/vmlinux-X.Y.Z from kernel.org sources
+fcvm firecracker     # the latest release into bin/, checksum-verified
+fcvm kernel          # builds kernels/vmlinux-X.Y.Z from kernel.org sources
 ```
 
 `fcvm kernel` downloads the newest stable kernel, configures it from
@@ -106,25 +148,25 @@ which does it for you.
 compiles a ~27 MB monolithic `vmlinux`. That takes a few minutes, once.
 Every VM boots this kernel, whatever its image. To pick another kernel
 series, set `KERNEL_CHANNEL=longterm` or `mainline`, or name a version
-(`./fcvm kernel 6.18.54`). [How it works](internals.md#the-guest-kernel)
+(`fcvm kernel 6.18.54`). [How it works](internals.md#the-guest-kernel)
 has the details.
 
 ## 4. A first image and VM
 
 ```sh
-./fcvm import alpine:latest       # pull from Docker Hub; the image is named "alpine-latest"
-./fcvm run alpine-latest          # a shell in a throwaway VM
+fcvm import alpine:latest       # pull from Docker Hub; the image is named "alpine-latest"
+fcvm run alpine-latest          # a shell in a throwaway VM
 ```
 
 `run` creates a VM, boots it and attaches your terminal. When the image's
 command (here `sh`) exits, the VM stops and is deleted. A few more to try:
 
 ```sh
-./fcvm run alpine-latest -- sh -c 'uname -r; exit 3'; echo $?   # the fcvm kernel, then exit code 3
-./fcvm create box alpine-latest --idle && ./fcvm start box       # a VM that stays up
-./fcvm exec box cat /etc/os-release
-./fcvm ls
-./fcvm stop box && ./fcvm rm box
+fcvm run alpine-latest -- sh -c 'uname -r; exit 3'; echo $?   # the fcvm kernel, then exit code 3
+fcvm create box alpine-latest --idle && fcvm start box       # a VM that stays up
+fcvm exec box cat /etc/os-release
+fcvm ls
+fcvm stop box && fcvm rm box
 ```
 
 The initramfs every VM boots with (`fc-init`) is built automatically the
@@ -133,9 +175,9 @@ first time you start a VM.
 ## 5. Optional: a full-OS image
 
 ```sh
-./fcvm base                       # builds the "ubuntu-26.04" system image (a few minutes)
-./fcvm create dev ubuntu-26.04 -v ~/src:/src
-./fcvm start dev && ./fcvm shell dev
+fcvm base                       # builds the "ubuntu-26.04" system image (a few minutes)
+fcvm create dev ubuntu-26.04 -v ~/src:/src
+fcvm start dev && fcvm shell dev
 ```
 
 Container images run a single command. A **system** image boots systemd,
@@ -145,8 +187,8 @@ with services, ssh, journald and timers, like a server or a Multipass VM.
 ## 6. Optional: the jailer
 
 ```sh
-./fcvm jail-setup                                  # installs the fcvm-jaild helper (sudo)
-./fcvm create box alpine-latest --idle --jail
+fcvm jail-setup                                  # installs the fcvm-jaild helper (sudo)
+fcvm create box alpine-latest --idle --jail
 ```
 
 By default Firecracker runs as you. With `--jail`, each VM's Firecracker
@@ -159,8 +201,8 @@ default. Re-run `jail-setup` after updating fcvm or Firecracker.
 ## 7. Optional: run fcvm at boot
 
 ```sh
-./fcvm service install            # sudo
-./fcvm service status             # units, console URL, API token
+fcvm service install            # sudo
+fcvm service status             # units, console URL, API token
 ```
 
 This installs two systemd units:
@@ -174,7 +216,9 @@ See [The fcvm service](service.md).
 
 ## Where things live
 
-Everything is inside the checkout:
+Your state is in `FCVM_HOME`: `~/.local/share/fcvm` by default, or the
+checkout itself for a pre-0.5 checkout. `fcvm version` shows which. Inside
+it:
 
 ```
 bin/           firecracker, jailer
@@ -186,8 +230,19 @@ vms/           one directory per VM: writable layer, config, sockets, logs
 volumes/       named volumes (NAME.ext4)
 snapshots/     one directory per snapshot
 builds/        build projects from the web console
-fcvm.conf      your settings (optional; see configuration.md)
 ```
+
+**Settings** are in `~/.config/fcvm/fcvm.conf` (for a pre-0.5 checkout,
+`fcvm.conf` in the checkout); see [Configuration](configuration.md).
+
+**Socket paths.** VMs keep Unix sockets under `vms/`, and Linux limits
+socket paths to 107 bytes. A very long `FCVM_HOME` path therefore leaves
+little room for VM names; fcvm tells you if it's too long.
+
+**One state directory per user.** The tap devices, the egress proxy's port,
+the jailer helper and the service all serve one state directory at a time.
+If you point `FCVM_HOME` somewhere else, re-run `jail-setup` and
+`service install` from there.
 
 Outside it:
 - the network devices and firewall rules (`net-up`);
@@ -198,7 +253,7 @@ Outside it:
 
 ## Updating
 
-`./fcvm status` tells you what's out of date and the command to fix it:
+`fcvm status` tells you what's out of date and the command to fix it:
 - a newer kernel or Firecracker release;
 - a kernel config or initramfs that changed since the build;
 - a jailer helper or boot-time network script that no longer matches your
@@ -206,14 +261,22 @@ Outside it:
 - a service running older code;
 - VMs still running an older kernel or initramfs.
 
-By hand:
+To update fcvm itself:
 
 ```sh
-git pull
-./fcvm firecracker          # optional: a newer Firecracker
-./fcvm kernel               # optional: a newer kernel; VMs pick it up at their next boot
-./fcvm jail-setup           # if installed: the helper runs root-owned copies, refresh them
-./fcvm service install      # if installed: refreshes the boot-time network script and units
+fcvm upgrade              # an installed release: the newest one (or: fcvm upgrade 0.5.1)
+git pull                  # a git checkout
+```
+
+`upgrade` finishes by listing what the new release needs refreshed. The
+initramfs is rebuilt automatically at the next VM start whenever its source
+changed. Components, by hand:
+
+```sh
+fcvm firecracker          # optional: a newer Firecracker
+fcvm kernel               # optional: a newer kernel; VMs pick it up at their next boot
+fcvm jail-setup           # if installed: the helper runs root-owned copies, refresh them
+fcvm service install      # if installed: refreshes the boot-time network script and units
 ```
 
 The init and exec agent live in the initramfs, not in images, so updates
@@ -224,13 +287,20 @@ took them.
 ## Uninstalling
 
 ```sh
-./fcvm service remove       # if installed
-./fcvm jail-setup --remove  # if installed
-./fcvm net-down             # bridges, taps, firewall rules
+fcvm service remove       # if installed
+fcvm jail-setup --remove  # if installed
+fcvm net-down             # bridges, taps, firewall rules
 ```
 
-Then delete the checkout. `/srv/jailer` is left in place by
-`jail-setup --remove`; delete it by hand if you want.
+Then remove the code and, if you want, your data:
+
+```sh
+rm -rf ~/.local/lib/fcvm ~/.local/bin/fcvm          # the install (--system: /opt/fcvm, /usr/local/bin/fcvm)
+rm -rf ~/.local/share/fcvm ~/.config/fcvm           # your images, VMs, volumes, snapshots and settings
+```
+
+`/srv/jailer` is left in place by `jail-setup --remove`; delete it by hand
+if you want.
 
 ## Next steps
 

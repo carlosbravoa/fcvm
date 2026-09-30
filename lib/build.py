@@ -32,9 +32,9 @@ import sys
 import tarfile
 import tempfile
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # the code
 FCVM = os.path.join(ROOT, "fcvm")
-IMAGES = os.path.join(ROOT, "images")
+IMAGES = os.path.join(os.environ.get("FCVM_HOME") or ROOT, "images")   # the state
 MAX_CACHE_DEPTH = 6
 FS_STEPS = {"RUN", "COPY", "ADD", "WORKDIR"}
 META_STEPS = {"ENV", "ARG", "USER", "CMD", "ENTRYPOINT", "EXPOSE", "LABEL", "MAINTAINER"}
@@ -506,7 +506,7 @@ class Builder:
         with open(os.path.join(IMAGES, f"{tag}.json"), "w") as f:
             json.dump(meta, f, indent=2)
         size = subprocess.run(["du", "-h", out], capture_output=True, text=True).stdout.split()[0]
-        log(f"image '{tag}' ready: {base} + one layer ({size}). Try: ./fcvm run {tag}")
+        log(f"image '{tag}' ready: {base} + one layer ({size}). Try: fcvm run {tag}")
 
 
 def main():

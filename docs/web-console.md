@@ -1,11 +1,11 @@
 # Web console
 
 ```sh
-./fcvm serve            # prints http://127.0.0.1:8686/?token=...  (open it in a browser)
+fcvm serve            # prints http://127.0.0.1:8686/?token=...  (open it in a browser)
 ```
 
 With the [fcvm service](service.md) installed, the console is always
-running. `./fcvm service status` prints its URL.
+running. `fcvm service status` prints its URL.
 
 ![Dashboard](img/console-dashboard.png)
 

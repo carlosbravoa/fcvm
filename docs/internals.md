@@ -403,7 +403,12 @@ stopped cleanly by `fcvm _shutdown`. The daemon's own fcvm commands carry
 
 ```
 fcvm                    CLI entry point
-lib/common.sh           settings + helpers
+VERSION, CHANGELOG.md   the release and what changed
+install.sh              the installer (releases in ~/.local/lib/fcvm or /opt/fcvm)
+lib/common.sh           settings, the code/state locations (FCVM_ROOT/FCVM_HOME), helpers
+lib/setup.sh            fcvm setup (guided first-time setup)
+lib/status.sh           fcvm status (health check)
+lib/upgrade.sh          fcvm upgrade
 lib/host-setup.sh       host packages, KVM access
 lib/net.sh              host bridges, taps, NAT, isolation and anti-spoofing rules
 lib/fetch-firecracker.sh

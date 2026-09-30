@@ -9,8 +9,8 @@ network isolation and egress allowlists. Drive it from the command line, a
 browser console, an HTTP API, or your coding agent over MCP.
 
 ```sh
-./fcvm import python:3.13-slim
-./fcvm run python-3.13-slim --allow @pypi -- pip install requests   # a throwaway VM that can reach only PyPI
+fcvm import python:3.13-slim
+fcvm run python-3.13-slim --allow @pypi -- pip install requests   # a throwaway VM that can reach only PyPI
 ```
 
 ## Why fcvm
@@ -79,8 +79,17 @@ Linux with KVM), or a way to run desktop GUIs.
 ## Quick start
 
 ```sh
-git clone https://github.com/carlosbravoa/fcvm ~/fcvm && cd ~/fcvm && ./fcvm setup
+curl -fsSL https://raw.githubusercontent.com/carlosbravoa/fcvm/main/install.sh | sh
+fcvm setup
 ```
+
+**The installer** puts the latest release in `~/.local/lib/fcvm`, and the
+`fcvm` command in `~/.local/bin`. It needs no root. Add `--system` (as
+`sh -s -- --system`) to install for all users under `/opt/fcvm`.
+- **Your data** (images, VMs, settings) lives in `~/.local/share/fcvm` and
+  `~/.config/fcvm`, not in the install.
+- **`fcvm upgrade`** moves to a newer release later.
+- **`fcvm version`** shows what you run and where.
 
 `fcvm setup` is a guided, interactive setup that takes about four minutes
 on a fresh machine:
@@ -93,19 +102,29 @@ on a fresh machine:
 It's safe to re-run, and `-y` accepts the defaults. Then:
 
 ```sh
-./fcvm run alpine-latest          # a shell in a throwaway VM (setup imported alpine); `exit` deletes it
-./fcvm import python:3.13-slim    # any OCI image; becomes the fcvm image "python-3.13-slim"
+fcvm run alpine-latest          # a shell in a throwaway VM (setup imported alpine); `exit` deletes it
+fcvm import python:3.13-slim    # any OCI image; becomes the fcvm image "python-3.13-slim"
 ```
 
 <details>
-<summary>The same, step by step</summary>
+<summary>From a git checkout, or step by step</summary>
+
+To run fcvm straight from a clone (for development), use `./fcvm`, or link
+it onto your PATH:
 
 ```sh
-./fcvm host-setup            # packages and /dev/kvm access (sudo, once)
-./fcvm net-up                # bridges, taps, NAT and isolation rules (sudo; `service install` makes it permanent)
-./fcvm firecracker           # download Firecracker into bin/
-./fcvm kernel                # build the guest kernel from kernel.org (a few minutes, once)
-./fcvm import alpine:latest  # a first image
+git clone https://github.com/carlosbravoa/fcvm ~/src/fcvm && cd ~/src/fcvm
+ln -s "$PWD/fcvm" ~/.local/bin/fcvm && fcvm setup
+```
+
+The steps `setup` runs, by hand:
+
+```sh
+fcvm host-setup            # packages and /dev/kvm access (sudo, once)
+fcvm net-up                # bridges, taps, NAT and isolation rules (sudo; `service install` makes it permanent)
+fcvm firecracker           # download Firecracker into bin/
+fcvm kernel                # build the guest kernel from kernel.org (a few minutes, once)
+fcvm import alpine:latest  # a first image
 ```
 
 </details>
@@ -114,20 +133,20 @@ Then pick how you want to drive it:
 
 | | |
 |---|---|
-| **Browser console:** instances, images, launch forms, live charts, terminals, files | `./fcvm serve`, then open the printed URL |
-| **Your coding agent:** sandboxes as MCP tools (Claude Code shown; any MCP client works) | `claude mcp add fcvm -- "$PWD/fcvm" mcp` |
-| **Keep it running:** network and console at boot; VMs with a restart policy come back | `./fcvm service install` (offered by `setup`) |
-| **Stronger isolation:** run VMs under the Firecracker jailer | `./fcvm jail-setup` (offered by `setup`), then `--jail` |
+| **Browser console:** instances, images, launch forms, live charts, terminals, files | `fcvm serve`, then open the printed URL |
+| **Your coding agent:** sandboxes as MCP tools (Claude Code shown; any MCP client works) | `claude mcp add fcvm -- "$(command -v fcvm)" mcp` |
+| **Keep it running:** network and console at boot; VMs with a restart policy come back | `fcvm service install` (offered by `setup`) |
+| **Stronger isolation:** run VMs under the Firecracker jailer | `fcvm jail-setup` (offered by `setup`), then `--jail` |
 
 A few everyday commands:
 
 ```sh
-./fcvm run nginx-latest -d -p 8080:80                  # after `./fcvm import nginx:latest`; curl localhost:8080
-./fcvm create box python-3.13-slim --idle              # a VM that stays up for exec (add --jail after jail-setup)
-./fcvm start box && ./fcvm exec box python -V
-./fcvm cp ./project box:/work && ./fcvm shell box
-./fcvm snapshot box ready && ./fcvm fork ready -n 3    # three running copies of box, as it is now
-./fcvm status                                          # health check: versions, updates, services, VMs
+fcvm run nginx-latest -d -p 8080:80                  # after `fcvm import nginx:latest`; curl localhost:8080
+fcvm create box python-3.13-slim --idle              # a VM that stays up for exec (add --jail after jail-setup)
+fcvm start box && fcvm exec box python -V
+fcvm cp ./project box:/work && fcvm shell box
+fcvm snapshot box ready && fcvm fork ready -n 3    # three running copies of box, as it is now
+fcvm status                                          # health check: versions, updates, services, VMs
 ```
 
 ## Documentation
@@ -138,7 +157,7 @@ Start with **[Getting started](docs/getting-started.md)** and
 | | |
 |---|---|
 | **Using fcvm** | [Images](docs/images.md) · [Running VMs](docs/vms.md) · [Networking and egress](docs/networking.md) · [Snapshots and fork](docs/snapshots.md) · [The fcvm service](docs/service.md) · [Web console](docs/web-console.md) · [Agents (MCP)](docs/agents.md) |
-| **Reference** | [Commands](docs/cli.md) · [Configuration](docs/configuration.md) · [HTTP API](docs/api.md) |
+| **Reference** | [Commands](docs/cli.md) · [Configuration](docs/configuration.md) · [HTTP API](docs/api.md) · [Changelog](CHANGELOG.md) |
 | **In depth** | [How it works](docs/internals.md) · [Security and isolation](docs/security.md) · [Roadmap](docs/roadmap.md) |
 
 The [documentation index](docs/README.md) describes each page.

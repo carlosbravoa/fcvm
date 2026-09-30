@@ -64,9 +64,9 @@ sock_room() {
     [ ${#p} -le 107 ] && return 0
     local room=$(( 107 - ${#VMS_DIR} - 18 ))
     if [ $room -ge 1 ]; then
-        die "the path to VM '$1' is too long for its sockets (${#p} bytes; Linux allows 107): use a name of at most $room characters, or move fcvm to a shorter directory"
+        die "the path to VM '$1' is too long for its sockets (${#p} bytes; Linux allows 107): use a name of at most $room characters, or a shorter FCVM_HOME"
     fi
-    die "fcvm's directory is too long for VM sockets (${#p} bytes; Linux allows 107): move it somewhere shorter, e.g. ~/fcvm"
+    die "the state directory's path is too long for VM sockets (${#p} bytes; Linux allows 107): set FCVM_HOME to a shorter path (now $FCVM_HOME)"
 }
 
 # With the fcvm service running, long-lived VMs (start, run -d, fork) are
@@ -108,7 +108,7 @@ r = json.loads(s.makefile().readline())
 print(json.dumps(r)); sys.exit(0 if r.get("ok") else 1)
 PY
 }
-image_json() { local f=$IMAGES_DIR/$1.json; [ -f "$f" ] || die "no image '$1' (see: ./fcvm images)"; echo "$f"; }
+image_json() { local f=$IMAGES_DIR/$1.json; [ -f "$f" ] || die "no image '$1' (see: fcvm images)"; echo "$f"; }
 
 # Writable layer: sparse ext4 holding overlay upper/ and work/ (root-owned via
 # tar, no root needed). Optional args replace the container command.
@@ -356,7 +356,7 @@ start() {
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" && die "VM '$vm' is already running (pid $(vm_pid "$vm"))"
     rm -f "$VMS_DIR/$vm/stopped" "$VMS_DIR/$vm/resume"
-    [ -x "$FIRECRACKER" ] || die "firecracker not installed (run: ./fcvm firecracker)"
+    [ -x "$FIRECRACKER" ] || die "firecracker not installed (run: fcvm firecracker)"
     sock_room "$vm"
     local kernel type vcpus mem image
     DIR=$(vm_dir "$vm")
@@ -375,7 +375,7 @@ start() {
     case $mode in
         none) ;;
         restricted)
-            claim_tap fcrtap || die "no free restricted tap (fcrtap*); run: ./fcvm net-up"
+            claim_tap fcrtap || die "no free restricted tap (fcrtap*); run: fcvm net-up"
             IP=$NET_R_PREFIX.$((10 + TAP_INDEX))
             local proxy=http://$NET_R_PREFIX.1:$EGRESS_PORT v
             args+=" ip=$IP::$NET_R_PREFIX.1:255.255.255.0:$vm:eth0:off:$NET_R_PREFIX.1 fcvm.proxy=$proxy"
@@ -395,14 +395,14 @@ start() {
                 net=$(jq -n --arg tap "fctap$TAP_INDEX" --arg mac "$(printf '06:00:%02x:%02x:%02x:%02x' ${IP//./ })" \
                     '[{iface_id: "eth0", guest_mac: $mac, host_dev_name: $tap}]')
             else
-                warn "no free tap device; starting without network (run: ./fcvm net-up)"
+                warn "no free tap device; starting without network (run: fcvm net-up)"
             fi ;;
     esac
     [ -z "$IP" ] || echo "$IP" > "$DIR/ip"
 
     # Drives, in attach order: vda, vdb, ... (Firecracker keeps config order).
     # fc-init (initramfs) assembles the root from the fcvm.* arguments.
-    [ -f "$BUILD_DIR/initramfs.cpio" ] || "$FCVM_ROOT/lib/build-init.sh"
+    initramfs_current || "$FCVM_ROOT/lib/build-init.sh"
     local drives='[]' n=0 dev letters=abcdefghijklmnopqrstuvwxyz
     add_drive() {   # id path read_only
         dev=/dev/vd${letters:n:1}
@@ -468,9 +468,9 @@ start() {
     local jailed=0
     if vm_jailed "$vm"; then
         jailed=1
-        [ -S /run/fcvm/jaild.sock ] || die "'$vm' runs jailed, but fcvm-jaild isn't running (run: ./fcvm jail-setup)"
+        [ -S /run/fcvm/jaild.sock ] || die "'$vm' runs jailed, but fcvm-jaild isn't running (run: fcvm jail-setup)"
         [ "$(/usr/local/lib/fcvm/firecracker --version 2>/dev/null | head -1)" = "$("$FIRECRACKER" --version | head -1)" ] ||
-            warn "fcvm-jaild has a different Firecracker than bin/ (re-run ./fcvm jail-setup)"
+            warn "fcvm-jaild has a different Firecracker than bin/ (re-run fcvm jail-setup)"
         # The helper re-validates everything in this request (paths, ownership, writability).
         jq -n --arg vm "$vm" --arg kernel "$kernel" --arg initrd "$BUILD_DIR/initramfs.cpio" --arg args "$args" \
             --argjson drives "$(jq '[.[] | {drive_id, path: .path_on_host, read_only: .is_read_only}]' <<<"$drives")" \
@@ -705,7 +705,7 @@ logs() {
 ssh_vm() {
     local vm=${1:?usage: fcvm ssh VM [args]}; shift
     local ip; ip=$(cat "$(vm_dir "$vm")/ip" 2>/dev/null) || die "VM '$vm' has no network"
-    exec ssh -i "$FCVM_ROOT/ssh/id_ed25519" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    exec ssh -i "$SSH_DIR/id_ed25519" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o LogLevel=ERROR "root@$ip" "$@"
 }
 
@@ -1074,13 +1074,13 @@ fork_one() {
     mode=$(jq -r '.net.mode // "full"' "$dir/vm.json")
     case $mode in
         restricted)
-            claim_tap fcrtap || { rm -rf "$dir"; die "no free restricted tap; run: ./fcvm net-up"; }
+            claim_tap fcrtap || { rm -rf "$dir"; die "no free restricted tap; run: fcvm net-up"; }
             IP=$NET_R_PREFIX.$((10 + TAP_INDEX)) gw=$NET_R_PREFIX.1 tap=fcrtap$TAP_INDEX
             mac=$(printf '06:01:%02x:%02x:%02x:%02x' ${IP//./ })
             write_policy "$vm" "$IP"; ensure_proxy ;;
         none) ;;
         *)
-            claim_tap fctap || { rm -rf "$dir"; die "no free tap; run: ./fcvm net-up"; }
+            claim_tap fctap || { rm -rf "$dir"; die "no free tap; run: fcvm net-up"; }
             IP=$NET_PREFIX.$((10 + TAP_INDEX)) gw=$NET_PREFIX.1 tap=fctap$TAP_INDEX
             mac=$(printf '06:00:%02x:%02x:%02x:%02x' ${IP//./ }) ;;
     esac

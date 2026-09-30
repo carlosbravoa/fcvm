@@ -6,10 +6,11 @@
 need gcc strip python3
 
 mkdir -p "$BUILD_DIR"
-gcc -static -Os -Wall -Wextra -Wno-unused-result -o "$BUILD_DIR/fc-init" "$FCVM_ROOT/init/fc-init.c"
-strip "$BUILD_DIR/fc-init"
+gcc -static -Os -Wall -Wextra -Wno-unused-result -o "$BUILD_DIR/fc-init.$$" "$FCVM_ROOT/init/fc-init.c"
+strip "$BUILD_DIR/fc-init.$$"
+mv -f "$BUILD_DIR/fc-init.$$" "$BUILD_DIR/fc-init"
 
-python3 - "$BUILD_DIR/fc-init" "$BUILD_DIR/initramfs.cpio" <<'EOF'
+python3 - "$BUILD_DIR/fc-init" "$BUILD_DIR/initramfs.cpio.$$" <<'EOF'
 import stat, sys, time
 
 init_path, out_path = sys.argv[1:]
@@ -34,4 +35,6 @@ with open(out_path, "wb") as f:
     entry(f, "init", stat.S_IFREG | 0o755, init)
     entry(f, "TRAILER!!!", 0)
 EOF
+mv -f "$BUILD_DIR/initramfs.cpio.$$" "$BUILD_DIR/initramfs.cpio"   # atomic: VMs may be starting
+sha256sum < "$FCVM_ROOT/init/fc-init.c" | cut -d' ' -f1 > "$BUILD_DIR/initramfs.src"   # see initramfs_current
 log "built $BUILD_DIR/fc-init ($(du -h "$BUILD_DIR/fc-init" | cut -f1)) and initramfs.cpio"

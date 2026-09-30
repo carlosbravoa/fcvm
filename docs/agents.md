@@ -16,12 +16,15 @@ behaves exactly as on the command line.
 With Claude Code:
 
 ```sh
-claude mcp add fcvm -- /path/to/fcvm mcp
-claude mcp add fcvm -e FCVM_MCP_NETWORK=@pypi,@github -- /path/to/fcvm mcp   # with a pinned network policy
+claude mcp add fcvm -- "$(command -v fcvm)" mcp
+claude mcp add fcvm -e FCVM_MCP_NETWORK=@pypi,@github -- "$(command -v fcvm)" mcp   # with a pinned network policy
 ```
 
 Any MCP client that launches stdio servers works the same way: the command
-is `/path/to/fcvm mcp`, and the settings below are environment variables.
+is the full path of `fcvm` (`command -v fcvm`) with the argument `mcp`, and
+the settings below are environment variables. For an installed fcvm, that
+path goes through the `current` link, so upgrades carry the registration
+along.
 
 The agent needs the images it will use. It can import them itself
 (`pull_image`), or you can import them beforehand.
@@ -54,7 +57,7 @@ widens it.
 
 ## Jailing
 
-Once `fcvm-jaild` is installed (`./fcvm jail-setup`), every sandbox the
+Once `fcvm-jaild` is installed (`fcvm jail-setup`), every sandbox the
 server creates runs under the Firecracker jailer. Set `FCVM_MCP_JAIL=0` to
 turn that off.
 

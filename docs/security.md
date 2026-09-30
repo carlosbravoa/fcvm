@@ -68,11 +68,11 @@ fcvm owner) are trusted.
 ## Recommended setup for untrusted code
 
 ```sh
-./fcvm net-up          # isolation, host services blocked, anti-spoofing, no IPv6 (sudo)
-./fcvm jail-setup      # the jailer helper (sudo, once; re-run after updating fcvm)
+fcvm net-up          # isolation, host services blocked, anti-spoofing, no IPv6 (sudo)
+fcvm jail-setup      # the jailer helper (sudo, once; re-run after updating fcvm)
 
 # a sandbox that can reach only package mirrors, jailed
-./fcvm create box python-3.13-slim --idle --jail --allow @pypi,@github
+fcvm create box python-3.13-slim --idle --jail --allow @pypi,@github
 ```
 
 or `JAIL=1` in your environment to jail every new VM. Sandboxes created by
@@ -146,8 +146,8 @@ small root service. `fcvm` asks it to launch VMs.
   `jaild.py`, `jailer` and `firecracker` into `/usr/local/lib/fcvm`. The
   service never runs files from your (user-writable) fcvm tree, so
   compromising your account doesn't give root through the helper. The flip
-  side: **re-run `./fcvm jail-setup` after updating fcvm or
-  `./fcvm firecracker`**. `fcvm start` warns when the installed Firecracker
+  side: **re-run `fcvm jail-setup` after updating fcvm or
+  `fcvm firecracker`**. `fcvm start` warns when the installed Firecracker
   differs from `bin/`.
 - **Who may talk to it.** It listens on `/run/fcvm/jaild.sock`, mode 0600,
   and checks the peer's uid (`SO_PEERCRED`) on every connection. Only the
@@ -272,7 +272,7 @@ fcvm doesn't, for two reasons:
 ### Removing it
 
 ```sh
-./fcvm jail-setup --remove    # stops jailed VMs, removes the service and /usr/local/lib/fcvm
+fcvm jail-setup --remove    # stops jailed VMs, removes the service and /usr/local/lib/fcvm
 ```
 
 VMs created with `--jail` then refuse to start until the helper is
@@ -503,8 +503,8 @@ After changing a `net-up` or `jail-setup` variable, re-run the command with
 it set (both use sudo), for example:
 
 ```sh
-NET_HOST_ACCESS=1 ./fcvm net-up
-NET_ISOLATE=0 ./fcvm net-up && NET_ISOLATE=0 ./fcvm jail-setup   # the helper sets veth isolation
+NET_HOST_ACCESS=1 fcvm net-up
+NET_ISOLATE=0 fcvm net-up && NET_ISOLATE=0 fcvm jail-setup   # the helper sets veth isolation
 ```
 
 ## Verifying the setup
@@ -513,7 +513,7 @@ From the host:
 
 ```sh
 systemctl is-active fcvm-jaild                       # the helper
-./fcvm ls                                            # jailed VMs show "jail"
+fcvm ls                                            # jailed VMs show "jail"
 ps -o user,pid,cmd -p "$(cat vms/box/pid)"           # 900000+N, /firecracker --id box ...
 awk 'NR>2 {print $1}' /proc/"$(cat vms/box/pid)"/net/dev   # lo: veth0: br0: tap0:
 ss -ltn | grep 8080                                  # published ports on 127.0.0.1
@@ -522,13 +522,13 @@ ss -ltn | grep 8080                                  # published ports on 127.0.
 From inside a VM (Alpine's busybox tools shown):
 
 ```sh
-./fcvm exec box -- ping -c1 -W1 172.30.0.11          # another VM: fails
-./fcvm exec box -- nc -z -w2 172.30.0.1 22           # host sshd: fails
-./fcvm exec box -- ping -c1 -W1 172.30.0.1           # host ping: works
-./fcvm exec box -- wget -qO- http://example.com      # internet (full mode): works
+fcvm exec box -- ping -c1 -W1 172.30.0.11          # another VM: fails
+fcvm exec box -- nc -z -w2 172.30.0.1 22           # host sshd: fails
+fcvm exec box -- ping -c1 -W1 172.30.0.1           # host ping: works
+fcvm exec box -- wget -qO- http://example.com      # internet (full mode): works
 
 # spoofing: take another address, then try to get out
-./fcvm exec box -- sh -c 'ip addr add 172.30.0.50/24 dev eth0;
+fcvm exec box -- sh -c 'ip addr add 172.30.0.50/24 dev eth0;
     ping -c1 -W2 -I 172.30.0.50 1.1.1.1 || echo dropped; ip addr del 172.30.0.50/24 dev eth0'
 ```
 
@@ -538,21 +538,21 @@ From inside a VM (Alpine's busybox tools shown):
 server).
 - Prefer running the service in a VM, or publishing it the other way
   round.
-- Otherwise: `NET_HOST_ACCESS=1 ./fcvm net-up`. This opens every host
+- Otherwise: `NET_HOST_ACCESS=1 fcvm net-up`. This opens every host
   service to every full-network VM.
 
-**Two VMs need to talk.** `NET_ISOLATE=0 ./fcvm net-up`, and also
-`NET_ISOLATE=0 ./fcvm jail-setup` if either is jailed.
+**Two VMs need to talk.** `NET_ISOLATE=0 fcvm net-up`, and also
+`NET_ISOLATE=0 fcvm jail-setup` if either is jailed.
 
 **A published port isn't reachable from another machine.** Ports bind to
 `127.0.0.1` by default. Publish with `-p 0.0.0.0:HOST:GUEST`.
 
 **"'VM' runs jailed, but fcvm-jaild isn't running".** Run
-`./fcvm jail-setup`, or check `journalctl -u fcvm-jaild`.
+`fcvm jail-setup`, or check `journalctl -u fcvm-jaild`.
 
 **"fcvm-jaild has a different Firecracker than bin/".** You updated
 Firecracker or fcvm since installing the helper. Re-run
-`./fcvm jail-setup`.
+`fcvm jail-setup`.
 
 **The helper refuses a request** ("not an fcvm file this VM may use", "not
 a regular file owned by the fcvm owner"). A path in the VM's config

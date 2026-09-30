@@ -39,12 +39,13 @@ from collections import deque
 
 from supervisor import Supervisor
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # the code
+STATE = os.environ.get("FCVM_HOME") or ROOT   # set by the fcvm command (lib/common.sh)
 FCVM = os.path.join(ROOT, "fcvm")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-VMS = os.path.join(ROOT, "vms")
-IMAGES = os.path.join(ROOT, "images")
-BUILDS = os.path.join(ROOT, "builds")
+VMS = os.path.join(STATE, "vms")
+IMAGES = os.path.join(STATE, "images")
+BUILDS = os.path.join(STATE, "builds")
 MAX_UPLOAD = 4 << 30
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
@@ -777,7 +778,7 @@ class App:
         locks = os.path.join(VMS, ".locks")
         return {
             "hostname": os.uname().nodename, "cpus": os.cpu_count(), "load": [float(x) for x in load],
-            "kernel": os.path.basename(os.path.realpath(os.path.join(ROOT, "kernels", "vmlinux"))),
+            "kernel": os.path.basename(os.path.realpath(os.path.join(STATE, "kernels", "vmlinux"))),
             "disk_total": st.f_blocks * st.f_frsize, "disk_free": st.f_bavail * st.f_frsize,
             "taps_full": taps("fctap"), "taps_restricted": taps("fcrtap"),
             "jail_available": os.path.exists("/run/fcvm/jaild.sock"),

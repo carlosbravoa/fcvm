@@ -46,4 +46,4 @@ else
 fi
 
 grep -q "^$USER:" /etc/subuid || { log "adding subuid/subgid range for $USER"; sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"; }
-log "done. Next: ./fcvm setup (or by hand: ./fcvm net-up && ./fcvm firecracker && ./fcvm kernel)"
+log "done. Next: fcvm setup (or by hand: fcvm net-up && fcvm firecracker && fcvm kernel)"

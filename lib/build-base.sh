@@ -9,12 +9,12 @@ need mmdebstrap newuidmap mkfs.ext4 ssh-keygen
 
 name=${1:-ubuntu-26.04}
 img=$IMAGES_DIR/$name.ext4
-mkdir -p "$IMAGES_DIR" "$BUILD_DIR" "$FCVM_ROOT/ssh"
+mkdir -p "$IMAGES_DIR" "$BUILD_DIR" "$SSH_DIR"
 users=$(image_users "$name" | tr "\n" " ")
 [ -z "$users" ] || die "image '$name' is the shared base of VMs: $users (remove them, or build under another name)"
 
 # Project SSH key (used by `fcvm ssh`) plus the user's own public keys.
-key=$FCVM_ROOT/ssh/id_ed25519
+key=$SSH_DIR/id_ed25519
 [ -f "$key" ] || ssh-keygen -q -t ed25519 -N '' -C fcvm -f "$key"
 keys=$BUILD_DIR/authorized_keys
 cat "$key.pub" > "$keys"
@@ -78,4 +78,4 @@ mkfs.ext4 -q -F -L rootfs -d "$tar" "$img" "$BASE_SIZE"
 chmod a-w "$img"   # shared read-only by every VM created from it
 jq -n --arg suite "$UBUNTU_SUITE" --arg size "$BASE_SIZE" \
     '{type: "system", ref: ("ubuntu:" + $suite), disk_size: $size}' > "$IMAGES_DIR/$name.json"
-log "image ready: $img. Try: ./fcvm create dev $name && ./fcvm start dev"
+log "image ready: $img. Try: fcvm create dev $name && fcvm start dev"

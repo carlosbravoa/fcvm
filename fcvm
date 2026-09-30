@@ -5,11 +5,14 @@
 usage() {
     cat <<EOF
 usage: fcvm <command> [args]
-Disposable, isolated Firecracker microVMs with container ergonomics.
+fcvm $(fcvm_version): disposable, isolated Firecracker microVMs with container ergonomics.
 
 Setup:
   setup [-y]                 guided setup: checks every step below, asks, runs what's missing
                              (-y: default answers). Safe to re-run
+  version, -V, --version     fcvm's version (version: also where its code and state live)
+  upgrade [VERSION] [--source PATH]
+                             move an installed fcvm to the newest (or given) release
   status [--offline]         health check: components and their versions (kernel, Firecracker,
                              ...), what needs updating or re-installing, services, VMs, images
 
@@ -86,6 +89,10 @@ EOF
 
 cmd=${1:-help}; shift || true
 case $cmd in
+    -V|--version)       echo "fcvm $(fcvm_version)" ;;
+    version)            printf 'fcvm %s\ncode   %s\nstate  %s\nconfig %s%s\n' "$(fcvm_version)" "$FCVM_ROOT" \
+                            "$FCVM_HOME" "$FCVM_CONF" "$([ -f "$FCVM_CONF" ] || echo ' (none)')" ;;
+    upgrade)            exec "$FCVM_ROOT/lib/upgrade.sh" "$@" ;;
     setup)              exec "$FCVM_ROOT/lib/setup.sh" "$@" ;;
     status)             exec "$FCVM_ROOT/lib/status.sh" "$@" ;;
     host-setup)         exec "$FCVM_ROOT/lib/host-setup.sh" "$@" ;;

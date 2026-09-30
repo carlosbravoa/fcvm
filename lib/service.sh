@@ -19,6 +19,7 @@ NET_UNIT=/etc/systemd/system/fcvm-net.service
 UNIT=/etc/systemd/system/fcvm.service
 STATE=$VMS_DIR/.serve.json   # the running console's URL (written by fcvm serve)
 
+
 install_units() {
     local port=8686
     while [ $# -gt 0 ]; do
@@ -66,10 +67,11 @@ Wants=network-online.target fcvm-net.service
 
 [Service]
 User=$(id -un)
-ExecStart=$FCVM_ROOT/fcvm serve --service --port $port
+Environment=FCVM_HOME=$FCVM_HOME
+ExecStart=$(fcvm_entry) serve --service --port $port
 # At host shutdown: stop VMs cleanly and mark them to resume at boot.
 # Restarting the service alone leaves them running.
-ExecStop=$FCVM_ROOT/fcvm _shutdown
+ExecStop=$(fcvm_entry) _shutdown
 KillMode=process
 TimeoutStopSec=150
 Restart=on-failure
@@ -82,7 +84,7 @@ EOF
     sudo systemctl enable fcvm-net.service fcvm.service >/dev/null 2>&1
     sudo systemctl restart fcvm-net.service
     sudo systemctl restart fcvm.service
-    [ -S /run/fcvm/jaild.sock ] || warn "fcvm-jaild isn't installed; jailed VMs need it (./fcvm jail-setup)"
+    [ -S /run/fcvm/jaild.sock ] || warn "fcvm-jaild isn't installed; jailed VMs need it (fcvm jail-setup)"
     local i
     for ((i = 0; i < 50; i++)); do [ -f "$STATE" ] && break; sleep 0.1; done
     status
@@ -94,7 +96,7 @@ remove_units() {
     sudo rm -f "$UNIT" "$NET_UNIT" "$LIB/net.sh" /etc/fcvm/net.env
     sudo systemctl daemon-reload
     rm -f "$STATE"
-    log "fcvm service removed. Running VMs keep running; after a reboot, run ./fcvm net-up again"
+    log "fcvm service removed. Running VMs keep running; after a reboot, run fcvm net-up again"
 }
 
 status() {

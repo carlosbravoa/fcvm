@@ -1,6 +1,6 @@
 # Commands
 
-Every `fcvm` command, grouped by purpose. `./fcvm help` prints the same
+Every `fcvm` command, grouped by purpose. `fcvm help` prints the same
 list in short form. Pages under "Using fcvm" in the
 [documentation index](README.md) explain each area in depth.
 
@@ -22,6 +22,8 @@ These use sudo.
 | command | what it does |
 |---|---|
 | `setup [-y]` | the guided setup: checks every step below (plus `firecracker`, `kernel`, and optionally `base`), asks before the optional ones, runs what's missing, and boots a test VM. Safe to re-run. `-y` takes the default answers |
+| `version`, `-V`, `--version` | fcvm's version (`0.5.0`; from a git checkout also the commit, e.g. `0.5.0+12.gabc1234`). `version` also shows where the code, state and settings are |
+| `upgrade [VERSION]` | installs the newest release (or VERSION, also an older one) next to the running one and switches over, then lists what needs refreshing (jailer copies, boot-time network, service). Refuses in a git checkout: use `git pull` |
 | `status [--offline]` | a health check (no sudo): host, components and their versions against the newest releases (kernel with build and release dates, Firecracker), whether the kernel config or initramfs changed since the build, the network, the service and the jailer (including whether their installed copies match this tree), VMs still running older components, then VMs and images. Ends with a to-do list of fixes; exits 1 if something is broken. `--offline` skips the version checks (cached 6 h otherwise) |
 | `host-setup [--check]` | installs build and runtime packages, checks `/dev/kvm` access, sets up a subuid range. `--check` only reports what's missing |
 | `net-up`, `net-down` | creates (or removes) the bridges `fcbr0` (NAT) and `fcbr1` (restricted), 64 taps each, and the firewall rules. Needed after every reboot, unless the service is installed |

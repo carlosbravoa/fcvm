@@ -18,17 +18,31 @@ where.
 Settings are shell variables with defaults at the top of `lib/common.sh`.
 Override them either way:
 
-- **Permanently**, in `fcvm.conf` in the checkout (not tracked by git):
+- **Permanently**, in `~/.config/fcvm/fcvm.conf` (for a pre-0.5 checkout
+  that keeps its state inside, `fcvm.conf` in the checkout;
+  `fcvm version` shows which file is read):
 
   ```sh
-  # fcvm.conf
+  # ~/.config/fcvm/fcvm.conf
   VM_MEM_MIB=2048
   KERNEL_CHANNEL=longterm
   NET_HOST_ACCESS=1
   ```
 
 - **For one command**, in the environment:
-  `KERNEL_CHANNEL=longterm ./fcvm kernel`.
+  `KERNEL_CHANNEL=longterm fcvm kernel`.
+
+**Locations.** Three environment variables choose where things are, and
+must be set in the environment rather than in `fcvm.conf`:
+
+| variable | default | |
+|---|---|---|
+| `FCVM_HOME` | `~/.local/share/fcvm` | state: images, VMs, volumes, snapshots, kernels, Firecracker |
+| `FCVM_CONF` | `~/.config/fcvm/fcvm.conf` | the settings file |
+| `XDG_DATA_HOME`, `XDG_CONFIG_HOME` | `~/.local/share`, `~/.config` | the usual XDG bases for the two above |
+
+`fcvm service install` records `FCVM_HOME` in the unit, so the service uses
+the same state as you.
 
 **Where a setting takes effect.**
 - Most settings are read each time a command runs.
@@ -63,7 +77,7 @@ For example, to add packages to the base image:
 
 ```sh
 echo 'BASE_PACKAGES="$BASE_PACKAGES,git,build-essential,python3"' >> fcvm.conf
-./fcvm base ubuntu-dev
+fcvm base ubuntu-dev
 ```
 
 ## Network
@@ -101,9 +115,9 @@ own root-owned copy.
 **Building.**
 
 ```sh
-./fcvm kernel                    # newest of KERNEL_CHANNEL
-./fcvm kernel 6.18.54            # an exact version
-FORCE=1 ./fcvm kernel            # rebuild a version already built (e.g. after editing the fragment)
+fcvm kernel                    # newest of KERNEL_CHANNEL
+fcvm kernel 6.18.54            # an exact version
+FORCE=1 fcvm kernel            # rebuild a version already built (e.g. after editing the fragment)
 ```
 
 **Customizing.** Every VM boots `kernels/vmlinux`, a symlink to the newest
@@ -111,7 +125,7 @@ build. The kernel is monolithic, with no loadable modules: features come
 from the fragment `kernel/microvm-x86_64.config`, applied on top of
 `allnoconfig`. To add a feature:
 1. Add its options to the fragment.
-2. Rebuild with `FORCE=1 ./fcvm kernel`.
+2. Rebuild with `FORCE=1 fcvm kernel`.
 3. Restart the VMs that need it.
 
 The build reports any option that didn't make it into the final `.config`,

@@ -34,4 +34,4 @@ chmod a-w "$new"   # shared read-only by every VM created from it
 jq --arg type app --arg size "${size_mb}M" '. + {type: $type, disk_size: $size}' "$meta" > "$meta.tmp"
 mv -f "$new" "$img"
 mv "$meta.tmp" "$IMAGES_DIR/$name.json"
-log "image ready: $img (${size_mb} MiB). Try: ./fcvm run $name"
+log "image ready: $img (${size_mb} MiB). Try: fcvm run $name"

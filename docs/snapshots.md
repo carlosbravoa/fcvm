@@ -16,12 +16,12 @@ and loaded dependencies stay warm.
 ## Example
 
 ```sh
-./fcvm create box python-3.13-slim --idle && ./fcvm start box
-./fcvm exec box sh -c 'pip install -q numpy pandas && python -c "import pandas"'   # prepare once
-./fcvm snapshot box ready          # box keeps running
-./fcvm fork ready try -n 3         # try-1, try-2, try-3: running in ~0.6 s total
-./fcvm exec try-2 python -c 'import pandas; print(pandas.__version__)'
-./fcvm rm try-2 && ./fcvm fork ready try-2   # roll back: a fresh copy of the prepared state
+fcvm create box python-3.13-slim --idle && fcvm start box
+fcvm exec box sh -c 'pip install -q numpy pandas && python -c "import pandas"'   # prepare once
+fcvm snapshot box ready          # box keeps running
+fcvm fork ready try -n 3         # try-1, try-2, try-3: running in ~0.6 s total
+fcvm exec try-2 python -c 'import pandas; print(pandas.__version__)'
+fcvm rm try-2 && fcvm fork ready try-2   # roll back: a fresh copy of the prepared state
 ```
 
 ## What each fork gets
@@ -66,8 +66,8 @@ Measured on a 1 GiB VM:
 ## Managing snapshots
 
 ```sh
-./fcvm snapshot ls            # or --json
-./fcvm snapshot rm ready      # running forks are unaffected
+fcvm snapshot ls            # or --json
+fcvm snapshot rm ready      # running forks are unaffected
 ```
 
 The web console lists snapshots, and forks or deletes them. The MCP server

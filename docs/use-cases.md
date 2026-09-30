@@ -17,8 +17,8 @@ Give an agent its own machines to work in, instead of your laptop. Register
 fcvm's MCP server. This shows Claude Code, but any MCP client works:
 
 ```sh
-./fcvm jail-setup    # recommended: sandboxes are then jailed automatically
-claude mcp add fcvm -e FCVM_MCP_NETWORK=@pypi,@github -- "$PWD/fcvm" mcp
+fcvm jail-setup    # recommended: sandboxes are then jailed automatically
+claude mcp add fcvm -e FCVM_MCP_NETWORK=@pypi,@github -- "$(command -v fcvm)" mcp
 ```
 
 The agent gets tools to:
@@ -49,9 +49,9 @@ A tool from the internet, a repository's build script, a package whose
 install hooks you'd rather not run on your machine:
 
 ```sh
-./fcvm import node:22-slim
+fcvm import node:22-slim
 # the project read-only, network limited to the npm registry, and the VM gone afterwards
-./fcvm run node-22-slim --jail --allow @npm -v ./suspicious-pkg:/src:ro -- \
+fcvm run node-22-slim --jail --allow @npm -v ./suspicious-pkg:/src:ro -- \
     sh -c 'cp -r /src /work && cd /work && npm install && npm test'
 ```
 
@@ -74,14 +74,14 @@ More: [Networking and egress](networking.md), [Security](security.md).
 Installing dependencies is slow. Forking a VM that already has them isn't:
 
 ```sh
-./fcvm create base python-3.13-slim --idle && ./fcvm start base
-./fcvm cp ./myproject base:/work
-./fcvm exec -w /work base pip install -r requirements.txt
-./fcvm snapshot base ready                          # memory, disk and running processes
+fcvm create base python-3.13-slim --idle && fcvm start base
+fcvm cp ./myproject base:/work
+fcvm exec -w /work base pip install -r requirements.txt
+fcvm snapshot base ready                          # memory, disk and running processes
 
-./fcvm fork ready t -n 4                            # t-1 .. t-4, each running in ~150 ms
-for i in 1 2 3 4; do ./fcvm exec -w /work t-$i pytest -q tests/part$i & done; wait
-./fcvm rm t-2 && ./fcvm fork ready t-2              # roll back one to the prepared state
+fcvm fork ready t -n 4                            # t-1 .. t-4, each running in ~150 ms
+for i in 1 2 3 4; do fcvm exec -w /work t-$i pytest -q tests/part$i & done; wait
+fcvm rm t-2 && fcvm fork ready t-2              # roll back one to the prepared state
 ```
 
 Each fork has its own disk, IP, MAC and hostname, and starts from the exact
@@ -93,8 +93,8 @@ For a starting point that doesn't need running processes, `commit` is
 simpler. It saves the disk as an image, and new VMs boot from it:
 
 ```sh
-./fcvm stop base && ./fcvm commit base myproject-env
-./fcvm run myproject-env -- python /work/main.py
+fcvm stop base && fcvm commit base myproject-env
+fcvm run myproject-env -- python /work/main.py
 ```
 
 More: [Snapshots and fork](snapshots.md), [Images](images.md#commit-a-vm-as-an-image).
@@ -104,10 +104,10 @@ More: [Snapshots and fork](snapshots.md), [Images](images.md#commit-a-vm-as-an-i
 A full Ubuntu VM with systemd, your source tree mounted live, and ssh:
 
 ```sh
-./fcvm base                                          # once: the ubuntu-26.04 system image
-./fcvm create dev ubuntu-26.04 --vcpus 4 --mem 4096 -v ~/src:/src --restart unless-stopped
-./fcvm start dev
-./fcvm shell dev          # or: ./fcvm ssh dev
+fcvm base                                          # once: the ubuntu-26.04 system image
+fcvm create dev ubuntu-26.04 --vcpus 4 --mem 4096 -v ~/src:/src --restart unless-stopped
+fcvm start dev
+fcvm shell dev          # or: fcvm ssh dev
 ```
 
 - **Your source tree.** Edit in `~/src` on the host and build or run in
@@ -126,10 +126,10 @@ Run a container image as a long-lived service, with container convenience
 and VM isolation:
 
 ```sh
-./fcvm service install                               # once
-./fcvm import nginx:latest
-./fcvm create web nginx-latest -p 8080:80 -v site:/usr/share/nginx/html --restart unless-stopped
-./fcvm start web
+fcvm service install                               # once
+fcvm import nginx:latest
+fcvm create web nginx-latest -p 8080:80 -v site:/usr/share/nginx/html --restart unless-stopped
+fcvm start web
 curl http://localhost:8080/
 ```
 
@@ -147,8 +147,8 @@ More: [The fcvm service](service.md), [Running VMs](vms.md#published-ports).
 ## Build an image from a Dockerfile
 
 ```sh
-./fcvm build -t myapp --allow @pypi ./myapp     # RUN steps can reach only PyPI
-./fcvm run myapp
+fcvm build -t myapp --allow @pypi ./myapp     # RUN steps can reach only PyPI
+fcvm run myapp
 ```
 
 fcvm builds from a common Dockerfile subset: `FROM`, `RUN`, `COPY`, `ENV`,

@@ -18,12 +18,12 @@ if [ "${1:-}" = --remove ]; then
 fi
 
 need setfacl
-[ -x "$FIRECRACKER" ] && [ -x "$BIN_DIR/jailer" ] || die "run ./fcvm firecracker first"
+[ -x "$FIRECRACKER" ] && [ -x "$BIN_DIR/jailer" ] || die "run fcvm firecracker first"
 log "installing root-owned copies of jaild.py, jailer and firecracker into $LIB"
 sudo install -d -m 755 -o root -g root "$LIB" /etc/fcvm
 sudo install -m 755 -o root -g root "$FCVM_ROOT/lib/jaild.py" "$BIN_DIR/jailer" "$FIRECRACKER" "$LIB/"
 
-jq -n --argjson uid "$(id -u)" --arg root "$FCVM_ROOT" --argjson base "${JAIL_UID_BASE:-900000}" \
+jq -n --argjson uid "$(id -u)" --arg root "$FCVM_HOME" --argjson base "${JAIL_UID_BASE:-900000}" \
     --arg br "$NET_BRIDGE" --arg rbr "$NET_R_BRIDGE" --argjson iso "$([ "$NET_ISOLATE" = 1 ] && echo true || echo false)" \
     '{owner_uid: $uid, fcvm_root: $root, jail_base: "/srv/jailer", uid_base: $base, slots: 256,
       bridges: {fctap: $br, fcrtap: $rbr}, isolate: {fctap: $iso, fcrtap: true}}' |

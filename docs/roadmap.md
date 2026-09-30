@@ -209,6 +209,11 @@ shared images. Keys should be injected per VM at boot instead.
   compatibility policy, so newer hosts can talk to VMs booted with an older
   initramfs.
 - aarch64 (Graviton): needs `kernel/microvm-aarch64.config` and testing.
+- Packaging: ✅ versioned releases, an installer (`~/.local` or
+  `/opt/fcvm`), `fcvm upgrade`, separate code and state (0.5.0). Still open:
+  a `.deb` built by CI for each tag (its dependencies replacing
+  `host-setup`), and later an apt repository or PPA; checksums or
+  signatures for release downloads (with E3).
 
 ### Smaller items
 

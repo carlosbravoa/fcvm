@@ -40,7 +40,7 @@ code you don't trust, use restricted mode or no network.
 ## No network
 
 ```sh
-./fcvm create box alpine-latest --idle --net none
+fcvm create box alpine-latest --idle --net none
 ```
 
 The VM has no network card at all. It takes no tap, and published ports are
@@ -49,12 +49,12 @@ refused.
 ## Restricted network: egress allowlists
 
 ```sh
-./fcvm run python-3.13-slim --allow @pypi -- pip install requests       # works
-./fcvm create box alpine-latest --idle --allow @alpine,github.com        # a restricted VM
-./fcvm egress box                     # its allowlist and recent ALLOW/DENY decisions
-./fcvm egress box --allow example.com # change it live, no restart
-./fcvm egress box --deny github.com
-./fcvm egress box -f                  # follow decisions as they happen
+fcvm run python-3.13-slim --allow @pypi -- pip install requests       # works
+fcvm create box alpine-latest --idle --allow @alpine,github.com        # a restricted VM
+fcvm egress box                     # its allowlist and recent ALLOW/DENY decisions
+fcvm egress box --allow example.com # change it live, no restart
+fcvm egress box --deny github.com
+fcvm egress box -f                  # follow decisions as they happen
 ```
 
 **How it works.**
@@ -113,7 +113,7 @@ to keep it. If the fcvm service is installed, re-run `service install`
 instead, since it applies the network at boot.
 
 ```sh
-echo 'NET_HOST_ACCESS=1' >> fcvm.conf && ./fcvm net-up      # or: ./fcvm service install
+echo 'NET_HOST_ACCESS=1' >> fcvm.conf && fcvm net-up      # or: fcvm service install
 ```
 
 ## Addresses and reaching VMs

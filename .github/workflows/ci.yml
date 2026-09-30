@@ -10,18 +10,23 @@ jobs:
     name: lint and unit tests
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0                 # tags, for fcvm_version
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-      - run: tests/run lint unit
+      - name: tests/run lint unit
+        shell: bash
+        run: tests/run lint unit 2>&1 | tee checks.log
+      - name: Report
+        if: failure()
+        run: tests/tools/ci-report.sh checks.log
 
   integration:
     name: integration tests (fresh runner, real VMs)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: KVM access
@@ -36,19 +41,18 @@ jobs:
         id: kernel
         run: echo "version=$(curl -fsSL https://www.kernel.org/releases.json | jq -r .latest_stable.version)" >> "$GITHUB_OUTPUT"
       - name: Cache the guest kernel
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.local/share/fcvm/kernels
             ~/.local/share/fcvm/cache
           key: kernel-${{ steps.kernel.outputs.version }}-${{ hashFiles('kernel/*.config') }}
       - name: fcvm setup -y
-        run: ./fcvm setup -y
+        shell: bash
+        run: ./fcvm setup -y 2>&1 | tee setup.log
       - name: Integration tests
-        run: tests/run integration -v
-      - name: Diagnostics
+        shell: bash
+        run: tests/run integration -v 2>&1 | tee tests.log
+      - name: Report
         if: failure()
-        run: |
-          ./fcvm status --offline || true
-          sudo journalctl -u fcvm -u fcvm-jaild -u fcvm-net --no-pager | tail -n 150 || true
-          for d in ~/.local/share/fcvm/vms/*/; do echo "== $d"; tail -n 30 "$d/console.log" 2>/dev/null; done
+        run: tests/tools/ci-report.sh setup.log tests.log

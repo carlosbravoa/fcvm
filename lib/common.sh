@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared settings and helpers. Sourced by fcvm and every lib/*.sh script.
 set -euo pipefail
 

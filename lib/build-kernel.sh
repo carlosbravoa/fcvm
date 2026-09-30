@@ -72,7 +72,7 @@ make -s ARCH=$karch olddefconfig
 missing=0
 while IFS= read -r line; do
     sym=${line%%=*}
-    if [[ $line == *=* ]]; then grep -qx "$line" .config || { warn "requested $line, got: $(grep -E "^(# )?$sym[= ]" .config || echo 'not present')"; missing=1; }; fi
+    if [[ $line == *=* ]]; then grep -qx "$line" .config || { warn "requested $line, got: $(grep -E "^(# )?${sym}[= ]" .config || echo 'not present')"; missing=1; }; fi
 done < <(grep -E '^CONFIG_' "$fragment")
 [ $missing = 0 ] && log "all fragment options applied"
 

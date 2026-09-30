@@ -22,6 +22,7 @@ These use sudo.
 | command | what it does |
 |---|---|
 | `setup [-y]` | the guided setup: checks every step below (plus `firecracker`, `kernel`, and optionally `base`), asks before the optional ones, runs what's missing, and boots a test VM. Safe to re-run. `-y` takes the default answers |
+| `status [--offline]` | a health check (no sudo): host, components and their versions against the newest releases (kernel with build and release dates, Firecracker), whether the kernel config or initramfs changed since the build, the network, the service and the jailer (including whether their installed copies match this tree), VMs still running older components, then VMs and images. Ends with a to-do list of fixes; exits 1 if something is broken. `--offline` skips the version checks (cached 6 h otherwise) |
 | `host-setup [--check]` | installs build and runtime packages, checks `/dev/kvm` access, sets up a subuid range. `--check` only reports what's missing |
 | `net-up`, `net-down` | creates (or removes) the bridges `fcbr0` (NAT) and `fcbr1` (restricted), 64 taps each, and the firewall rules. Needed after every reboot, unless the service is installed |
 | `jail-setup [--remove]` | installs (or removes) `fcvm-jaild`, the root helper that runs VMs under the Firecracker jailer. Re-run after updating fcvm or Firecracker |

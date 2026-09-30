@@ -127,6 +127,7 @@ A few everyday commands:
 ./fcvm start box && ./fcvm exec box python -V
 ./fcvm cp ./project box:/work && ./fcvm shell box
 ./fcvm snapshot box ready && ./fcvm fork ready -n 3    # three running copies of box, as it is now
+./fcvm status                                          # health check: versions, updates, services, VMs
 ```
 
 ## Documentation
@@ -160,6 +161,7 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ Snapshots of running VMs, and forks in ~150 ms with their own disk, IP, MAC and hostname
 - ✅ Restart policies (`no`, `on-failure`, `unless-stopped`, `always`), recovery after crashes and reboots
 - ✅ JSON output everywhere (`--json`, `inspect`)
+- ✅ Guided setup (`fcvm setup`) and a health check (`fcvm status`) that says what to update and how
 
 **Isolation and control**
 - ✅ A hardware-virtualized VM per workload, with a minimal guest kernel you build yourself

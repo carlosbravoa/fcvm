@@ -159,4 +159,5 @@ else
     note "./fcvm serve                               the web console"
 fi
 note "claude mcp add fcvm -- \"$FCVM_ROOT/fcvm\" mcp    sandboxes for your coding agent"
+note "./fcvm status                              what's installed, current and running"
 note "docs: docs/README.md, starting with docs/use-cases.md"

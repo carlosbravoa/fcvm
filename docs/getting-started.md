@@ -15,8 +15,9 @@ git clone https://github.com/carlosbravoa/fcvm ~/fcvm && cd ~/fcvm && ./fcvm set
 ```
 
 It's safe to run again at any time (for example after an update), and
-`./fcvm setup -y` takes the default answer everywhere. The rest of this page
-covers the same steps by hand.
+`./fcvm setup -y` takes the default answer everywhere. Afterwards,
+`./fcvm status` shows the state of everything at a glance. The rest of this
+page covers the same steps by hand.
 
 - [Requirements](#requirements)
 - [1. Host setup](#1-host-setup)
@@ -196,6 +197,16 @@ Outside it:
 - the service and helper settings in `/etc/fcvm`.
 
 ## Updating
+
+`./fcvm status` tells you what's out of date and the command to fix it:
+- a newer kernel or Firecracker release;
+- a kernel config or initramfs that changed since the build;
+- a jailer helper or boot-time network script that no longer matches your
+  checkout;
+- a service running older code;
+- VMs still running an older kernel or initramfs.
+
+By hand:
 
 ```sh
 git pull

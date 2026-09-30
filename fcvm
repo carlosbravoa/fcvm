@@ -10,6 +10,8 @@ Disposable, isolated Firecracker microVMs with container ergonomics.
 Setup:
   setup [-y]                 guided setup: checks every step below, asks, runs what's missing
                              (-y: default answers). Safe to re-run
+  status [--offline]         health check: components and their versions (kernel, Firecracker,
+                             ...), what needs updating or re-installing, services, VMs, images
 
 Host (need sudo):
   host-setup                 install build/runtime packages, check KVM access
@@ -85,6 +87,7 @@ EOF
 cmd=${1:-help}; shift || true
 case $cmd in
     setup)              exec "$FCVM_ROOT/lib/setup.sh" "$@" ;;
+    status)             exec "$FCVM_ROOT/lib/status.sh" "$@" ;;
     host-setup)         exec "$FCVM_ROOT/lib/host-setup.sh" "$@" ;;
     net-up|net-down)    exec "$FCVM_ROOT/lib/net.sh" "${cmd#net-}" "$@" ;;
     jail-setup)         exec "$FCVM_ROOT/lib/jail-setup.sh" "$@" ;;

@@ -56,6 +56,19 @@ lock_vm() {
 }
 unlock_vm() { exec {VM_LOCK}>&- {VM_LOCK}</dev/null; VM_LOCKED=""; }
 
+# Unix socket paths are limited to 108 bytes (107 + NUL), and the longest one
+# a VM gets is vms/<vm>/vsock.sock_100NN. Checked up front, because Firecracker
+# only says "path must be shorter than SUN_LEN".
+sock_room() {
+    local p="$VMS_DIR/$1/vsock.sock_10099"
+    [ ${#p} -le 107 ] && return 0
+    local room=$(( 107 - ${#VMS_DIR} - 18 ))
+    if [ $room -ge 1 ]; then
+        die "the path to VM '$1' is too long for its sockets (${#p} bytes; Linux allows 107): use a name of at most $room characters, or move fcvm to a shorter directory"
+    fi
+    die "fcvm's directory is too long for VM sockets (${#p} bytes; Linux allows 107): move it somewhere shorter, e.g. ~/fcvm"
+}
+
 RESTART_POLICIES="no on-failure unless-stopped always"
 valid_restart() { [[ " $RESTART_POLICIES " == *" $1 "* ]] || die "--restart wants one of: $RESTART_POLICIES"; }
 
@@ -149,6 +162,7 @@ create() {
         esac
     done
     [[ $vm =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid VM name '$vm'"
+    sock_room "$vm"
     lock_vm "$vm"
     vm_exists "$vm" && die "VM '$vm' already exists"
     [ "$restart" = no ] || [ -z "${EPHEMERAL:-}" ] || die "--restart doesn't apply to throwaway VMs (fcvm run); use create"
@@ -311,6 +325,7 @@ start() {
     vm_running "$vm" && die "VM '$vm' is already running (pid $(vm_pid "$vm"))"
     rm -f "$VMS_DIR/$vm/stopped" "$VMS_DIR/$vm/resume"
     [ -x "$FIRECRACKER" ] || die "firecracker not installed (run: ./fcvm firecracker)"
+    sock_room "$vm"
     local kernel type vcpus mem image
     DIR=$(vm_dir "$vm")
     kernel=$(default_kernel)
@@ -1001,6 +1016,7 @@ snapshot_create() {
 fork_one() {
     local snap=$1 vm=$2 sdir=$SNAPSHOTS_DIR/$1 dir disk drive mode mac="" gw="" tap="" t0 i pid
     dir=$(vm_dir "$vm")
+    sock_room "$vm"
     lock_vm "$vm"
     vm_exists "$vm" && die "VM '$vm' already exists"
     if [ "$(jq -r '.jail // false' "$sdir/meta.json")" = true ]; then

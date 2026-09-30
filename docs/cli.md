@@ -21,7 +21,8 @@ These use sudo.
 
 | command | what it does |
 |---|---|
-| `host-setup` | installs build and runtime packages, checks `/dev/kvm` access, sets up a subuid range |
+| `setup [-y]` | the guided setup: checks every step below (plus `firecracker`, `kernel`, and optionally `base`), asks before the optional ones, runs what's missing, and boots a test VM. Safe to re-run. `-y` takes the default answers |
+| `host-setup [--check]` | installs build and runtime packages, checks `/dev/kvm` access, sets up a subuid range. `--check` only reports what's missing |
 | `net-up`, `net-down` | creates (or removes) the bridges `fcbr0` (NAT) and `fcbr1` (restricted), 64 taps each, and the firewall rules. Needed after every reboot, unless the service is installed |
 | `jail-setup [--remove]` | installs (or removes) `fcvm-jaild`, the root helper that runs VMs under the Firecracker jailer. Re-run after updating fcvm or Firecracker |
 | `service install [--port N]`, `service remove`, `service status` | runs fcvm at boot: the network, then `fcvm serve` as you (console, API, restart policies). `status` needs no sudo and prints the console URL and API token |

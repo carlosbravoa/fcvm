@@ -78,16 +78,37 @@ Linux with KVM), or a way to run desktop GUIs.
 
 ## Quick start
 
-From a fresh clone to a shell in a microVM:
+```sh
+git clone https://github.com/carlosbravoa/fcvm ~/fcvm && cd ~/fcvm && ./fcvm setup
+```
+
+`fcvm setup` is a guided, interactive setup that takes about four minutes
+on a fresh machine:
+- **It checks every step first**, skips what's already done, and asks
+  before anything optional: running at boot, the jailer, the Ubuntu image.
+- **The sudo steps come first**, so you only need to be around for the
+  first minute.
+- **It ends by booting a test VM.**
+
+It's safe to re-run, and `-y` accepts the defaults. Then:
+
+```sh
+./fcvm run alpine-latest          # a shell in a throwaway VM (setup imported alpine); `exit` deletes it
+./fcvm import python:3.13-slim    # any OCI image; becomes the fcvm image "python-3.13-slim"
+```
+
+<details>
+<summary>The same, step by step</summary>
 
 ```sh
 ./fcvm host-setup            # packages and /dev/kvm access (sudo, once)
 ./fcvm net-up                # bridges, taps, NAT and isolation rules (sudo; `service install` makes it permanent)
 ./fcvm firecracker           # download Firecracker into bin/
 ./fcvm kernel                # build the guest kernel from kernel.org (a few minutes, once)
-./fcvm import alpine:latest  # any OCI image; becomes the fcvm image "alpine-latest"
-./fcvm run alpine-latest     # a shell in a throwaway VM; `exit` stops and deletes it
+./fcvm import alpine:latest  # a first image
 ```
+
+</details>
 
 Then pick how you want to drive it:
 
@@ -95,8 +116,8 @@ Then pick how you want to drive it:
 |---|---|
 | **Browser console:** instances, images, launch forms, live charts, terminals, files | `./fcvm serve`, then open the printed URL |
 | **Your coding agent:** sandboxes as MCP tools (Claude Code shown; any MCP client works) | `claude mcp add fcvm -- "$PWD/fcvm" mcp` |
-| **Keep it running:** network and console at boot; VMs with a restart policy come back | `./fcvm service install` |
-| **Stronger isolation:** run VMs under the Firecracker jailer | `./fcvm jail-setup`, then `--jail` |
+| **Keep it running:** network and console at boot; VMs with a restart policy come back | `./fcvm service install` (offered by `setup`) |
+| **Stronger isolation:** run VMs under the Firecracker jailer | `./fcvm jail-setup` (offered by `setup`), then `--jail` |
 
 A few everyday commands:
 

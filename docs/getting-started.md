@@ -1,8 +1,22 @@
 # Getting started
 
-This page takes you from a fresh clone to a working setup, one step at a
-time, and explains what each step does. The README's quick start is the
-same path without the explanations.
+This page takes you from a fresh clone to a working setup, and explains
+what each step does.
+
+**The short way.** `./fcvm setup` walks through the steps below
+interactively:
+- it checks what's already done, and skips it;
+- it asks before each optional step;
+- it does the sudo steps first, so the long kernel build runs unattended;
+- it ends by booting a test VM.
+
+```sh
+git clone https://github.com/carlosbravoa/fcvm ~/fcvm && cd ~/fcvm && ./fcvm setup
+```
+
+It's safe to run again at any time (for example after an update), and
+`./fcvm setup -y` takes the default answer everywhere. The rest of this page
+covers the same steps by hand.
 
 - [Requirements](#requirements)
 - [1. Host setup](#1-host-setup)
@@ -36,7 +50,10 @@ same path without the explanations.
     layer.
 
 fcvm lives entirely in its checkout directory: binaries, images, VMs and
-state. Clone it where you have space.
+state. Clone it where you have space, at a reasonably short path such as
+`~/fcvm`. VMs keep Unix sockets under `vms/`, and Linux limits socket paths
+to 107 bytes, so a deeply nested checkout leaves little room for VM names.
+fcvm tells you if a path is too long.
 
 ## 1. Host setup
 

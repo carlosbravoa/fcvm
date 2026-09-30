@@ -7,6 +7,10 @@ usage() {
 usage: fcvm <command> [args]
 Disposable, isolated Firecracker microVMs with container ergonomics.
 
+Setup:
+  setup [-y]                 guided setup: checks every step below, asks, runs what's missing
+                             (-y: default answers). Safe to re-run
+
 Host (need sudo):
   host-setup                 install build/runtime packages, check KVM access
   net-up | net-down          create/remove bridges, $NET_TAPS tap devices each, NAT and egress rules
@@ -80,6 +84,7 @@ EOF
 
 cmd=${1:-help}; shift || true
 case $cmd in
+    setup)              exec "$FCVM_ROOT/lib/setup.sh" "$@" ;;
     host-setup)         exec "$FCVM_ROOT/lib/host-setup.sh" "$@" ;;
     net-up|net-down)    exec "$FCVM_ROOT/lib/net.sh" "${cmd#net-}" "$@" ;;
     jail-setup)         exec "$FCVM_ROOT/lib/jail-setup.sh" "$@" ;;

@@ -4,7 +4,13 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
-## Unreleased
+## 0.5.1 (2026-09-30)
+
+Upgrade with `fcvm upgrade` (or re-run the installer). Then:
+- run `fcvm service install` and `fcvm jail-setup` if you use them, to
+  refresh their root-owned copies (`fcvm status` lists what's needed);
+- restart running VMs to pick up the new init, which is rebuilt
+  automatically.
 
 **Tests and CI**
 - `tests/run`: lint (syntax of every script, shellcheck, docs links), unit

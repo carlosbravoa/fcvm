@@ -1,7 +1,7 @@
 # Roadmap
 
-What fcvm could do next, and what has been done from earlier plans. Sections
-of the [README](../README.md) are referred to by name, like "Jailed VMs".
+What fcvm could do next, and what has been done from earlier plans. The
+[documentation index](README.md) covers what exists today.
 
 Priorities come from a review of fcvm from two angles: as a sandbox for
 agentic development (compared with Multipass), and as something an enterprise

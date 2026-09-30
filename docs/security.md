@@ -2,7 +2,9 @@
 
 This document describes what separates an fcvm guest from your host and from
 other guests, how each layer works, how to configure it, and how to check
-that it is in place. The README has the short version; this is the reference.
+that it is in place. [Networking](networking.md) and
+[Running VMs](vms.md#jailed-vms) have the short, practical version; this is
+the reference.
 
 - [Threat model](#threat-model)
 - [Layers at a glance](#layers-at-a-glance)

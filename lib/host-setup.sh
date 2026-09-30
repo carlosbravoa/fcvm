@@ -7,8 +7,8 @@ PKGS=(
     build-essential flex bison bc libelf-dev libssl-dev cpio
     # rootfs build (rootless via user namespaces)
     mmdebstrap uidmap e2fsprogs
-    # runtime / tooling
-    curl jq iproute2 nftables openssh-client
+    # runtime / tooling (acl: jailed VMs, fcvm jail-setup)
+    python3 curl jq iproute2 nftables openssh-client acl
 )
 log "installing: ${PKGS[*]}"
 sudo apt-get update
@@ -22,4 +22,4 @@ else
 fi
 
 grep -q "^$USER:" /etc/subuid || { log "adding subuid/subgid range for $USER"; sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"; }
-log "done. Next: ./fcvm net-up && ./fcvm all"
+log "done. Next: ./fcvm net-up && ./fcvm firecracker && ./fcvm kernel (see README, Quick start)"

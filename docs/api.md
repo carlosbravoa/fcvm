@@ -146,8 +146,8 @@ Slow operations (image imports, builds) run as jobs:
 
 ## Build projects
 
-A build project is a directory with a Dockerfile (see "Building images" in
-the README). It lives under `builds/NAME/`, or is an existing directory
+A build project is a directory with a Dockerfile (see
+[Building images](images.md#building-images)). It lives under `builds/NAME/`, or is an existing directory
 registered by path.
 
 | method, path | body / query | does |

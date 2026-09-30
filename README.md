@@ -1,3 +1,5 @@
+<p align="center"><img src="lib/web/static/favicon.svg" alt="fcvm: a flame inside small walls" width="112"></p>
+
 # fcvm: disposable, isolated microVMs with container ergonomics, for people and agents
 
 `fcvm` runs workloads in [Firecracker](https://firecracker-microvm.github.io/)

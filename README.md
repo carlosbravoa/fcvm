@@ -158,3 +158,10 @@ The [documentation index](docs/README.md) describes each page.
 **Not (yet)**: multi-host orchestration, remote multi-user access, IPv6
 guests, disk and network rate limits, aarch64. See the
 [roadmap](docs/roadmap.md).
+
+## License
+
+fcvm is licensed under the [Apache License 2.0](LICENSE). It downloads
+Firecracker (Apache 2.0) and builds the Linux kernel (GPL-2.0) on your
+machine, but doesn't redistribute either. The vendored xterm.js is MIT
+licensed ([NOTICE](NOTICE)).

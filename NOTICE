@@ -1,0 +1,10 @@
+fcvm
+Copyright 2026 Carlos Bravo
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It includes xterm.js and its fit addon (lib/web/static/vendor/):
+  Copyright (c) 2017-2019, The xterm.js authors
+  Copyright (c) 2014-2016, SourceLair Private Company
+  Copyright (c) 2012-2013, Christopher Jeffrey
+licensed under the MIT License (see lib/web/static/vendor/LICENSE.xterm).

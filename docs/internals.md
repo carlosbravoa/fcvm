@@ -141,6 +141,11 @@ Learned the hard way on 7.2 with Firecracker 1.17:
 - **`SERIAL_8250_NR_UARTS=1`.** Firecracker has a single UART.
 - **VMGenID** is on, so forks reseed their RNG.
 - **9P** (`NET_9P`, `NET_9P_FD`, `9P_FS`) is on, for host directories.
+- **nftables rejects and the bridge family** (`NFT_REJECT`,
+  `NF_TABLES_BRIDGE`) are on, so fcvm's own `net-up` works inside a VM (for
+  testing fcvm in fcvm). Firecracker doesn't expose nested virtualization,
+  so VMs can't boot VMs of their own; test the whole setup in a QEMU-based
+  VM (such as Multipass) instead.
 - **After moving to a new kernel series**, check the build's report of
   options that didn't make it into the final `.config`.
 
@@ -385,6 +390,14 @@ processes whose command line is still fcvm's.
   restart policy, with backoff.
 - **It uses the CLI** for every action, taking the same per-VM lock as
   your commands.
+
+**Starting VMs through the daemon.** With the service running, `start`,
+`run -d` and `fork` post to the daemon's API instead of launching the VM
+themselves. The VM then belongs to `fcvm.service`'s cgroup rather than the
+caller's login-session scope. At shutdown, systemd kills session scopes in
+parallel with stopping services, so only VMs in the service's cgroup can be
+stopped cleanly by `fcvm _shutdown`. The daemon's own fcvm commands carry
+`FCVM_DAEMON=1`, so they launch locally instead of calling back.
 
 ## Code layout
 

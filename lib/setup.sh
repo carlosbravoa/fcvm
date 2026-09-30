@@ -31,8 +31,13 @@ ask() {
 SUDO_OK=0
 sudo_once() {   # one password prompt up front, instead of one per step
     [ $SUDO_OK = 1 ] && return 0
-    note "(some steps need sudo)"
-    sudo -v && SUDO_OK=1
+    # Passwordless sudo first: `sudo -v` can still demand a password there
+    # (sudoers' verifypw), and fails without a terminal.
+    if ! sudo -n true 2>/dev/null; then
+        note "(this step needs sudo)"
+        sudo -v || die "sudo is needed for this step; re-run ./fcvm setup from a terminal where sudo works"
+    fi
+    SUDO_OK=1
 }
 RELOGIN=0
 
@@ -68,8 +73,23 @@ else
     "$FCVM_ROOT/lib/fetch-firecracker.sh"
 fi
 
-# --- 3. the network (now, or at every boot) ---------------------------------------------
-bold "3/7  Network"
+# --- 3. the jailer (before the service, which orders itself after it) (optional) -----------------------------------------------------
+bold "3/7  Jailer (stronger isolation, optional)"
+if [ -S /run/fcvm/jaild.sock ]; then
+    ok "fcvm-jaild is running"
+else
+    note "Runs each VM's Firecracker as its own unprivileged user, in a chroot, with cgroup"
+    note "limits and its own network namespace. Recommended for untrusted code and for agents."
+    if ask "Install the jailer helper (a small root service)?" y; then
+        sudo_once
+        "$FCVM_ROOT/lib/jail-setup.sh"
+    else
+        note "skipped; ./fcvm jail-setup any time"
+    fi
+fi
+
+# --- 4. the network (now, or at every boot) ---------------------------------------------
+bold "4/7  Network"
 if systemctl is-enabled -q fcvm-net.service 2>/dev/null; then
     ok "set up at every boot by the fcvm service"
     systemctl is-active -q fcvm-net.service || { sudo_once; sudo systemctl start fcvm-net.service; }
@@ -85,21 +105,6 @@ else
         sudo_once
         "$FCVM_ROOT/lib/net.sh" up
         note "the network lasts until the next reboot; then run ./fcvm net-up (or ./fcvm service install)"
-    fi
-fi
-
-# --- 4. the jailer (optional) -----------------------------------------------------
-bold "4/7  Jailer (stronger isolation, optional)"
-if [ -S /run/fcvm/jaild.sock ]; then
-    ok "fcvm-jaild is running"
-else
-    note "Runs each VM's Firecracker as its own unprivileged user, in a chroot, with cgroup"
-    note "limits and its own network namespace. Recommended for untrusted code and for agents."
-    if ask "Install the jailer helper (a small root service)?" y; then
-        sudo_once
-        "$FCVM_ROOT/lib/jail-setup.sh"
-    else
-        note "skipped; ./fcvm jail-setup any time"
     fi
 fi
 

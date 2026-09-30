@@ -3,11 +3,16 @@
 #   --check   report what's missing and exit 1 if anything is (no sudo)
 . "$(dirname "$0")/common.sh"
 
+# mkfs.ext4 -d <tarball> (every import and build) loads libarchive at runtime;
+# the package was renamed with the 64-bit time_t transition (Ubuntu 24.04+).
+LIBARCHIVE=libarchive13t64
+apt-cache show "$LIBARCHIVE" >/dev/null 2>&1 || LIBARCHIVE=libarchive13
+
 PKGS=(
     # kernel build
     build-essential flex bison bc libelf-dev libssl-dev cpio
     # rootfs build (rootless via user namespaces)
-    mmdebstrap uidmap e2fsprogs
+    mmdebstrap uidmap e2fsprogs "$LIBARCHIVE"
     # runtime / tooling (acl: jailed VMs, fcvm jail-setup)
     python3 curl jq iproute2 nftables openssh-client acl
 )

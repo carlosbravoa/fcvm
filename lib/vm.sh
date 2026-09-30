@@ -69,6 +69,27 @@ sock_room() {
     die "fcvm's directory is too long for VM sockets (${#p} bytes; Linux allows 107): move it somewhere shorter, e.g. ~/fcvm"
 }
 
+# With the fcvm service running, long-lived VMs (start, run -d, fork) are
+# started by its daemon, fcvm serve, through the API. They then live in
+# fcvm.service rather than in this terminal's login session: they survive
+# logout, and at host shutdown the service stops them cleanly before sessions
+# are killed. The daemon marks its own fcvm commands with FCVM_DAEMON.
+use_daemon() {   # (the pid test also covers a daemon older than FCVM_DAEMON)
+    [ -z "${FCVM_DAEMON:-}" ] && [ -f "$VMS_DIR/.serve.json" ] &&
+        [ "$PPID" != "$(jq -r .pid "$VMS_DIR/.serve.json")" ] &&
+        systemctl is-active -q fcvm.service 2>/dev/null
+}
+daemon_api() {   # METHOD PATH [JSON]: prints the reply; 1 = refused (message on stderr), 2 = unreachable
+    local st=$VMS_DIR/.serve.json out code
+    out=$(curl -sS -m 900 -X "$1" -H "Authorization: Bearer $(jq -r .token "$st")" \
+        -H 'Content-Type: application/json' ${3:+-d "$3"} -w '\n%{http_code}' \
+        "http://127.0.0.1:$(jq -r .port "$st")/api/$2" 2>/dev/null) || return 2
+    code=${out##*$'\n'} out=${out%$'\n'*}
+    if [[ $code == 2* ]]; then printf '%s' "$out"; return 0; fi
+    printf '\e[1;31merror:\e[0m %s\n' "$(jq -r '.error // .' <<<"$out" 2>/dev/null || echo "$out")" >&2
+    return 1
+}
+
 RESTART_POLICIES="no on-failure unless-stopped always"
 valid_restart() { [[ " $RESTART_POLICIES " == *" $1 "* ]] || die "--restart wants one of: $RESTART_POLICIES"; }
 
@@ -320,6 +341,17 @@ start() {
         esac
     done
     [ -n "$vm" ] || die "$usage"
+    if [ -n "${VIA_DAEMON:-}" ] && [ -z "${RESTORE:-}" ] && use_daemon; then
+        local reply rc=0
+        reply=$(daemon_api POST "vms/$vm/start") || rc=$?
+        if [ $rc = 0 ]; then
+            [ -n "${QUIET_START:-}" ] || log "running (pid $(jq -r .pid <<<"$reply"), started by the fcvm service). fcvm console $vm | fcvm logs $vm | fcvm stop $vm"
+            if [ $attach = 1 ]; then attach_vm "$vm"; fi
+            return
+        fi
+        [ $rc = 2 ] || exit 1
+        warn "the fcvm service isn't answering; starting '$vm' from this terminal"
+    fi
     lock_vm "$vm"
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" && die "VM '$vm' is already running (pid $(vm_pid "$vm"))"
@@ -629,14 +661,14 @@ run() {
 
     if [ "$type" = app ]; then
         EPHEMERAL=true create "$vm" "$image" "${opts[@]}" ${argv[@]+-- "${argv[@]}"}
-        if [ $bg = 1 ]; then start "$vm"; return; fi
+        if [ $bg = 1 ]; then VIA_DAEMON=1 start "$vm"; return; fi
         QUIET_START=1 start "$vm"
         attach_vm "$vm" all
         return
     fi
 
     EPHEMERAL=true create "$vm" "$image" "${opts[@]}"
-    if [ $bg = 1 ]; then start "$vm"; return; fi
+    if [ $bg = 1 ]; then VIA_DAEMON=1 start "$vm"; return; fi
     QUIET_START=1 start "$vm"
     local rc=0
     if [ ${#argv[@]} -gt 0 ]; then
@@ -1108,6 +1140,14 @@ fork_cmd() {
     [ -f "$SNAPSHOTS_DIR/$snap/meta.json" ] || die "no snapshot '$snap' (see: fcvm snapshot ls)"
     [ "$(jq '.ports | length' "$SNAPSHOTS_DIR/$snap/vm.json")" = 0 ] ||
         warn "published ports aren't carried over to forks (they'd conflict with the source)"
+    if use_daemon; then
+        local reply rc=0
+        reply=$(daemon_api POST "snapshots/$snap/fork" "$(jq -n --arg n "$name" --argjson c "$count" \
+            '{count: $c} + (if $n == "" then {} else {name: $n} end)')") || rc=$?
+        if [ $rc = 0 ]; then jq -r .log <<<"$reply" | sed "/^$/d" >&2; return; fi
+        [ $rc = 2 ] || exit 1
+        warn "the fcvm service isn't answering; forking from this terminal"
+    fi
     local base=${name:-$snap-$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')} i
     if [ "$count" = 1 ]; then
         fork_one "$snap" "$base"
@@ -1395,7 +1435,7 @@ rm_vm() {
 
 case $cmd in
     create)  create "$@" ;;
-    start)   start "$@" ;;
+    start)   VIA_DAEMON=1 start "$@" ;;
     run)     run "$@" ;;
     stop)    stop "$@" ;;
     console) console "$@" ;;

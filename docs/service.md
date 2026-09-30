@@ -9,6 +9,7 @@ stay available, and VMs with a restart policy stay up.
 - [What gets installed](#what-gets-installed)
 - [Restart policies](#restart-policies)
 - [How the supervisor behaves](#how-the-supervisor-behaves)
+- [VMs belong to the service](#vms-belong-to-the-service)
 - [Shutdown and boot](#shutdown-and-boot)
 - [Status, logs and the console URL](#status-logs-and-the-console-url)
 - [Without the service](#without-the-service)
@@ -69,6 +70,20 @@ they stop.
   the host went down under it.
 - **One change at a time.** Your commands and the supervisor take a per-VM
   lock, so they never change the same VM at once.
+
+## VMs belong to the service
+
+With the service running, `fcvm start`, `fcvm run -d` and `fcvm fork` hand
+the start to the service through its API. You see the same output, but the
+VM runs under `fcvm.service` instead of your terminal's login session:
+- **Logout.** It survives your logout, even on systems that kill a
+  session's processes when you log out.
+- **Shutdown.** At host shutdown, the service stops it cleanly before
+  login sessions are killed.
+
+An attached `fcvm run` stays in your terminal: that VM is deleted when it
+ends anyway. If the service doesn't answer, commands fall back to starting
+the VM themselves, with a warning.
 
 ## Shutdown and boot
 

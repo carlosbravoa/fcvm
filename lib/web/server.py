@@ -990,6 +990,7 @@ def main():
     global R_PREFIX
     R_PREFIX = args.r_prefix
     os.makedirs(VMS, exist_ok=True)
+    os.environ["FCVM_DAEMON"] = "1"   # our own fcvm commands run locally, never back through us
     try:
         asyncio.run(App(args.port, args.service).serve())
     except KeyboardInterrupt:

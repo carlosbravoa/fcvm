@@ -896,6 +896,27 @@ static int pump(int fd, int conn, char t)
     return n < 0 && (errno == EAGAIN || errno == EINTR) ? 0 : -1;
 }
 
+/* Point /etc/hosts' 127.0.1.1 line at HOST (adding it if missing), so the
+ * VM's own name resolves (sudo complains otherwise). The rest is kept. */
+static void hosts_entry(const char *host)
+{
+    char *h = slurp("/etc/hosts", NULL), *out = NULL;
+    char *line = h ? strstr(h, "127.0.1.1") : NULL;
+    int n;
+    if (line && (line == h || line[-1] == '\n')) {
+        *line = '\0';
+        char *rest = strchr(line + 1, '\n');
+        n = asprintf(&out, "%s127.0.1.1\t%s\n%s", h, host, rest ? rest + 1 : "");
+    } else {
+        size_t len = h ? strlen(h) : 0;
+        n = asprintf(&out, "%s%s127.0.1.1\t%s\n", h ? h : "", len && h[len - 1] != '\n' ? "\n" : "", host);
+    }
+    if (n >= 0)
+        spit("/etc/hosts", out);
+    free(out);
+    free(h);
+}
+
 /*
  * Re-identify a VM restored from a snapshot (fcvm fork): new address, MAC and
  * hostname, applied with plain ioctls so it works in any image. Fields:
@@ -915,14 +936,7 @@ static int netconf(char **f, char *err, size_t errlen)
             spit("/etc/hostname", hosts);
         }
         free(cur);
-        char *h = slurp("/etc/hosts", NULL), *line = h ? strstr(h, "127.0.1.1") : NULL;
-        if (line) { /* rewrite the 127.0.1.1 line, keep the rest */
-            *line = '\0';
-            char *rest = strchr(line + 1, '\n');
-            snprintf(hosts, sizeof(hosts), "%s127.0.1.1\t%s\n%s", h, host, rest ? rest + 1 : "");
-            spit("/etc/hosts", hosts);
-        }
-        free(h);
+        hosts_entry(host);
     }
     if (!*ip)
         return 0;
@@ -1398,6 +1412,9 @@ int main(int argc, char **argv_)
     }
     if (exec) {
         mount_shares("0:0"); /* system images: files appear owned by root */
+        char *host = karg("systemd.hostname");
+        if (host && *host)
+            hosts_entry(host);
         char *init_argv[] = {exec, NULL};
         execv(exec, init_argv);
         msg("exec %s: %s", exec, strerror(errno));

@@ -7,7 +7,7 @@ fcvm serve            # prints http://127.0.0.1:8686/?token=...  (open it in a b
 With the [fcvm service](service.md) installed, the console is always
 running. `fcvm service status` prints its URL.
 
-![Dashboard](img/console-dashboard.png)
+![Instances: container and system images, restricted networks, forks from a snapshot](img/console-instances.png)
 
 A cloud-console-like UI for this host:
 - **Dashboard:** host CPU, memory and disk; VM memory actually in use vs

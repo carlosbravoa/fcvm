@@ -65,7 +65,7 @@ Linux with KVM), or a way to run desktop GUIs.
 - **Small and auditable.** Bash and standard-library Python, a small static
   init in C, and a guest kernel you build yourself from kernel.org sources.
 
-![The fcvm web console: dashboard with host and VM resource use](docs/img/console-dashboard.png)
+![The fcvm web console: running microVMs, from container and system images, with restricted networks and forks](docs/img/console-instances.png)
 
 ## Requirements
 

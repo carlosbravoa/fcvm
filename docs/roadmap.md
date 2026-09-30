@@ -202,8 +202,28 @@ shared images. Keys should be injected per VM at boot instead.
 
 - ✅ `fc-init` boots from an initramfs instead of living in every image, so
   upgrading the init or agent no longer means rebuilding images.
-- A test suite and CI, covering failure paths, concurrency and host reboots.
-  The bash `set -e` pitfalls hit during development show why.
+- ✅ A test suite and CI (see [CONTRIBUTING](../CONTRIBUTING.md)):
+  - `tests/run`: lint (with shellcheck and a docs link checker), 48 unit
+    tests, and 38 integration tests on real VMs, in about 2 minutes;
+  - `tests/fresh-machine.sh`: install, setup, the suite and a real reboot on
+    a fresh Ubuntu in Multipass;
+  - GitHub Actions: lint and unit tests, and integration tests on a fresh
+    runner with KVM.
+
+  Its first runs found real bugs:
+  - volumes were left needing journal recovery after a VM stopped, so a
+    read-only mount of them failed;
+  - snapshots couldn't be restored on nested hosts (cloud VMs, CI);
+  - `status` stopped halfway with nothing cached;
+  - Docker's FORWARD policy cut VMs off. Still open: failure-path and
+  concurrency tests (killing things mid-operation), and running the reboot
+  test in CI. Groundwork from 0.5.0:
+  - `fcvm setup -y` and the installer's `--source` make a fresh machine
+    scriptable end to end;
+  - manual runs in fresh Multipass VMs (QEMU, nested KVM), including real
+    reboots, found six bugs that a developer machine never showed;
+  - fcvm's own `net-up` runs inside an fcvm VM, since the guest kernel has
+    the nftables features it needs.
 - Exec agent protocol: ◐ requests carry a version tag (`fcvm2`), and a
   mismatch fails with a clear error. Still open: version negotiation and a
   compatibility policy, so newer hosts can talk to VMs booted with an older

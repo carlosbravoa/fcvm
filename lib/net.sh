@@ -30,6 +30,11 @@ action=${1:?up|down}
 
 ufw_active() { command -v ufw >/dev/null && sudo ufw status | grep -q '^Status: active'; }
 
+# Docker sets the iptables FORWARD policy to DROP, which would cut full-network
+# VMs off; its DOCKER-USER chain runs first and is the place for exceptions.
+DOCKER_RULES=("-i $NET_BRIDGE -j ACCEPT" "-o $NET_BRIDGE -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT")
+docker_chain() { command -v iptables >/dev/null && sudo iptables -n -L DOCKER-USER >/dev/null 2>&1; }
+
 bridge_up() {   # bridge prefix tap-prefix isolate
     local br=$1 prefix=$2 tp=$3 isolate=$4 i tap
     if ! ip link show "$br" &>/dev/null; then
@@ -128,6 +133,14 @@ EOF
         sudo ufw allow in on "$NET_R_BRIDGE" to "$NET_R_PREFIX.1" port "$EGRESS_PORT" proto tcp >/dev/null
         log "ufw: allowed forwarding from $NET_BRIDGE$([ "$NET_HOST_ACCESS" = 1 ] && echo " and input from it"), and $NET_R_BRIDGE to the egress proxy"
     fi
+    if docker_chain; then
+        local r
+        for r in "${DOCKER_RULES[@]}"; do
+            # shellcheck disable=SC2086
+            sudo iptables -C DOCKER-USER $r 2>/dev/null || sudo iptables -I DOCKER-USER $r
+        done
+        log "docker: allowed forwarding for $NET_BRIDGE (DOCKER-USER chain)"
+    fi
 }
 
 down() {
@@ -146,6 +159,11 @@ down() {
         sudo ufw route delete allow in on "$NET_BRIDGE" >/dev/null || true
         sudo ufw delete allow in on "$NET_BRIDGE" >/dev/null || true
         sudo ufw delete allow in on "$NET_R_BRIDGE" to "$NET_R_PREFIX.1" port "$EGRESS_PORT" proto tcp >/dev/null || true
+    fi
+    if docker_chain; then
+        local r
+        # shellcheck disable=SC2086
+        for r in "${DOCKER_RULES[@]}"; do sudo iptables -D DOCKER-USER $r 2>/dev/null || true; done
     fi
     log "network removed"
 }

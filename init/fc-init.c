@@ -65,6 +65,7 @@
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CONF "/.fcvm/"
@@ -184,7 +185,15 @@ static int mount_dev(const char *dev, const char *dir, unsigned long flags)
         usleep(20000);
     mkdir_p(dir, 0755);
     if (mount(dev, dir, "ext4", flags, NULL) < 0) {
-        msg("mount %s on %s: %s", dev, dir, strerror(errno));
+        int err = errno;
+        /* A read-only disk whose journal needs replaying (its last user
+         * crashed) can't be recovered in place: mount it without replaying,
+         * rather than failing the boot. The newest writes may be missing. */
+        if ((flags & MS_RDONLY) && mount(dev, dir, "ext4", flags, "norecovery") == 0) {
+            msg("%s needs journal recovery, which a read-only disk can't do; mounted without it", dev);
+            return 0;
+        }
+        msg("mount %s on %s: %s", dev, dir, strerror(err));
         return -1;
     }
     return 0;
@@ -804,12 +813,41 @@ static pid_t start_main(char **argv, char **env, const char *workdir,
     return -1;
 }
 
+/* Unmount ext4 filesystems, newest first, so their journals close cleanly: a
+ * volume left "needs recovery" couldn't be mounted read-only by the next VM.
+ * What can't be unmounted (the disks under the root overlay) is remounted
+ * read-only instead, which also flushes and closes the journal. */
+static void unmount_disks(void)
+{
+    mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL);   /* the overlay root first, */
+    char *m = slurp("/proc/self/mounts", NULL);                  /* so the disks under it can close */
+    if (!m)
+        return;
+    char *dirs[64];
+    int n = 0;
+    for (char *line = strtok(m, "\n"); line && n < 64; line = strtok(NULL, "\n")) {
+        char dev[256], dir[1024], type[64];
+        if (sscanf(line, "%255s %1023s %63s", dev, dir, type) == 3 && !strcmp(type, "ext4"))
+            dirs[n++] = strdup(dir);
+    }
+    for (int i = n - 1; i >= 0; i--) {
+        if (umount2(dirs[i], 0) < 0)
+            mount(NULL, dirs[i], NULL, MS_REMOUNT | MS_RDONLY, NULL);
+        free(dirs[i]);
+    }
+    free(m);
+}
+
 static void shutdown_vm(void)
 {
     kill(-1, SIGTERM);
     for (int i = 0; i < 20 && waitpid(-1, NULL, WNOHANG) >= 0; i++)
         usleep(100000);
     kill(-1, SIGKILL);
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        ;
+    sync();
+    unmount_disks();
     sync();
     reboot(RB_AUTOBOOT); /* reboot=k: Firecracker exits */
 }
@@ -920,12 +958,22 @@ static void hosts_entry(const char *host)
 /*
  * Re-identify a VM restored from a snapshot (fcvm fork): new address, MAC and
  * hostname, applied with plain ioctls so it works in any image. Fields:
- * "fcvm2", ip, prefix length, gateway, mac, hostname (ip "" = no network).
+ * "fcvm2", ip, prefix length, gateway, mac, hostname (ip "" = no network),
+ * and optionally the host's time ("SECONDS.NANOSECONDS"): the guest clock
+ * stopped at the snapshot, and Firecracker's own fix for that (clock_realtime)
+ * needs a TSC-clocked host, which nested hosts such as cloud VMs aren't.
  */
 static int netconf(char **f, char *err, size_t errlen)
 {
     const char *ip = f[1], *gw = f[3], *mac = f[4], *host = f[5];
     int prefix = atoi(f[2]);
+    if (f[6] && *f[6]) {
+        char *end;
+        struct timespec ts = {.tv_sec = strtoll(f[6], &end, 10)};
+        if (*end == '.')
+            ts.tv_nsec = strtol(end + 1, NULL, 10);
+        clock_settime(CLOCK_REALTIME, &ts);
+    }
     if (*host) {
         char old[256] = "", hosts[1024];
         gethostname(old, sizeof(old));

@@ -525,7 +525,7 @@ start() {
     if [ -n "${RESTORE:-}" ]; then   # fork of a jailed snapshot: same chroot paths, same tap0
         if ! fc_api "$DIR/fc.sock" PUT /snapshot/load '{"snapshot_path": "/snap.vmstate",
                 "mem_backend": {"backend_type": "File", "backend_path": "/snap.mem"},
-                "clock_realtime": true, "resume_vm": true}'; then
+                "resume_vm": true}'; then
             jaild kill "$vm" >/dev/null || true
             die "restore of '$RESTORE' failed"
         fi
@@ -1107,7 +1107,7 @@ fork_one() {
     local load
     load=$(jq -n --arg s "$sdir/vmstate" --arg m "$sdir/mem" --arg tap "$tap" --arg vsock "$dir/vsock.sock" '
         {snapshot_path: $s, mem_backend: {backend_type: "File", backend_path: $m},
-         vsock_override: {uds_path: $vsock}, clock_realtime: true, resume_vm: false}
+         vsock_override: {uds_path: $vsock}, resume_vm: false}
         + (if $tap != "" then {network_overrides: [{iface_id: "eth0", host_dev_name: $tap}]} else {} end)')
     if ! fc_api "$dir/fc.sock" PUT /snapshot/load "$load" ||
        ! fc_api "$dir/fc.sock" PATCH "/drives/$drive" "$(jq -n --arg id "$drive" --arg p "$dir/$disk" '{drive_id: $id, path_on_host: $p}')" ||

@@ -32,7 +32,8 @@ fcvm rm try-2 && fcvm fork ready try-2   # roll back: a fresh copy of the prepar
   restricted with the same allowlist, or none). Published ports aren't
   carried over, since they would conflict with the source.
 - **Hostname:** its own, set after restore by the exec agent over vsock.
-- **Clock:** the guest clock is advanced by the time since the snapshot.
+- **Clock:** set from the host's clock right after the restore (by the exec
+  agent), so it's current, whatever time has passed since the snapshot.
 - **Randomness:** the guest kernel reseeds its RNG on restore (VMGenID), so
   forks don't share random state. User-space programs that keep their own
   random state in memory (a PRNG seeded before the snapshot) will still

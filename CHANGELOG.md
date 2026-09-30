@@ -4,6 +4,34 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## Unreleased
+
+**Tests and CI**
+- `tests/run`: lint (syntax of every script, shellcheck, docs links), unit
+  tests (no KVM needed), and integration tests with real VMs. The
+  integration tests only touch `fcvmtest-*` objects.
+- `tests/fresh-machine.sh`: the whole thing on a fresh Ubuntu in Multipass,
+  including a reboot.
+- GitHub Actions runs lint, unit and integration tests on every push.
+  See CONTRIBUTING.md.
+
+**Fixes**
+- VMs unmount their disks cleanly at shutdown. A volume used read-write
+  used to be left needing journal recovery, so the next VM that mounted it
+  read-only failed to boot. Read-only mounts of such a disk now also fall
+  back to skipping recovery instead of halting.
+- Snapshots and forks work on nested hosts (cloud VMs, Multipass, CI
+  runners). Restores relied on Firecracker's `clock_realtime`, which needs a
+  TSC-clocked host, so every fork failed there. Forks now get the host's
+  time from the exec agent instead.
+- `fcvm status` no longer stops halfway when no version information is
+  cached (offline, on a new machine).
+- Errors from commands run by the fcvm service keep their detail, e.g.
+  Firecracker's own message, instead of just the last line.
+- Hosts with Docker: Docker's FORWARD policy (DROP) no longer cuts
+  full-network VMs off. `net-up` adds exceptions to Docker's `DOCKER-USER`
+  chain, and the boot-time network unit starts after Docker.
+
 ## 0.5.0 (2026-09-30)
 
 The first versioned release. Earlier work, unversioned, is summarized here.

@@ -12,6 +12,7 @@ this page and how to verify them.
 - [Isolation defaults](#isolation-defaults)
 - [Addresses and reaching VMs](#addresses-and-reaching-vms)
 - [Published ports](#published-ports)
+- [Docker, ufw and other firewalls](#docker-ufw-and-other-firewalls)
 - [Changing subnets and limits](#changing-subnets-and-limits)
 
 ## Network modes
@@ -134,6 +135,19 @@ echo 'NET_HOST_ACCESS=1' >> fcvm.conf && fcvm net-up      # or: fcvm service ins
 
 `-p HOST:GUEST` listens on `127.0.0.1`. Use `-p 0.0.0.0:HOST:GUEST` to
 publish on every interface. See [Running VMs](vms.md#published-ports).
+
+## Docker, ufw and other firewalls
+
+- **ufw.** When ufw is active, `net-up` adds the rules fcvm needs:
+  forwarding from `fcbr0`, and the egress proxy's port on `fcbr1`.
+- **Docker.** Docker sets the firewall's forwarding policy to DROP, which
+  would cut full-network VMs off from the internet. When Docker is present,
+  `net-up` adds two rules to Docker's `DOCKER-USER` chain (the place Docker
+  reserves for exceptions): forwarding from `fcbr0`, and replies to it. The
+  boot-time network unit orders itself after Docker so the chain exists.
+- **Other firewalls.** With another firewall that drops forwarded traffic,
+  allow forwarding from `fcbr0` and replies to it, and input on `fcbr1` to
+  the egress proxy port.
 
 ## Changing subnets and limits
 

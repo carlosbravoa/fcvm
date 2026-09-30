@@ -46,7 +46,7 @@ install_units() {
     sudo tee "$NET_UNIT" >/dev/null <<EOF
 [Unit]
 Description=fcvm host network (bridges, taps, isolation rules)
-After=network.target ufw.service
+After=network.target ufw.service docker.service
 Before=fcvm.service fcvm-jaild.service
 
 [Service]

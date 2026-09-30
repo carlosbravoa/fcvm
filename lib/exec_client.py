@@ -111,7 +111,9 @@ def main():
     if args.netconf:
         addr, gw, mac, host = (args.netconf.split(",") + ["", "", "", ""])[:4]
         ip, _, prefix = addr.partition("/")
-        sock.sendall(frame(b"N", b"\0".join(f.encode() for f in ["fcvm2", ip, prefix or "24", gw, mac, host]) + b"\0"))
+        now = time.time_ns()   # the guest's clock stopped at the snapshot; set it from ours
+        fields = ["fcvm2", ip, prefix or "24", gw, mac, host, f"{now // 10**9}.{now % 10**9:09d}"]
+        sock.sendall(frame(b"N", b"\0".join(f.encode() for f in fields) + b"\0"))
         buf = b""
         while chunk := sock.recv(4096):
             buf += chunk

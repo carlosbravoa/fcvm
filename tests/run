@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# tests/run [lint] [unit] [integration] [-k PATTERN] [-v]
+#
+#   lint         syntax of every shell and Python file, shellcheck (when
+#                installed) on the scripts, and the docs' links
+#   unit         tests/unit: no KVM, no root, a few seconds
+#   integration  tests/integration: real VMs through the fcvm CLI. Needs a
+#                set-up host (fcvm setup); only touches VMs, images, volumes
+#                and snapshots named fcvmtest-*
+#   (none)       lint and unit
+#
+# -k PATTERN runs only tests whose name matches (unittest's -k). Exit status is
+# non-zero if anything failed.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+levels=() uargs=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        lint|unit|integration) levels+=("$1"); shift ;;
+        -k) uargs+=(-k "$2"); shift 2 ;;
+        -v) uargs+=(-v); shift ;;
+        *)  echo "usage: tests/run [lint] [unit] [integration] [-k PATTERN] [-v]" >&2; exit 2 ;;
+    esac
+done
+[ ${#levels[@]} -gt 0 ] || levels=(lint unit)
+
+failed=()
+step() { printf '\n\e[1m== %s\e[0m\n' "$1"; }
+
+lint() {
+    local rc=0 f
+    for f in fcvm lib/*.sh tests/run tests/fresh-machine.sh; do
+        [ -f "$f" ] || continue
+        bash -n "$f" || { echo "syntax: $f"; rc=1; }
+    done
+    sh -n install.sh || { echo "syntax: install.sh"; rc=1; }
+    python3 - <<'EOF' || rc=1
+import pathlib, sys
+bad = 0
+for p in sorted(pathlib.Path(".").glob("lib/**/*.py")) + sorted(pathlib.Path("tests").glob("**/*.py")):
+    try:
+        compile(p.read_text(), str(p), "exec")      # syntax only; writes no .pyc
+    except SyntaxError as e:
+        print(f"syntax: {e}"); bad += 1
+sys.exit(1 if bad else 0)
+EOF
+    if command -v shellcheck >/dev/null; then
+        # Errors only: the scripts are deliberate about word splitting and the like.
+        shellcheck -S error fcvm lib/*.sh tests/run || rc=1
+        shellcheck -S error -s sh install.sh || rc=1
+    else
+        echo "(shellcheck not installed; skipped)"
+    fi
+    python3 tests/tools/check_links.py || rc=1
+    [ $rc = 0 ] && echo "lint: ok"
+    return $rc
+}
+
+for level in "${levels[@]}"; do
+    step "$level"
+    case $level in
+        lint) lint || failed+=(lint) ;;
+        unit|integration)
+            (cd "tests/$level" && python3 -W ignore::ResourceWarning -m unittest discover -s . -p 'test_*.py' "${uargs[@]}") ||
+                failed+=("$level") ;;
+    esac
+done
+
+echo
+if [ ${#failed[@]} -eq 0 ]; then
+    printf '\e[32mall passed\e[0m (%s)\n' "${levels[*]}"
+else
+    printf '\e[31mfailed:\e[0m %s\n' "${failed[*]}"
+    exit 1
+fi

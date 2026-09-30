@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    name: lint and unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                 # tags, for fcvm_version
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - run: tests/run lint unit
+
+  integration:
+    name: integration tests (fresh runner, real VMs)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: KVM access
+        # GitHub's Linux runners expose /dev/kvm; open it to the runner user.
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Newest stable kernel (for the cache key)
+        id: kernel
+        run: echo "version=$(curl -fsSL https://www.kernel.org/releases.json | jq -r .latest_stable.version)" >> "$GITHUB_OUTPUT"
+      - name: Cache the guest kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/fcvm/kernels
+            ~/.local/share/fcvm/cache
+          key: kernel-${{ steps.kernel.outputs.version }}-${{ hashFiles('kernel/*.config') }}
+      - name: fcvm setup -y
+        run: ./fcvm setup -y
+      - name: Integration tests
+        run: tests/run integration -v
+      - name: Diagnostics
+        if: failure()
+        run: |
+          ./fcvm status --offline || true
+          sudo journalctl -u fcvm -u fcvm-jaild -u fcvm-net --no-pager | tail -n 150 || true
+          for d in ~/.local/share/fcvm/vms/*/; do echo "== $d"; tail -n 30 "$d/console.log" 2>/dev/null; done

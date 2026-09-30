@@ -161,6 +161,7 @@ Start with **[Getting started](docs/getting-started.md)** and
 | **In depth** | [How it works](docs/internals.md) · [Security and isolation](docs/security.md) · [Roadmap](docs/roadmap.md) |
 
 The [documentation index](docs/README.md) describes each page.
+[CONTRIBUTING](CONTRIBUTING.md) covers working on fcvm and running its tests.
 
 ## Feature checklist
 

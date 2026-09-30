@@ -88,7 +88,7 @@ else
     rel=$(cached_fetch kernel https://www.kernel.org/releases.json)
     case $KERNEL_CHANNEL in stable|mainline|longterm)
         read -r lv ldate < <(jq -r --arg m "$KERNEL_CHANNEL" \
-            '[.releases[] | select(.moniker == $m)][0] | "\(.version) \(.released.isodate)"' <<<"$rel" 2>/dev/null || true) ;;
+            '[.releases[] | select(.moniker == $m)][0] | "\(.version) \(.released.isodate)"' <<<"$rel" 2>/dev/null) || true ;;
     esac
     # Options in the fragment that the build doesn't have: after an edit or a
     # git pull, the kernel needs a rebuild to pick them up.

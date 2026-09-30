@@ -78,7 +78,10 @@ async def fcvm(*args, timeout=120, stdin=None):
 async def fcvm_ok(*args, **kw):
     code, out, err = await fcvm(*args, **kw)
     if code != 0:
-        msg = "\n".join(l for l in err.splitlines() if l.startswith("error:")) or err.strip() or f"exit {code}"
+        # The error line, plus any detail printed before it (e.g. Firecracker's
+        # own fault message); progress lines (==>) left out.
+        lines = [l for l in err.splitlines() if l.strip() and not l.startswith("==>")]
+        msg = "\n".join(lines) or f"exit {code}"
         raise HTTPError(400, msg.replace("error: ", ""))
     return out, err
 

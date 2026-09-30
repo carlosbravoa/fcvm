@@ -331,11 +331,13 @@ afterwards with `fallocate -d`.
 with overrides for the new VM:
 - a new tap (`network_overrides`);
 - its own vsock socket (`vsock_override`);
-- `clock_realtime`, to advance the guest clock.
+- (not `clock_realtime`: it needs a TSC-clocked host, which nested hosts,
+  such as cloud VMs, aren't; the exec agent sets the guest clock instead).
 
 Then it re-points the writable drive at the fork's own copy (`PATCH
-/drives`), resumes the VM, and has the exec agent set the new address, MAC
-and hostname.
+/drives`), resumes the VM, and has the exec agent set the new address, MAC,
+hostname and the clock (from the host's; the guest's stopped at the
+snapshot).
 
 **If the source VM is gone.** Loading reopens the source VM's disk path
 before the drive is re-pointed. If that VM has been deleted, a symlink to
@@ -478,4 +480,6 @@ lib/web/static/         web console frontend (plain HTML/CSS/JS, vendored xterm.
 init/fc-init.c          init for every VM (initramfs): root assembly, PID 1, exec agent
 kernel/microvm-*.config kernel fragment
 docs/                   this documentation
+tests/                  tests/run (lint, unit, integration), fresh-machine.sh; see CONTRIBUTING.md
+.github/workflows/      CI
 ```

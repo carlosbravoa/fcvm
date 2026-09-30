@@ -181,11 +181,18 @@ Still open:
 - **The long-term move.** The control plane may move to Go or Rust once
   orchestration is on the table, while `fc-init` stays small and static.
 
-### E5. Audit and observability
+### E5. Audit and observability ◐
 
-Log `exec`/`shell`/`console` sessions (who ran what, and when). Export
-Firecracker metrics (`--metrics-path`), and ship console logs somewhere
-central.
+Done: metrics (W7). `GET /metrics` exports host, per-VM and in-guest
+numbers in the Prometheus format, and the console keeps 24 hours of
+history.
+
+Still open:
+- a log of `exec`/`shell`/`console` sessions (who ran what, and when), with
+  W5;
+- shipping console logs somewhere central;
+- Firecracker's own metrics (`--metrics-path`), if something beyond the
+  process and guest views turns out to be needed.
 
 ### E6. Resource governance
 
@@ -207,8 +214,8 @@ shared images. Keys should be injected per VM at boot instead.
 - ✅ `fc-init` boots from an initramfs instead of living in every image, so
   upgrading the init or agent no longer means rebuilding images.
 - ✅ A test suite and CI (see [CONTRIBUTING](../CONTRIBUTING.md)):
-  - `tests/run`: lint (with shellcheck and a docs link checker), 48 unit
-    tests, and 38 integration tests on real VMs, in about 2 minutes;
+  - `tests/run`: lint (with shellcheck and a docs link checker), 67 unit
+    tests, and 52 integration tests on real VMs, in about 3 minutes;
   - `tests/fresh-machine.sh`: install, setup, the suite and a real reboot on
     a fresh Ubuntu in Multipass;
   - GitHub Actions: lint and unit tests, and integration tests on a fresh
@@ -219,15 +226,18 @@ shared images. Keys should be injected per VM at boot instead.
     read-only mount of them failed;
   - snapshots couldn't be restored on nested hosts (cloud VMs, CI);
   - `status` stopped halfway with nothing cached;
-  - Docker's FORWARD policy cut VMs off. Still open: failure-path and
-  concurrency tests (killing things mid-operation), and running the reboot
-  test in CI. Groundwork from 0.5.0:
+  - Docker's FORWARD policy cut VMs off.
+
+  Groundwork from 0.5.0:
   - `fcvm setup -y` and the installer's `--source` make a fresh machine
     scriptable end to end;
   - manual runs in fresh Multipass VMs (QEMU, nested KVM), including real
     reboots, found six bugs that a developer machine never showed;
   - fcvm's own `net-up` runs inside an fcvm VM, since the guest kernel has
     the nftables features it needs.
+
+  Still open: failure-path and concurrency tests (killing things
+  mid-operation), and running the reboot test in CI.
 - Exec agent protocol: ◐ requests carry a version tag (`fcvm2`), and a
   mismatch fails with a clear error. Still open: version negotiation and a
   compatibility policy, so newer hosts can talk to VMs booted with an older
@@ -243,6 +253,9 @@ shared images. Keys should be injected per VM at boot instead.
 
 - Published ports are TCP only and don't preserve the client address. An
   nftables DNAT mode in `net.sh` (root) would fix both.
+- ✅ `create --no-agent` (0.6.0), CLI only: a VM without the exec agent,
+  for the rare case where nothing inside may accept commands. It says what
+  you lose and asks first.
 - `exec` via the agent has no auth beyond access to the VM's vsock socket.
   For jailed VMs, that socket lives in the chroot, where only you and the
   VM's uid can reach it; rootless VMs keep it in `vms/<vm>/`, protected by

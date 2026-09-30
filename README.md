@@ -180,6 +180,7 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ Snapshots of running VMs, and forks in ~150 ms with their own disk, IP, MAC and hostname
 - ✅ Restart policies (`no`, `on-failure`, `unless-stopped`, `always`), recovery after crashes and reboots
 - ✅ JSON output everywhere (`--json`, `inspect`)
+- ✅ One-line install (per user, or `--system`), `fcvm upgrade` with rollback, versioned releases
 - ✅ Guided setup (`fcvm setup`) and a health check (`fcvm status`) that says what to update and how
 
 **Isolation and control**

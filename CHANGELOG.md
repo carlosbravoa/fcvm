@@ -53,9 +53,23 @@ The first versioned release. Earlier work, unversioned, is summarized here.
 - An HTTP API with bearer tokens.
 - An MCP server for agents, jailed by default, with a pinned network policy.
 
+**Found by testing on fresh machines, and fixed**
+- `host-setup` installs libarchive, without which `mkfs.ext4 -d` (every
+  import and build) failed on a fresh host.
+- `setup` works with passwordless sudo.
+- Ubuntu system VMs resolve their own hostname (no more sudo warnings).
+- Socket paths are checked up front, with a clear message, instead of
+  Firecracker's "path must be shorter than SUN_LEN".
+- The guest kernel includes `NFT_REJECT` and `NF_TABLES_BRIDGE`, so fcvm's
+  own network setup runs inside a VM (for testing).
+
 **Notes for existing checkouts**
-- A checkout with state inside keeps working unchanged. To move its state
-  to `~/.local/share/fcvm`:
+- A checkout with state inside keeps working unchanged. To use `fcvm`
+  without `./`, link it onto your PATH:
+  `ln -s "$PWD/fcvm" ~/.local/bin/fcvm`. Don't also run the installer: it
+  would create a second, empty state directory, while the service, jailer
+  and network serve one.
+- To move a checkout's state to `~/.local/share/fcvm`:
   1. stop all VMs;
   2. move `bin kernels build cache images vms volumes snapshots ssh builds`
      there, and `fcvm.conf` to `~/.config/fcvm/`;

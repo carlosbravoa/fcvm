@@ -5,9 +5,10 @@ stop wherever you have what you need.
 
 ## 1. Start here
 
-- **[Getting started](getting-started.md).** Requirements and installation
-  step by step, with what each step does. Also: the optional jailer and boot
-  service, where files live, updating and uninstalling.
+- **[Getting started](getting-started.md).** Requirements; installing fcvm
+  (the installer, or a git checkout); the guided `fcvm setup`; each setup
+  step and what it does. Also: the optional jailer and boot service, where
+  files live, `fcvm status`, upgrading and uninstalling.
 - **[Use cases](use-cases.md).** Walkthroughs:
   - a sandbox for your coding agent;
   - running code you don't trust;
@@ -47,10 +48,11 @@ stop wherever you have what you need.
 - **[How it works](internals.md).** Architecture, the design decisions
   behind it, and how each part is implemented: the kernel, boot, layers,
   the exec agent, host directories, networking, snapshots, builds, the
-  supervisor.
+  supervisor, releases and upgrades.
 - **[Security and isolation](security.md).** The threat model; rootless vs
   jailed VMMs and the jailer helper in detail; network isolation,
   anti-spoofing and egress. Also verification steps, troubleshooting and
   known limitations.
 - **[Roadmap](roadmap.md).** What's planned, and what has been done from
   earlier plans.
+- **[Changelog](../CHANGELOG.md).** What changed in each release.

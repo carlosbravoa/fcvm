@@ -18,6 +18,7 @@ change it.
 - [Builds](#builds)
 - [The web console](#the-web-console)
 - [The supervisor and liveness](#the-supervisor-and-liveness)
+- [Releases, installs and upgrades](#releases-installs-and-upgrades)
 - [Code layout](#code-layout)
 
 ## The big picture
@@ -398,6 +399,48 @@ caller's login-session scope. At shutdown, systemd kills session scopes in
 parallel with stopping services, so only VMs in the service's cgroup can be
 stopped cleanly by `fcvm _shutdown`. The daemon's own fcvm commands carry
 `FCVM_DAEMON=1`, so they launch locally instead of calling back.
+
+## Releases, installs and upgrades
+
+**Code and state.**
+- `FCVM_ROOT` is the code: the directory the `fcvm` script resolves to
+  (following symlinks).
+- `FCVM_HOME` is the state:
+  - if the code directory already holds `vms/`, `images/` or `kernels/`,
+    it's the code directory itself (a pre-0.5 checkout);
+  - otherwise it's `$XDG_DATA_HOME/fcvm`, that is `~/.local/share/fcvm`.
+- `lib/common.sh` exports both, so every script and the Python side
+  agree.
+
+**Installed layout.** `install.sh` unpacks a tag's GitHub archive into
+`LIB/VERSION` (`LIB` is `~/.local/lib/fcvm`, or `/opt/fcvm` with
+`--system`), then:
+- it points `LIB/current` at it with an atomic rename;
+- it links `fcvm` in the bin directory to `LIB/current/fcvm`;
+- it keeps the active release and the one before, and removes older ones.
+
+**Upgrades.** `fcvm upgrade` runs the running release's installer for the
+new version, which flips `current`, then lists what `status` says needs
+refreshing.
+- **Why things point at `current`.** Anything that must outlive a release
+  (the systemd unit's `ExecStart`, a suggested MCP registration) uses
+  `LIB/current/fcvm` (`fcvm_entry`) rather than a versioned path, so it
+  follows upgrades.
+- **The root-owned copies** of the jailer helper and the boot-time
+  network script are refreshed by re-running `jail-setup` and
+  `service install`. `status` compares them with the tree.
+
+**Guest compatibility.** `build/initramfs.src` records the SHA-256 of the
+`fc-init.c` the initramfs was built from. `start` rebuilds the initramfs
+whenever that differs, so after an upgrade VMs never boot an init older
+than the host code that talks to it. Builds write temporary files and
+rename them, so concurrent starts are safe.
+
+**Versions.**
+- `VERSION` holds the release. `fcvm_version` appends `+N.gHASH` (and
+  `.dirty`) in a git checkout that isn't exactly at `vVERSION`.
+- `status` compares the version with the highest `vX.Y.Z` tag on GitHub
+  (cached for 6 hours).
 
 ## Code layout
 

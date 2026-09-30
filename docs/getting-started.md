@@ -95,6 +95,10 @@ git clone https://github.com/carlosbravoa/fcvm ~/src/fcvm
 ln -s ~/src/fcvm/fcvm ~/.local/bin/fcvm
 ```
 
+Use one or the other, not both: an installed copy and a checkout with its
+own state would be two fcvms with separate state, while the network, the
+jailer helper and the service serve one.
+
 `fcvm version` shows the version, and where the code, state and settings
 are.
 
@@ -107,7 +111,11 @@ fcvm host-setup
 This installs the build and runtime packages:
 - the kernel toolchain;
 - `mmdebstrap` and `uidmap`, for building images rootless;
-- `e2fsprogs`, `jq`, `nftables`, `acl` and `python3`.
+- `e2fsprogs` and `libarchive`, which `mkfs.ext4 -d` loads to build disks
+  from tarballs (every import and build);
+- `jq`, `nftables`, `acl` and `python3`.
+
+`fcvm host-setup --check` lists what's missing without installing anything.
 
 It also adds you to the `kvm` group if `/dev/kvm` isn't accessible (log out
 and back in afterwards), and gives you a subuid/subgid range for user
@@ -170,7 +178,8 @@ fcvm stop box && fcvm rm box
 ```
 
 The initramfs every VM boots with (`fc-init`) is built automatically the
-first time you start a VM.
+first time you start a VM, and again whenever its source changes, for
+example after an upgrade.
 
 ## 5. Optional: a full-OS image
 
@@ -224,6 +233,7 @@ it:
 bin/           firecracker, jailer
 kernels/       vmlinux-X.Y.Z builds; vmlinux -> the one VMs boot
 build/         initramfs, kernel build tree
+ssh/           the key `fcvm ssh` uses for system images
 cache/         downloads (kernel sources, image layers)
 images/        NAME.ext4 + NAME.json per image
 vms/           one directory per VM: writable layer, config, sockets, logs

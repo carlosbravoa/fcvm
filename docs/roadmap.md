@@ -146,16 +146,89 @@ Still open:
 
 ### E3. Supply chain
 
-- Firecracker and the kernel are checked against checksums from the same
-  place they're downloaded from. kernel.org's signed `sha256sums.asc` is not
-  signature-verified yet (GPG).
-- Container images: signature verification (cosign/notation), registry
-  allowlists, mirrors/proxies (Artifactory), `~/.docker/config.json` and
-  credential helpers.
-- Reproducibility: "latest stable" is good for patches but not reproducible,
-  and Firecracker upstream validates 5.10, 6.1 and 6.18 guests. Enterprise
-  default: a pinned LTS kernel (`KERNEL_CHANNEL=longterm`), SBOMs, and
-  reproducible image builds.
+**Where things stand.**
+- Container images are pulled by digest and every blob is checked against
+  it, with `@sha256:` pinning available.
+- The kernel tarball is checked against kernel.org's `sha256sums.asc`, and
+  Firecracker against its `.sha256.txt`. Both come from the same place as
+  the download, and the `.asc` signature isn't verified yet.
+- Private registries take one set of credentials (`REGISTRY_USER`,
+  `REGISTRY_PASSWORD`).
+- The default kernel is the newest `stable`: patched quickly, but not
+  reproducible. Firecracker upstream validates 5.10, 6.1 and 6.18 guests.
+
+**The plan**, in three phases that each ship on their own. Almost
+everything that brings images in goes through `lib/oci_import.py`: `import`,
+`build`'s `FROM`, templates, the web console and MCP. So the image policies
+are enforced there once, for every interface.
+
+**Phase 1: the cheap, high-value part** (2–3 days, a minor release).
+1. **The kernel's signature.**
+   - Ship kernel.org's checksum-signing public key in the repo
+     (`lib/keys/`), and verify `sha256sums.asc` with `gpgv` (present on
+     Ubuntu by default). A bad signature stops the build.
+   - `KERNEL_VERIFY=gpg|sha256` (default `gpg`).
+   - Pin the checksum of each Firecracker version fcvm supports in fcvm
+     itself, so a compromised download location can't pass.
+2. **A pinned, tested kernel.**
+   - Record the kernel version CI tested for each fcvm release, as
+     `KERNEL_CHANNEL=tested`.
+   - Make it (or `longterm`) the default for new setups; `stable` stays
+     available.
+   - `fcvm status` shows when the kernel in use differs from the tested
+     one.
+3. **Registry credentials the Docker way.**
+   - Read `~/.docker/config.json`: stored logins, and credential helpers
+     (`docker-credential-ecr-login`, `-gcloud`, `-pass`...).
+   - `REGISTRY_USER` and `REGISTRY_PASSWORD` still override.
+4. **A registry policy** in `fcvm.conf`:
+   - `REGISTRY_ALLOW="docker.io ghcr.io registry.corp.example"`: imports
+     and `FROM` lines from anywhere else are refused;
+   - `REGISTRY_MIRRORS="docker.io=mirror.corp.example/dockerhub"`: pulls
+     go through a mirror or pull-through cache (Artifactory, Harbor);
+   - `REQUIRE_DIGEST=1`: only `@sha256:` references, never moving tags.
+
+   All of it in stdlib Python, with unit tests against a fake registry.
+
+**Phase 2: image signatures** (3–4 days).
+
+5. **cosign, optionally notation.** Verifying these in stdlib Python is
+   impractical, so fcvm calls the `cosign` binary when a policy asks for it.
+   - A policy file, matched by image name:
+     ```json
+     [{"match": "ghcr.io/myorg/*",
+       "cosign": {"identity": "https://github.com/myorg/*",
+                  "issuer": "https://token.actions.githubusercontent.com"}},
+      {"match": "registry.corp.example/*", "cosign": {"key": "/etc/fcvm/cosign.pub"}},
+      {"match": "docker.io/library/*", "require": "digest"}]
+     ```
+   - The check runs against the digest fcvm resolved (`ref@sha256:...`),
+     so what was verified is exactly what gets imported.
+   - The result is recorded in the image's metadata; `fcvm images` and the
+     console show "signed by …".
+   - If a rule needs a signature and `cosign` is missing, the import fails.
+     It never skips the check silently.
+
+**Phase 3: when someone asks** (a week or more).
+
+6. **SBOMs.**
+   - Generate them from the flattened image's package databases (dpkg,
+     apk, Python `dist-info`, `node_modules`) as CycloneDX or SPDX JSON next
+     to the image, or with `syft` when it's installed.
+   - Fetch SBOMs that publishers attach through cosign.
+   - `fcvm images --sbom NAME`.
+7. **Reproducible images and provenance.**
+   - The same layers give byte-identical ext4 images: fixed UUID and hash
+     seed, timestamps clamped with `SOURCE_DATE_EPOCH`.
+   - The Ubuntu base is built from `snapshot.ubuntu.com` at a pinned date
+     (mmdebstrap supports it).
+   - Each image records its source digest, fcvm version and build settings.
+
+   This proves where an image came from more than it prevents attacks, and
+   it's the most work.
+
+Related, in E8: signing fcvm's own releases, with the installer verifying
+them. It fits well alongside phase 1.
 
 ### E4. Daemon and API ◐
 

@@ -1,6 +1,8 @@
 <p align="center"><img src="lib/web/static/favicon.svg" alt="fcvm: a flame inside small walls" width="112"></p>
 
 # fcvm: disposable, isolated microVMs with container ergonomics, for people and agents
+[![M8ven Verified](https://m8ven.ai/badge/mcp/carlosbravoa/fcvm?variant=verified)](https://m8ven.ai/mcp/carlosbravoa/fcvm?s=readme)
+
 
 `fcvm` runs workloads in [Firecracker](https://firecracker-microvm.github.io/)
 microVMs, each with its own kernel, with the convenience of a container tool:

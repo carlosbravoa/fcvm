@@ -4,6 +4,18 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## 0.6.2 (2026-10-02)
+
+Provenance for the vendored web console files. Nothing to run after
+`fcvm upgrade`; nothing about how fcvm behaves changes.
+
+- The minified xterm.js files in `lib/web/static/vendor` now come with a
+  README naming the npm package and version each comes from (`@xterm/xterm`
+  6.0.0, `@xterm/addon-fit` 0.11.0), links to the readable upstream source,
+  and commands to check they are identical to upstream. Their hashes are in
+  `SHA256SUMS`, checked by the unit tests, and the directory is marked
+  `linguist-vendored` so code scanners treat it as third-party.
+
 ## 0.6.1 (2026-09-30)
 
 Per-VM SSH identity. Upgrade with `fcvm upgrade`; nothing else to run.

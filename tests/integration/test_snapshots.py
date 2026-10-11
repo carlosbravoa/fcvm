@@ -1,5 +1,8 @@
 """Snapshots and fork, rootless and jailed."""
 import json
+import os
+import shutil
+import tempfile
 import unittest
 
 from fcvmtest import VMTestCase, fcvm, unique, jail_usable
@@ -30,12 +33,11 @@ class Snapshots(VMTestCase):
         self.check_fork("--jail")
 
     def check_export_import(self, *opts):
-        import os
-        import tempfile
         src = self.vm(*opts)
         self.sh(src, "echo moved > /root/marker")
         snap = self.snapshot(src)
         d = tempfile.mkdtemp(prefix="fcvmtest-snap-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         tar = os.path.join(d, f"{snap}.tar")
         fcvm("snapshot", "export", snap, tar, timeout=300)
         self.assertTrue(os.path.exists(tar))
@@ -59,9 +61,8 @@ class Snapshots(VMTestCase):
         self.check_export_import("--jail")
 
     def test_import_needs_the_images(self):
-        import os
-        import tempfile
         d = tempfile.mkdtemp(prefix="fcvmtest-snap-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         r = fcvm("snapshot", "import", os.path.join(d, "missing.tar"), check=False)
         self.assertNotEqual(r.returncode, 0)
         with open(os.path.join(d, "junk.tar"), "wb") as f:

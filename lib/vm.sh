@@ -1725,7 +1725,7 @@ fork_cmd() {
     done
     [ -n "$snap" ] || die "$usage"
     [ -f "$SNAPSHOTS_DIR/$snap/meta.json" ] || die "no snapshot '$snap' (see: fcvm snapshot ls)"
-    [ "$(jq '.ports | length' "$SNAPSHOTS_DIR/$snap/vm.json")" = 0 ] ||
+    [ "$(jq '.ports | length' "$SNAPSHOTS_DIR/$snap/vm.json")" = 0 ] || use_daemon ||   # (the service's log says it)
         warn "published ports aren't carried over to forks (they'd conflict with the source)"
     if use_daemon; then
         local reply rc=0
@@ -2283,13 +2283,13 @@ update() {
     fi
     if [ $set_ttl = 1 ]; then
         jq --arg t "$ttl" 'if $t == "" then del(.ttl_s) else .ttl_s = ($t | tonumber) end' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-        what+=("ttl ${ttl:+${ttl}s}${ttl:-none}")
+        what+=("ttl $([ -n "$ttl" ] && echo "${ttl}s" || echo none)")
     fi
     if [ $set_idle = 1 ]; then
         jq --arg t "$idle" 'if $t == "" then del(.idle_stop_s) else .idle_stop_s = ($t | tonumber) end' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-        what+=("idle-stop ${idle:+${idle}s}${idle:-none}")
+        what+=("idle-stop $([ -n "$idle" ] && echo "${idle}s" || echo none)")
     fi
-    log "'$vm': $(IFS=,; echo "${what[*]}") (applied by fcvm serve / the fcvm service)"
+    log "'$vm': $(printf '%s, ' "${what[@]}" | sed 's/, $//') (applied by fcvm serve / the fcvm service)"
 }
 
 # fcvm _shutdown [--force]: run by fcvm.service when it stops. Only while the

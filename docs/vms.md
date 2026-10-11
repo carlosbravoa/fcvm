@@ -77,6 +77,23 @@ System VMs boot systemd instead, and run until stopped.
 `fcvm ls` shows memory as used/allocated: what the host actually backs, out
 of what the guest was given.
 
+**Taking memory back.** A running VM keeps the host memory it has touched,
+even when it no longer needs it. The balloon takes it back without a
+restart:
+
+```sh
+fcvm balloon box 512      # the guest gives up 512 MiB to the balloon; the host frees those pages
+fcvm balloon box          # the balloon's size and the guest's view (total, free, available)
+fcvm balloon box 0        # give it all back
+```
+
+The guest decides which pages to hand over (free memory first; with
+`deflate_on_oom` it takes memory back from the balloon rather than kill
+processes). Useful for idle sandboxes that stay up for `exec`, or a warm
+pool. `inspect` shows `balloon_mib`; the API has `GET`/`POST
+/vms/{vm}/balloon`. Every VM started by this fcvm has the device; one
+started earlier needs a restart to get it.
+
 ## exec and shell
 
 Every VM runs an exec agent over vsock. It needs no network or sshd, so it

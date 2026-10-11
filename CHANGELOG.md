@@ -46,6 +46,12 @@ New:
   `git credential fill`, so cloning and pushing work with no key or token
   inside the VM. Logged in `vms/VM/forward.log`. Templates, the API
   (`forward`) and the MCP server (`FCVM_MCP_FORWARD`) take it too.
+- **Memory balloon.** Every VM gets a balloon device; `fcvm balloon VM
+  MiB` takes memory back from a running VM (the host frees the pages),
+  `0` returns it, and without a size it shows the balloon and the guest's
+  memory view. `inspect` has `balloon_mib`; the API `GET`/`POST
+  /vms/{vm}/balloon`; the console a row on the instance page. Jailed VMs
+  need `fcvm jail-setup` re-run for the helper to configure the device.
 
 Fixes from a code review:
 

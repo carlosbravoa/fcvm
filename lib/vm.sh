@@ -776,6 +776,7 @@ start() {
         "machine-config": {vcpu_count: $vcpus, mem_size_mib: $mem},
         "network-interfaces": $net,
         "vsock": {guest_cid: 3, uds_path: $vsock},
+        "balloon": {amount_mib: 0, deflate_on_oom: true, stats_polling_interval_s: 5},
         "entropy": {}
     }' > "$DIR/fc.json"
 
@@ -1752,6 +1753,42 @@ unpublish_cmd() {
     log "unpublished $spec from '$vm'"
 }
 
+# --- memory balloon: fcvm balloon ----------------------------------------------------
+
+# fcvm balloon VM [MiB]: take memory back from a running VM (the guest gives
+# up MiB of its RAM to the balloon, and the host frees those pages), or
+# return it with 0. Without a size: the balloon and the guest's memory view.
+balloon_cmd() {
+    local usage="usage: fcvm balloon VM [MiB|0]" vm=${1:?$usage} mib=${2:-} dir mem cur
+    vm_exists "$vm" || die "no VM '$vm'"
+    vm_running "$vm" || die "VM '$vm' is not running"
+    dir=$(vm_dir "$vm")
+    if ! cur=$(fc_api_get "$dir/fc.sock" /balloon 2>/dev/null); then
+        die "'$vm' has no balloon device (started by an fcvm before 0.7); restart it to get one"
+    fi
+    mem=$(jq -r .mem_mib "$dir/vm.json")
+    if [ -z "$mib" ]; then
+        local stats; stats=$(fc_api_get "$dir/fc.sock" /balloon/statistics 2>/dev/null || echo '{}')
+        jq -n --argjson b "$cur" --argjson s "$stats" --argjson mem "$mem" '
+            {balloon_mib: $b.amount_mib, mem_mib: $mem,
+             guest: ($s | if .total_memory then {total_mib: (.total_memory / 1048576 | floor), free_mib: (.free_memory / 1048576 | floor),
+                           available_mib: (.available_memory / 1048576 | floor)} else null end)}'
+        return
+    fi
+    [[ $mib =~ ^[0-9]+$ ]] && [ "$mib" -lt "$mem" ] || die "balloon size wants MiB below the VM's memory ($mem)"
+    fc_api "$dir/fc.sock" PATCH /balloon "$(jq -n --argjson m "$mib" '{amount_mib: $m}')" || die "cannot resize the balloon"
+    if [ "$mib" = 0 ]; then log "'$vm': balloon deflated; it has its full $mem MiB again"
+    else log "'$vm': balloon at $mib MiB ($((mem - mib)) MiB left to the guest; the host frees the rest as the guest gives it up)"; fi
+}
+# Firecracker API GET; prints the JSON body.
+fc_api_get() {   # socket path
+    local out code
+    out=$(curl -sS --unix-socket "$1" "http://localhost$2" -w '\n%{http_code}') || return 1
+    code=${out##*$'\n'}
+    [[ $code == 2* ]] || return 1
+    printf '%s' "${out%$'\n'*}"
+}
+
 # --- machine-readable state ------------------------------------------------------
 
 # Host memory a running VM actually uses: its Firecracker process's resident
@@ -1768,7 +1805,8 @@ inspect_json() {
     elif [ "$(jq -r .type "$d/vm.json")" = app ]; then
         code=$(exit_code "$vm"); [ -z "$code" ] || state=exited
     fi
-    local rss=""; [ -z "$pid" ] || rss=$(vm_rss "$pid")
+    local rss="" balloon=null; [ -z "$pid" ] || rss=$(vm_rss "$pid")
+    [ "$state" != running ] || balloon=$(fc_api_get "$d/fc.sock" /balloon 2>/dev/null | jq '.amount_mib' 2>/dev/null || echo null)
     # Lifetime: when --ttl and --idle-stop would stop a running VM (Unix time).
     local booted="" active=""
     if [ "$state" = running ]; then booted=$(stat -c %Y "$d/pid" 2>/dev/null || true); active=$(stat -c %Y "$d/activity" 2>/dev/null || echo "$booted"); fi
@@ -1777,8 +1815,9 @@ inspect_json() {
         --arg mode "$([ -f "$d/disk.ext4" ] && echo copy || echo overlay)" \
         --argjson chain "$(jq -n '$ARGS.positional' --args $(image_chain "$(jq -r .image "$d/vm.json")"))" \
         --arg booted "$booted" --arg active "$active" --arg expired "$(cat "$d/expired" 2>/dev/null || true)" \
-        --argjson secrets "$(jq -c 'keys' "$d/secrets.json" 2>/dev/null || echo '[]')" \
+        --argjson secrets "$(jq -c 'keys' "$d/secrets.json" 2>/dev/null || echo '[]')" --argjson balloon "${balloon:-null}" \
         '{name: $name, state: $state, pid: ($pid | tonumber? // null), ip: ($ip | select(. != "") // null), secrets: $secrets,
+          balloon_mib: $balloon,
           mem_used_bytes: ($rss | tonumber? // null),
           exit_code: ($code | tonumber? // null), image_chain: $chain, disk_mode: $mode, disk_used_bytes: $disk,
           stopped_by_user: $stopped, last_exit: $last,
@@ -2039,6 +2078,7 @@ case $cmd in
     publish) publish_cmd "$@" ;;
     unpublish) unpublish_cmd "$@" ;;
     jobs)    jobs_cmd "$@" ;;
+    balloon) balloon_cmd "$@" ;;
     rm)      rm_vm "$@" ;;
     update)  update "$@" ;;
     template) template_cmd "$@" ;;

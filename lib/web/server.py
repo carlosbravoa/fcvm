@@ -628,6 +628,14 @@ class App:
                 return await self.launch(d)
             case ("POST", "vms", 3) if parts[2] == "exec":
                 return await self.exec(name, d)
+            case ("GET", "vms", 3) if parts[2] == "balloon":
+                return await fcvm_json("balloon", name)
+            case ("POST", "vms", 3) if parts[2] == "balloon":
+                mib = d.get("mib")
+                if not isinstance(mib, int) or mib < 0:
+                    raise HTTPError(400, "mib must be a whole number of MiB (0 gives the memory back)")
+                await fcvm_ok("balloon", name, mib)
+                return await fcvm_json("balloon", name)
             case ("GET", "vms", 3) if parts[2] == "jobs":
                 return await fcvm_json("jobs", name, "--json")
             case ("GET", "vms", 4) if parts[2] == "jobs":
@@ -635,7 +643,7 @@ class App:
             case ("DELETE", "vms", 4) if parts[2] == "jobs":
                 await fcvm_ok("jobs", name, parts[3], "--kill")
                 return {"killed": parts[3]}
-            case ("POST", "vms", 3) if parts[2] not in ("files", "mounts", "ports"):
+            case ("POST", "vms", 3) if parts[2] not in ("files", "mounts", "ports", "balloon"):
                 return await self.vm_action(name, parts[2], d)
             case ("DELETE", "vms", 2):
                 await fcvm("stop", name, timeout=60)

@@ -71,6 +71,8 @@ VMs:
                              USER is name|uid[:group|gid], default: the image's USER;
                              -d: in the background as a job (prints its id)
   jobs VM [ID [-f|--kill]]   background commands: list them, show one's output, kill one
+  balloon VM [MiB|0]         take memory back from a running VM (or give it back with 0);
+                             without a size: the balloon and the guest's memory view
   shell [-u USER] VM         interactive shell in a running VM (= exec -it VM bash|sh)
   ssh VM [args]              ssh root@VM (base images)
   cp SRC DST                 copy files in/out of a running VM (VM:PATH on one side)
@@ -127,7 +129,7 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|update|template|_reap|_shutdown)
+    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|balloon|update|template|_reap|_shutdown)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     serve)              exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;

@@ -104,6 +104,7 @@ These use sudo.
 |---|---|
 | `exec [-i] [-t] [-d] [-u USER] [-w DIR] [-e K=V]... [--timeout S] VM CMD...` | runs a command in a running VM, like `docker exec`. Exits with its status, or 124 on timeout. `-d`: in the background, as a job; prints its id |
 | `jobs VM [--json]`, `jobs VM ID [-f]`, `jobs VM ID --kill`, `jobs VM --clear` | background commands: list them, show (or follow) one's output, kill one, forget finished ones |
+| `balloon VM [MiB\|0]` | takes MiB of memory back from a running VM through its balloon (0 gives it all back); without a size, shows the balloon and the guest's memory view ([details](vms.md#resources)) |
 | `shell [-u USER] VM` | an interactive shell (bash, else sh). Same as `exec -it VM bash` |
 | `cp [-L] SRC DST` | copies files or directories in or out of a running VM (`VM:PATH` on one side), like `docker cp` |
 | `console VM` | attaches to the live serial console. Ctrl-] detaches; the VM keeps running |

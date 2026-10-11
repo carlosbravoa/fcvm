@@ -204,6 +204,22 @@ class Forward(VMTestCase):
         self.assertEqual(out, "12 1 True")                                   # SSH_AGENT_IDENTITIES_ANSWER, our one key
 
 
+class Balloon(VMTestCase):
+    def test_take_memory_back_and_return_it(self):
+        vm = self.vm("--mem", "512")
+        self.assertEqual(self.inspect(vm)["balloon_mib"], 0)
+        fcvm("balloon", vm, "256")
+        info = wait_for(lambda: (lambda b: b if b["balloon_mib"] == 256 else None)(json.loads(fcvm("balloon", vm).stdout)),
+                        20, what="the balloon to inflate")
+        self.assertEqual((info["mem_mib"], self.inspect(vm)["balloon_mib"]), (512, 256))
+        # the guest sees less available memory now (its stats are polled every 5 s)
+        wait_for(lambda: (json.loads(fcvm("balloon", vm).stdout).get("guest") or {}).get("available_mib", 999) < 300,
+                 30, what="the guest's available memory to drop")
+        fcvm("balloon", vm, "0")
+        wait_for(lambda: self.inspect(vm)["balloon_mib"] == 0, 20, what="the balloon to deflate")
+        self.assertNotEqual(fcvm("balloon", vm, "512", check=False).returncode, 0)   # not below the VM's memory
+
+
 class Names(VMTestCase):
     def test_too_long_for_sockets(self):
         r = fcvm("create", "fcvmtest-" + "x" * 110, IMAGE, "--idle", check=False)

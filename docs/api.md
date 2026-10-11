@@ -84,6 +84,8 @@ an SSH key.
 | `GET /vms/{vm}/jobs` | | background commands: `[{id, command, started, status: running\|exited\|lost, exit_code, ended}]` |
 | `GET /vms/{vm}/jobs/{id}` | `?tail=200` | one job, plus `stdout` and `stderr` (the last `tail` lines; `0` for all) |
 | `DELETE /vms/{vm}/jobs/{id}` | | kill it |
+| `GET /vms/{vm}/balloon` | | `{"balloon_mib", "mem_mib", "guest": {"total_mib", "free_mib", "available_mib"}}` (`fcvm balloon`) |
+| `POST /vms/{vm}/balloon` | `{"mib": 512}` | take that much memory back through the balloon; `0` returns it |
 | `GET /vms/{vm}/logs` | | `{"log": "..."}`: console output, the last 200 KB |
 | `GET /vms/{vm}/egress` | | `{"text": "..."}`: a restricted VM's allowlist and recent decisions |
 
@@ -117,6 +119,7 @@ Fields worth knowing in a VM object (as `fcvm inspect`, plus `vm.json`):
 | `ttl_s`, `idle_stop_s`, `expires_at`, `idle_expires_at`, `expired` | [lifetimes](vms.md#lifetimes---ttl-and---idle-stop): the settings in seconds, when they would stop a running VM (Unix time), and `"ttl"` or `"idle"` after one did |
 | `secrets` | the names of the VM's [secrets](vms.md#secrets) (never their values) |
 | `forward` | what the host [forwards](vms.md#forwarding-your-credentials) into it: `"ssh-agent"`, `"git"` |
+| `balloon_mib` | memory taken back through the [balloon](vms.md#resources) (running VMs; `null` for one without the device) |
 | `jail`, `net`, `ports`, `volumes`, `shares`, `ip`, `pid`, `mem_used_bytes`, `disk_used_bytes` | as the names say |
 
 ## Files and host directories in a VM

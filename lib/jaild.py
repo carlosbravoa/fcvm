@@ -205,6 +205,7 @@ class Jaild:
             "machine-config": {"vcpu_count": int(req["vcpus"]), "mem_size_mib": int(req["mem_mib"])},
             "network-interfaces": net,
             "vsock": {"guest_cid": 3, "uds_path": "/vsock.sock"},
+            "balloon": {"amount_mib": 0, "deflate_on_oom": True, "stats_polling_interval_s": 5},
             "entropy": {},
         }
         with open(os.path.join(chroot, "fc.json"), "w") as f:

@@ -110,6 +110,7 @@ These use sudo.
 | `console VM` | attaches to the live serial console. Ctrl-] detaches; the VM keeps running |
 | `logs [-f] VM` | console output of the current or last boot |
 | `ssh VM [args]` | ssh as root (system images), checking the VM's own host key |
+| `ssh-config [VM...] [--install]` | ssh client configuration for system VMs (`Host fcvm-NAME`, a `ProxyCommand` that finds the current address); `--install` writes `~/.ssh/fcvm_config` and includes it from `~/.ssh/config`. For `ssh`, `scp`, `rsync`, VS Code Remote-SSH |
 
 ## Storage
 

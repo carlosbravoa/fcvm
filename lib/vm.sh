@@ -1069,6 +1069,68 @@ ssh_vm() {
         -o HostKeyAlias="fcvm-$vm" -o LogLevel=ERROR "root@$ip" "$@"
 }
 
+# fcvm ssh-config [VM...] [--install]: ssh client configuration for system VMs
+# (`Host fcvm-NAME`), with a ProxyCommand that finds the VM's current address,
+# so an entry stays right across restarts and works for ssh, scp, rsync and
+# VS Code Remote-SSH alike. --install writes ~/.ssh/fcvm_config and includes
+# it from ~/.ssh/config.
+ssh_config_cmd() {
+    local usage="usage: fcvm ssh-config [VM...] [--install]" install=0 names=() a d vm out=""
+    for a; do case $a in --install) install=1 ;; -*) die "unknown option $a ($usage)" ;; *) names+=("$a") ;; esac; done
+    if [ ${#names[@]} -eq 0 ]; then
+        for d in "$VMS_DIR"/*/; do
+            [ -f "$d/vm.json" ] && [[ $(basename "$d") != _* ]] && [ "$(jq -r .type "$d/vm.json")" = system ] || continue
+            names+=("$(basename "$d")")
+        done
+        [ ${#names[@]} -gt 0 ] || die "no system VMs (app VMs have no sshd: use fcvm shell)"
+    fi
+    for vm in "${names[@]}"; do
+        vm_exists "$vm" || die "no VM '$vm'"
+        if [ "$(jq -r .type "$(vm_dir "$vm")/vm.json")" != system ]; then warn "'$vm' is an app VM without sshd (use fcvm shell); skipped"; continue; fi
+        out+="$(ssh_config_entry "$vm")"$'\n\n'
+    done
+    if [ $install = 0 ]; then printf '%s' "$out"; return; fi
+    local f=$HOME/.ssh/fcvm_config cfg=$HOME/.ssh/config
+    mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+    printf '# written by `fcvm ssh-config --install`; re-run it after creating VMs\n\n%s' "$out" > "$f"; chmod 600 "$f"
+    if ! grep -qsx "Include ~/.ssh/fcvm_config" "$cfg"; then   # first, before any Host block
+        { echo "Include ~/.ssh/fcvm_config"; echo; [ ! -f "$cfg" ] || cat "$cfg"; } > "$cfg.tmp"
+        mv "$cfg.tmp" "$cfg"; chmod 600 "$cfg"
+    fi
+    log "wrote $f (${#names[@]} VM(s)) and included it from $cfg. Try: ssh fcvm-${names[0]}"
+}
+ssh_config_entry() {
+    local vm=$1 dir hostkey check="StrictHostKeyChecking yes" known
+    dir=$(vm_dir "$vm"); known=$dir/known_hosts
+    hostkey=$(jq -r '.ssh_host_key // empty' "$dir/vm.json")
+    if [ -n "$hostkey" ]; then echo "fcvm-$vm $hostkey" > "$known"
+    else check="StrictHostKeyChecking no" known=/dev/null; fi   # created before fcvm 0.6.1: no recorded host key
+    cat <<EOF
+Host fcvm-$vm
+    # fcvm VM '$vm' (fcvm ssh-config): the ProxyCommand finds its current address
+    User root
+    IdentityFile $(ssh_key)
+    IdentitiesOnly yes
+    HostKeyAlias fcvm-$vm
+    UserKnownHostsFile $known
+    $check
+    ProxyCommand $(fcvm_entry) _ssh-proxy $vm
+    LogLevel ERROR
+EOF
+}
+# fcvm _ssh-proxy VM: ssh's ProxyCommand: this stdin/stdout <-> the VM's port 22
+# (retrying for a few seconds while sshd comes up after a start).
+ssh_proxy() {
+    local vm=${1:?usage: fcvm _ssh-proxy VM} ip hostkey dir
+    vm_exists "$vm" || die "no VM '$vm'"
+    vm_running "$vm" || die "VM '$vm' is not running (fcvm start $vm)"
+    dir=$(vm_dir "$vm")
+    ip=$(cat "$dir/ip" 2>/dev/null) || die "VM '$vm' has no network"
+    hostkey=$(jq -r '.ssh_host_key // empty' "$dir/vm.json")
+    [ -z "$hostkey" ] || echo "fcvm-$vm $hostkey" > "$dir/known_hosts"   # current, even if the VM was recreated
+    exec python3 "$FCVM_ROOT/lib/ssh_proxy.py" "$ip"   # stdin/stdout stay ssh's
+}
+
 # fcvm exec [-i] [-t] [-u USER] VM [CMD...]: like `docker exec`, over vsock
 # (no network or sshd needed). USER is name|uid[:group|gid], resolved in the guest.
 exec_vm() {
@@ -2059,6 +2121,8 @@ case $cmd in
     logs)    logs "$@" ;;
     _reap)   reap "$@" ;;
     ssh)     ssh_vm "$@" ;;
+    ssh-config) ssh_config_cmd "$@" ;;
+    _ssh-proxy) ssh_proxy "$@" ;;
     exec)    exec_vm "$@" ;;
     shell)   shell_vm "$@" ;;
     ls)      list_vms "$@" ;;

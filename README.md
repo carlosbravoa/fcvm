@@ -191,6 +191,7 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ Secrets (`--secret API_KEY`): into a tmpfs and the environment at boot, never onto the VM's disk
 - ✅ Credential forwarding (`--forward ssh-agent,git`): the VM uses your keys and logins through the host, without holding them
 - ✅ Memory balloon (`fcvm balloon VM 512`): take memory back from idle VMs without a restart
+- ✅ `fcvm ssh-config --install`: `ssh fcvm-dev`, scp, rsync and VS Code Remote-SSH into system VMs
 - ✅ Templates: saved launch recipes, built-in sandboxes for Python, Node and offline work, shared by the CLI, console and MCP
 - ✅ JSON output everywhere (`--json`, `inspect`)
 - ✅ One-line install (per user, or `--system`), `fcvm upgrade` with rollback, versioned releases

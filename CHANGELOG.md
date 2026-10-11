@@ -52,6 +52,11 @@ New:
   memory view. `inspect` has `balloon_mib`; the API `GET`/`POST
   /vms/{vm}/balloon`; the console a row on the instance page. Jailed VMs
   need `fcvm jail-setup` re-run for the helper to configure the device.
+- **`fcvm ssh-config`.** An ssh client entry per system VM (`Host
+  fcvm-NAME`) with a `ProxyCommand` that finds the VM's current address,
+  so `ssh fcvm-dev`, `scp`, `rsync` and VS Code Remote-SSH work with strict
+  host-key checking and survive restarts. `--install` puts it in
+  `~/.ssh/config`.
 
 Fixes from a code review:
 

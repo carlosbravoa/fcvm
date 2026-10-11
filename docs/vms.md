@@ -138,6 +138,17 @@ fcvm shell -u root unpriv                    # root shell in an image whose USER
   at `create` (fcvm's key in `ssh/` and your `~/.ssh/id_*.pub`), and its
   own host key, which `fcvm ssh` checks. So `ssh root@IP` with your own key
   works too.
+- **`fcvm ssh-config`** prints an ssh client entry per system VM, `Host
+  fcvm-NAME`, whose `ProxyCommand` finds the VM's current address when you
+  connect, so it stays right across restarts and address changes. With it,
+  `ssh fcvm-dev`, `scp file fcvm-dev:`, `rsync` and VS Code's Remote-SSH
+  all work with strict host-key checking:
+
+  ```sh
+  fcvm ssh-config --install      # ~/.ssh/fcvm_config, included from ~/.ssh/config; re-run after creating VMs
+  ssh fcvm-dev
+  code --remote ssh-remote+fcvm-dev /root/src
+  ```
 
 ## Copying files
 

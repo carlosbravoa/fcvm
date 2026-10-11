@@ -220,6 +220,33 @@ class Balloon(VMTestCase):
         self.assertNotEqual(fcvm("balloon", vm, "512", check=False).returncode, 0)   # not below the VM's memory
 
 
+class SshConfig(VMTestCase):
+    def test_entries_and_a_real_connection(self):
+        if not any(i["name"] == "ubuntu-26.04" for i in json.loads(fcvm("images", "--json").stdout)):
+            self.skipTest("needs the ubuntu-26.04 system image")
+        self.assertNotEqual(fcvm("ssh-config", self.vm(start=False), check=False).returncode, 1)   # an app VM: skipped, not an error
+        vm = unique("sys")
+        fcvm("create", vm, "ubuntu-26.04", "--mem", "768")
+        self.addCleanup(self.remove_vm, vm)
+        conf = fcvm("ssh-config", vm).stdout
+        self.assertIn(f"Host fcvm-{vm}\n", conf)
+        self.assertIn("StrictHostKeyChecking yes", conf)
+        self.assertIn(f"_ssh-proxy {vm}", conf)
+        home = tempfile.mkdtemp(prefix="fcvmtest-home-")
+        fcvm("ssh-config", vm, "--install", env={"HOME": home})
+        with open(os.path.join(home, ".ssh", "config")) as f:
+            self.assertIn("Include ~/.ssh/fcvm_config", f.read())
+        with open(os.path.join(home, ".ssh", "fcvm_config")) as f:
+            self.assertIn(f"Host fcvm-{vm}", f.read())
+        r = subprocess.run(["ssh", "-F", os.path.join(home, ".ssh", "fcvm_config"), f"fcvm-{vm}", "true"],
+                           capture_output=True, text=True)
+        self.assertIn("not running", r.stderr)
+        fcvm("start", vm)
+        r = subprocess.run(["ssh", "-F", os.path.join(home, ".ssh", "fcvm_config"), f"fcvm-{vm}", "hostname"],
+                           capture_output=True, text=True, timeout=90)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, vm), r.stderr)
+
+
 class Names(VMTestCase):
     def test_too_long_for_sockets(self):
         r = fcvm("create", "fcvmtest-" + "x" * 110, IMAGE, "--idle", check=False)

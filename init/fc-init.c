@@ -12,6 +12,7 @@
  *   fcvm.exec=PATH         then exec PATH as PID 1 (systemd images) ...
  *   fcvm.shares=PORT:PATH[:ro],...  live host directories over vsock + 9P
  *   fcvm.proxy=URL         restricted network: http(s)_proxy for the container
+ *   fcvm.secrets=PORT      secrets from the host (vsock) into a tmpfs at /run/secrets
  *   fcvm.agent=0           no exec agent (fcvm create --no-agent)
  *                          command and exec sessions (systemd images get it via
  *                          systemd.setenv=)
@@ -482,6 +483,113 @@ static int mount_share(unsigned port, const char *path, int ro, const char *owne
         msg("share %s: mount: %s", path, strerror(-rc));
     close(s); /* the mount holds its own reference */
     return rc;
+}
+
+/*
+ * Secrets (fcvm create --secret): fcvm.secrets=PORT names a host vsock port
+ * (lib/secrets.py) that sends NAME\0VALUE\0 pairs. They go to a tmpfs at
+ * /run/secrets, one file per secret, owned by the image's user and readable
+ * by nobody else, so they never touch the VM's disk (a commit can't carry
+ * them). The main process and exec sessions also get them as environment
+ * variables (with_secrets_env).
+ */
+#define SECRETS_DIR "/run/secrets"
+
+static void fetch_secrets(const char *owner)
+{
+    char *port = karg("fcvm.secrets");
+    if (!port)
+        return;
+    uid_t uid = strtoul(owner, NULL, 10);
+    gid_t gid = strchr(owner, ':') ? strtoul(strchr(owner, ':') + 1, NULL, 10) : 0;
+    mkdir_p(SECRETS_DIR, 0700);
+    if (mount("fcvm-secrets", SECRETS_DIR, "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0500,size=1m") < 0) {
+        msg("secrets: mount tmpfs: %s", strerror(errno));
+        return;
+    }
+    struct sockaddr_vm addr = {.svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST, .svm_port = (unsigned)atoi(port)};
+    int s = -1, ok = 0;
+    for (int i = 0; i < 30 && !ok; i++) { /* the host's server may still be starting (jailed VMs) */
+        if (s >= 0)
+            close(s);
+        s = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        ok = s >= 0 && connect(s, (struct sockaddr *)&addr, sizeof(addr)) == 0;
+        if (!ok)
+            usleep(100000);
+    }
+    if (!ok) {
+        msg("secrets: cannot reach the host (vsock port %s): %s", port, strerror(errno));
+        if (s >= 0)
+            close(s);
+        return;
+    }
+    size_t len = 0, cap = 65536;
+    char *d = malloc(cap);
+    ssize_t r;
+    while ((r = read(s, d + len, cap - len)) > 0 || (r < 0 && errno == EINTR)) {
+        if (r > 0)
+            len += r;
+        if (len == cap)
+            d = realloc(d, cap *= 2);
+    }
+    close(s);
+    int n = 0;
+    for (size_t i = 0; i < len;) {
+        char *name = d + i;
+        size_t nl = strnlen(name, len - i);
+        if (i + nl >= len)
+            break;
+        char *value = name + nl + 1;
+        size_t vl = strnlen(value, len - (i + nl + 1));
+        if (i + nl + 1 + vl >= len)
+            break;
+        char path[300];
+        snprintf(path, sizeof(path), SECRETS_DIR "/%s", name);
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0400);
+        if (fd >= 0) {
+            write_all(fd, value, vl);
+            fchown(fd, uid, gid);
+            close(fd);
+            n++;
+        }
+        i += nl + 1 + vl + 1;
+    }
+    chown(SECRETS_DIR, uid, gid);
+    free(d);
+    msg("%d secret(s) in " SECRETS_DIR, n);
+}
+
+/* env + NAME=VALUE for every file in /run/secrets (a final newline dropped). */
+static char **with_secrets_env(char **env)
+{
+    DIR *d = opendir(SECRETS_DIR);
+    if (!d)
+        return env;
+    int n = 0;
+    while (env && env[n])
+        n++;
+    char **out = calloc(n + 2, sizeof(*out));
+    for (int i = 0; i < n; i++)
+        out[i] = env[i];
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.')
+            continue;
+        char path[300];
+        size_t len;
+        snprintf(path, sizeof(path), SECRETS_DIR "/%s", e->d_name);
+        char *v = slurp(path, &len);
+        if (!v)
+            continue;
+        if (len && v[len - 1] == '\n')
+            v[len - 1] = '\0';
+        out = realloc(out, (n + 2) * sizeof(*out));
+        asprintf(&out[n++], "%s=%s", e->d_name, v);
+        out[n] = NULL;
+        free(v);
+    }
+    closedir(d);
+    return out;
 }
 
 static void mount_shares(const char *owner)
@@ -1462,7 +1570,7 @@ static void agent_session(int conn)
     int ni = 0;
     while (image_env && image_env[ni])
         ni++;
-    image_env = with_proxy_env(image_env);
+    image_env = with_secrets_env(with_proxy_env(image_env));
     ni = 0;
     while (image_env && image_env[ni])
         ni++;
@@ -1633,6 +1741,12 @@ int main(int argc, char **argv_)
     }
     if (exec) {
         mount_shares("0:0"); /* system images: files appear owned by root */
+        if (karg("fcvm.secrets")) {
+            /* /run as a tmpfs now, so systemd keeps it (and /run/secrets in it)
+             * instead of mounting its own over them */
+            mnt("tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV | MS_STRICTATIME, "mode=0755");
+            fetch_secrets("0:0");
+        }
         char *host = karg("systemd.hostname");
         if (host && *host)
             hosts_entry(host);
@@ -1650,6 +1764,7 @@ int main(int argc, char **argv_)
             snprintf(owner, sizeof(owner), "%lu:%lu", uid, gid);
         }
         mount_shares(owner);
+        fetch_secrets(owner);
     }
     reboot(RB_DISABLE_CAD); /* Ctrl-Alt-Del arrives as SIGINT: graceful stop */
     unlink(CONF "exit-status");
@@ -1665,7 +1780,7 @@ int main(int argc, char **argv_)
 
     static char *fallback[] = {"/bin/sh", NULL};
     char **argv = abuf && alen ? split0(abuf, alen) : fallback;
-    char **env = with_proxy_env(ebuf && elen ? split0(ebuf, elen) : NULL);
+    char **env = with_secrets_env(with_proxy_env(ebuf && elen ? split0(ebuf, elen) : NULL));
 
     sigset_t all, old;
     sigfillset(&all);

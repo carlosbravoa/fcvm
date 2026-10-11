@@ -1,10 +1,11 @@
 """VM lifecycle: run, create/start/stop/rm, exec, cp, inspect."""
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 
-from fcvmtest import VMTestCase, fcvm, IMAGE, unique, wait_for, VMS
+from fcvmtest import VMTestCase, fcvm, IMAGE, unique, wait_for, VMS, STATE
 
 
 class Run(VMTestCase):
@@ -75,6 +76,28 @@ class Exec(VMTestCase):
         r = fcvm("exec", "-i", self.name, "--", "wc", "-c", input="12345")
         self.assertEqual(r.stdout.strip(), "5")
 
+    def test_background_jobs(self):
+        import time
+        job = fcvm("exec", "-d", self.name, "--", "sh", "-c", "echo started; sleep 1; echo err >&2; exit 4").stdout.strip()
+        self.assertRegex(job, r"^[0-9a-f]{6}$")
+        jobs = json.loads(fcvm("jobs", self.name, "--json").stdout)
+        mine = next(j for j in jobs if j["id"] == job)
+        self.assertEqual((mine["status"], mine["command"][-1]), ("running", "echo started; sleep 1; echo err >&2; exit 4"))
+        wait_for(lambda: next(j for j in json.loads(fcvm("jobs", self.name, "--json").stdout) if j["id"] == job)["status"] == "exited",
+                 20, what="the job to end")
+        r = fcvm("jobs", self.name, job, check=False)                     # its output, and its status as the exit code
+        self.assertEqual((r.returncode, r.stdout.strip(), r.stderr.strip()), (4, "started", "err"))
+        self.assertIn("exited(4)", fcvm("jobs", self.name).stdout)
+        # a long one, killed
+        job = fcvm("exec", "-d", self.name, "--", "sh", "-c", "sleep 300").stdout.strip()
+        time.sleep(0.5)
+        fcvm("jobs", self.name, job, "--kill")
+        wait_for(lambda: next(j for j in json.loads(fcvm("jobs", self.name, "--json").stdout) if j["id"] == job)["status"] == "lost",
+                 10, what="the killed job to be lost")
+        self.assertNotIn("sleep 300", self.sh(self.name, "ps").stdout)        # its process group went with it
+        fcvm("jobs", self.name, "--clear")
+        self.assertEqual(json.loads(fcvm("jobs", self.name, "--json").stdout), [])
+
     def test_cp_roundtrip(self):
         d = tempfile.mkdtemp(prefix="fcvmtest-cp-")
         with open(os.path.join(d, "a.txt"), "w") as f:
@@ -84,6 +107,46 @@ class Exec(VMTestCase):
         fcvm("cp", f"{self.name}:/tmp/a.txt", out)
         with open(out) as f:
             self.assertEqual(f.read(), "payload")
+
+
+class Secrets(VMTestCase):
+    def test_secrets_reach_the_guest_and_not_its_disk(self):
+        d = tempfile.mkdtemp(prefix="fcvmtest-secret-")
+        with open(os.path.join(d, "key.pem"), "w") as f:
+            f.write("---KEY---\n")
+        vm = self.vm("--secret", "API_KEY=sk-123", "--secret", f"TLS_KEY=@{d}/key.pem", "--secret", "FROM_ENV",
+                     start=False)   # (create with FROM_ENV from the environment)
+        self.assertEqual(sorted(self.inspect(vm)["secrets"]), ["API_KEY", "FROM_ENV", "TLS_KEY"])
+        self.assertEqual(oct(os.stat(os.path.join(VMS, vm, "secrets.json")).st_mode & 0o777), "0o600")
+        fcvm("start", vm)
+        out = self.sh(vm, 'cat /run/secrets/API_KEY; echo; cat /run/secrets/TLS_KEY; echo "$API_KEY $TLS_KEY $FROM_ENV"; '
+                          'stat -c "%a %U" /run/secrets/API_KEY; grep secrets /proc/mounts | cut -d" " -f3').stdout
+        self.assertEqual(out.splitlines(), ["sk-123", "---KEY---", "sk-123 ---KEY--- env-value", "400 root", "tmpfs"])
+        # a non-root exec session can't read another user's secrets... but as root it can; the files aren't on disk
+        fcvm("update", vm, "--unset-secret", "TLS_KEY", "--secret", "API_KEY=sk-456")
+        self.assertEqual(sorted(self.inspect(vm)["secrets"]), ["API_KEY", "FROM_ENV"])
+        fcvm("stop", vm)
+        img = self.image_name()
+        fcvm("commit", vm, img)
+        r = subprocess.run(["debugfs", "-R", "ls -p /upper/run/secrets", os.path.join(STATE, "images", f"{img}.ext4")],
+                           capture_output=True, text=True)
+        entries = [l.split("/")[5] for l in r.stdout.splitlines() if l.count("/") >= 6]
+        self.assertEqual([e for e in entries if e not in (".", "..")], [])       # the mount point only, no files
+        fcvm("start", vm)
+        out = self.sh(vm, 'echo "$API_KEY"; ls /run/secrets').stdout.split()
+        self.assertEqual(out, ["sk-456", "API_KEY", "FROM_ENV"])
+
+    def vm(self, *opts, **kw):
+        os.environ["FROM_ENV"] = "env-value"
+        try:
+            return super().vm(*opts, **kw)
+        finally:
+            del os.environ["FROM_ENV"]
+
+    def test_bad_specs(self):
+        for spec in ("1BAD=x", "A-B=x", "NOT_SET_ANYWHERE_XYZ", "F=@/nonexistent"):
+            r = fcvm("create", unique("vm"), IMAGE, "--idle", "--secret", spec, check=False)
+            self.assertNotEqual(r.returncode, 0, spec)
 
 
 class Names(VMTestCase):

@@ -6,6 +6,41 @@ to move across.
 
 ## Unreleased
 
+New:
+
+- **Lifetimes.** `create`/`run --ttl 2h` stops a VM that long after it
+  boots; `--idle-stop 30m` stops it after that long without `exec`,
+  `shell`, `cp` or file operations. `fcvm update` changes them; `ls`,
+  `inspect` and the console show them, and `inspect` says `expired: "ttl"`
+  or `"idle"` after one fired. Templates take `ttl` and `idle_stop`, the API
+  takes them in `POST /vms` and `/update`, and the MCP server's
+  `create_sandbox` takes them too, with `FCVM_MCP_TTL` and
+  `FCVM_MCP_IDLE_STOP` as defaults for sandboxes the agent forgets about.
+  Applied by the supervisor in `fcvm serve`, like restart policies.
+- **Live ports.** `fcvm publish VM [BIND:][HOST]:GUEST` and `fcvm unpublish
+  VM HOSTPORT` add and remove published ports on a running VM, and keep the
+  change for the next start; without a host port a free one is picked and
+  printed. The console's instance page, the API (`POST`/`DELETE
+  /vms/{vm}/ports`) and the MCP server (`publish_port`, which returns a
+  URL, and `unpublish_port`) have the same. Each published port now has
+  its own forwarder.
+- **Background commands.** `fcvm exec -d VM CMD` starts a command as a job
+  and prints its id; `fcvm jobs VM` lists them, `fcvm jobs VM ID [-f]`
+  shows or follows the output, `--kill` ends one. The API gets
+  `POST /vms/{vm}/exec` (also for ordinary commands, with `exit_code`,
+  `stdout` and `stderr`) and `/vms/{vm}/jobs`; the MCP server's `exec`
+  takes `background`, with `jobs`, `job` and `kill_job` tools. An agent
+  can now start a server, publish its port and talk to it.
+- **Secrets.** `create --secret NAME=VALUE | NAME=@FILE | NAME` (from your
+  environment) hands a secret to the VM at boot over vsock, into a tmpfs
+  at `/run/secrets/NAME` and the environment of the app and of `exec`
+  sessions, never onto its disk, so `commit` can't leak it. `update
+  --secret` / `--unset-secret` change them. Templates name them, the API
+  takes `secrets` and `unset_secrets`, and the MCP server passes the
+  secrets named in `FCVM_MCP_SECRETS` from its own environment, with no
+  tool for the agent to see or set them. Needs the initramfs of this
+  release (rebuilt at the next VM start).
+
 Fixes from a code review:
 
 - Live host directories stopped working after about 50 minutes: the 9P

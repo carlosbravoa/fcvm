@@ -79,7 +79,7 @@ User templates are JSON files in `~/.local/share/fcvm/templates/` (or
   "network": "restricted", "allow": ["@pypi"],
   "ports": [], "volumes": ["pip-cache:/root/.cache/pip"],
   "process": "idle", "command": [], "entrypoint": null,
-  "jail": null, "restart": "no"
+  "jail": null, "restart": "no", "ttl": null, "idle_stop": "30m"
 }
 ```
 
@@ -92,6 +92,8 @@ User templates are JSON files in `~/.local/share/fcvm/templates/` (or
 | `process`, `command`, `entrypoint` | `image` (the image's command), `idle`, or `command` (the `command` list). `entrypoint`, when set, replaces the image's |
 | `jail` | `true`, `false`, or `null` for the default (`JAIL` for the CLI; the MCP server jails when it can) |
 | `restart` | the restart policy (`create` only) |
+| `ttl`, `idle_stop` | [lifetimes](vms.md#lifetimes---ttl-and---idle-stop) as `--ttl` and `--idle-stop` take them (`"2h"`, `"30m"`), or `null` |
+| `secrets` | names of [secrets](vms.md#secrets) to pass, taken from the environment of whoever creates the VM (`--secret NAME`); a template never holds a value |
 
 ## With agents
 

@@ -19,6 +19,21 @@ class Failed(unittest.TestCase):
         self.assertFalse(sv.failed({"code": None, "fc_status": None})) # unknown: not a failure
 
 
+class Expiry(unittest.TestCase):
+    """--ttl counts from the boot (the pid file), --idle-stop from the last
+    activity (or the boot, before any)."""
+    def test_cases(self):
+        now = 1000.0
+        self.assertIsNone(sv.expiry({}, now - 5000, now - 5000, now))
+        self.assertIsNone(sv.expiry({"ttl_s": 60}, now - 30, None, now))
+        self.assertEqual(sv.expiry({"ttl_s": 60}, now - 60, now, now), "ttl")        # activity doesn't extend a ttl
+        self.assertIsNone(sv.expiry({"idle_stop_s": 60}, now - 300, now - 10, now))  # used 10 s ago
+        self.assertEqual(sv.expiry({"idle_stop_s": 60}, now - 300, now - 61, now), "idle")
+        self.assertEqual(sv.expiry({"idle_stop_s": 60}, now - 61, None, now), "idle")  # never used since boot
+        self.assertIsNone(sv.expiry({"ttl_s": 60, "idle_stop_s": 60}, None, None, now))   # not booted: nothing to do
+        self.assertEqual(sv.expiry({"ttl_s": 60, "idle_stop_s": 600}, now - 61, now, now), "ttl")
+
+
 class VmState(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp(prefix="fcvm-sv-")

@@ -61,7 +61,7 @@ These use sudo.
 | `start [-a] VM` | boots it in the background, like `docker start`; `-a` attaches the console |
 | `run IMAGE [-d] [opts] [-- CMD...]` | throwaway VM, deleted when it stops. App images: attached like `docker run` (output, Ctrl-C to the app, Ctrl-] detaches, the app's exit code). System images: a shell, or CMD, then stop and delete. `-d`: in the background |
 | `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s. Restart policies then leave it alone until you start it |
-| `update VM --restart POLICY` | changes a VM's restart policy |
+| `update VM [--restart POLICY] [--ttl D\|none] [--idle-stop D\|none] [--secret SPEC]... [--unset-secret NAME]...` | changes a VM's restart policy, lifetime or secrets (secrets apply from the next start) |
 | `rm VM` | deletes a stopped VM and its writable layer (volumes are kept) |
 | `ls [--all] [--json]` | lists VMs: state, exit code, IP, memory used/allocated, disk, network, ports, volumes, restart policy. `--all` includes build VMs |
 | `inspect VM` | one VM's details as JSON, including its last exit |
@@ -84,6 +84,9 @@ These use sudo.
 | `--jail`, `--no-jail` | run under the Firecracker jailer (default: `JAIL`, 0) |
 | `--no-agent` | no exec agent in the VM: no `exec`, `cp`, snapshots or guest metrics. Says what you lose and asks first ([details](vms.md#without-the-exec-agent)) |
 | `--restart POLICY` | `no`, `on-failure`, `unless-stopped`, `always` (`create` only) |
+| `--ttl DURATION` | stop the VM that long after each boot (`90s`, `30m`, `2h`, `1d`); applied by `fcvm serve` ([lifetimes](vms.md#lifetimes---ttl-and---idle-stop)) |
+| `--idle-stop DURATION` | stop it after that long without `exec`, `shell`, `cp` or file operations |
+| `--secret NAME=VALUE`, `NAME=@FILE`, `NAME` | a [secret](vms.md#secrets): a file in `/run/secrets` (a tmpfs, never on the VM's disk) and an environment variable. `NAME` alone takes it from your environment. Repeatable |
 
 ## Templates
 
@@ -98,7 +101,8 @@ These use sudo.
 
 | command | what it does |
 |---|---|
-| `exec [-i] [-t] [-u USER] [-w DIR] [-e K=V]... [--timeout S] VM CMD...` | runs a command in a running VM, like `docker exec`. Exits with its status, or 124 on timeout |
+| `exec [-i] [-t] [-d] [-u USER] [-w DIR] [-e K=V]... [--timeout S] VM CMD...` | runs a command in a running VM, like `docker exec`. Exits with its status, or 124 on timeout. `-d`: in the background, as a job; prints its id |
+| `jobs VM [--json]`, `jobs VM ID [-f]`, `jobs VM ID --kill`, `jobs VM --clear` | background commands: list them, show (or follow) one's output, kill one, forget finished ones |
 | `shell [-u USER] VM` | an interactive shell (bash, else sh). Same as `exec -it VM bash` |
 | `cp [-L] SRC DST` | copies files or directories in or out of a running VM (`VM:PATH` on one side), like `docker cp` |
 | `console VM` | attaches to the live serial console. Ctrl-] detaches; the VM keeps running |
@@ -111,6 +115,7 @@ These use sudo.
 |---|---|
 | `volume create NAME [SIZE]`, `volume ls [--json]`, `volume rm NAME` | named volumes: persistent ext4 disks attached with `-v` |
 | `mount VM HOST/DIR[:GUEST/PATH][:ro]`, `umount VM PATH` | adds or removes a live host directory (same forms as `-v`): at once on a running VM, and from the next start. `umount` takes the guest path or the host directory |
+| `publish VM [BIND:][HOSTPORT]:GUESTPORT`, `unpublish VM HOSTPORT` | publishes or unpublishes a TCP port: at once on a running VM, and from the next start. Without `HOSTPORT` a free one is picked; the spec is printed |
 
 ## Snapshots
 

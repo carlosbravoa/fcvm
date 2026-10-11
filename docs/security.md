@@ -443,7 +443,11 @@ Every one of these gives a guest access to something outside it:
   them like the VM itself.
 - **Committed images** (`fcvm commit`) keep whatever was on disk. Identity
   files (machine-id, SSH host keys, `authorized_keys`) are scrubbed, but
-  credentials you put there aren't.
+  credentials you put there aren't. Use [secrets](vms.md#secrets)
+  (`--secret`) for those: they're handed over at boot through vsock into a
+  tmpfs (`/run/secrets`, mode 0400, the image user's) and never touch the
+  disk. On the host they're in `vms/VM/secrets.json`, mode 0600, and
+  `inspect` shows only their names. A snapshot still holds them, in memory.
 - **SSH keys** aren't part of any image. Each system VM gets
   `authorized_keys` and its own host key at `create`, and `fcvm ssh`
   verifies that host key strictly. VMs created before fcvm 0.6.1 have no

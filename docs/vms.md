@@ -14,6 +14,8 @@ them, moving files, publishing ports and attaching storage.
 - [Volumes](#volumes)
 - [Host directories](#host-directories)
 - [Restart policies](#restart-policies)
+- [Lifetimes: --ttl and --idle-stop](#lifetimes---ttl-and---idle-stop)
+- [Secrets](#secrets)
 - [Jailed VMs](#jailed-vms)
 - [Without the exec agent](#without-the-exec-agent)
 - [Listing and inspecting](#listing-and-inspecting)
@@ -97,6 +99,23 @@ fcvm shell -u root unpriv                    # root shell in an image whose USER
   guest, so users created after import work too. The PTY belongs to that
   user, so `sudo` and `less` work.
 - **System VMs** get the user's home as the working directory.
+- **In the background.** `exec -d` starts the command as a *job* and
+  prints its id instead of waiting, for servers and long builds:
+
+  ```sh
+  job=$(fcvm exec -d -w /app box python -m http.server 8000)
+  fcvm jobs box                 # ID, STATUS (running, exited(N), lost), STARTED, COMMAND
+  fcvm jobs box $job            # its output so far (stdout, then stderr); exits with its status once it ended
+  fcvm jobs box $job -f         # follow
+  fcvm jobs box $job --kill     # end it (the agent kills its process group in the VM)
+  fcvm jobs box --clear         # forget finished jobs
+  ```
+
+  Output goes to `vms/VM/jobs/ID.out` and `ID.err`. A job is `lost` when
+  its connection dropped: the VM stopped, or it was killed. `--timeout`
+  applies to jobs too. The API (`POST /vms/{vm}/exec` with `background`)
+  and the MCP server (`exec` with `background`, then `job`, `jobs`,
+  `kill_job`) have the same.
 - **`fcvm ssh VM`** also works for system images. Each VM gets its keys
   at `create` (fcvm's key in `ssh/` and your `~/.ssh/id_*.pub`), and its
   own host key, which `fcvm ssh` checks. So `ssh root@IP` with your own key
@@ -151,6 +170,20 @@ fcvm create web nginx-latest -p 192.168.1.5:8080:80      # one interface
 - **Direct access.** From the host, you can always reach a VM directly at
   its IP (`fcvm ls`), on any port.
 - **Conflicts.** A port that's already taken stops the VM from starting.
+
+**While it runs.** Ports can be added and removed without a restart, and
+the change is kept for the next start:
+
+```sh
+fcvm publish web 8081:80              # at once if the VM is running
+fcvm publish box :8000                # pick a free host port; prints the spec, e.g. 43127:8000
+fcvm publish box 0.0.0.0:9000:9000    # on every interface
+fcvm unpublish web 8081               # by host port, or the full spec
+```
+
+The web console's instance page has the same (× and **publish…** next to
+the ports), the API has `POST`/`DELETE /vms/{vm}/ports`, and agents get
+`publish_port`, which returns the URL to reach a server in the sandbox.
 
 ## Volumes
 
@@ -223,6 +256,59 @@ fcvm update web --restart on-failure
 `no` (default), `on-failure`, `unless-stopped` or `always`, as in Docker.
 They're applied by the supervisor in `fcvm serve`, normally the fcvm
 service. See [The fcvm service](service.md).
+
+## Lifetimes: --ttl and --idle-stop
+
+```sh
+fcvm run python-3.13-slim -d --idle --ttl 2h          # gone two hours after it boots
+fcvm create box alpine-latest --idle --idle-stop 30m  # stopped after 30 minutes without use
+fcvm update box --ttl 1d --idle-stop none             # change or clear them
+```
+
+Sandboxes tend to be forgotten, by people and by agents. A lifetime ends
+them on their own:
+- **`--ttl DURATION`** stops the VM that long after each boot.
+- **`--idle-stop DURATION`** stops it after that long without use: an
+  `exec`, `shell` or `cp`, a file operation from the console or the API, or
+  the console's Shell. Reading stats doesn't count. Before the first use,
+  the time counts from the boot.
+
+Durations are `90s`, `30m`, `2h` or `1d` (a bare number is seconds). The
+stop is a normal `fcvm stop`: restart policies then leave the VM alone, a
+throwaway VM (`run`) is deleted, and `fcvm inspect` shows `expired: "ttl"`
+or `"idle"` until the next start. `fcvm ls` shows `ttl:2h` and
+`idle-stop:30m`, and `inspect` gives `expires_at` and `idle_expires_at` for
+a running VM. Like restart policies, lifetimes are applied by the supervisor
+in `fcvm serve`, normally the fcvm service; without it, nothing stops the VM.
+
+## Secrets
+
+```sh
+fcvm create box python-3.13-slim --idle --secret API_KEY=sk-abc           # a value
+fcvm create box python-3.13-slim --idle --secret GITHUB_TOKEN              # from your environment
+fcvm create box python-3.13-slim --idle --secret TLS_KEY=@~/certs/key.pem  # a file's content
+fcvm update box --secret API_KEY=sk-new --unset-secret TLS_KEY             # from its next start
+```
+
+A secret reaches the VM at boot over vsock and lives in a tmpfs at
+`/run/secrets/NAME` (mode 0400, owned by the image's user), and as an
+environment variable `NAME` of the app and of every `exec`/`shell`
+session. It's never written to the VM's disk, so `commit` can't carry it
+into an image, and it isn't in `vm.json` either: it's in
+`vms/VM/secrets.json` (mode 0600) on the host.
+
+- **System VMs** get the files in `/run/secrets` and the variables in
+  `exec` sessions; services started by systemd read the files.
+- **Snapshots** contain the VM's memory, secrets included, and forks get
+  the same secrets.
+- **Templates** can name secrets (`"secrets": ["GITHUB_TOKEN"]`): the
+  values come from the environment of whoever creates the VM, so a template
+  never holds one.
+- **The API** takes `secrets: {"NAME": "value"}` in `POST /vms` and
+  `/update` (and `unset_secrets`); the **MCP server** passes the ones named
+  in `FCVM_MCP_SECRETS` from its own environment, and gives the agent no
+  tool to see or set them ([Agents](agents.md#secrets)).
+- `fcvm inspect` lists the names, never the values.
 
 ## Jailed VMs
 

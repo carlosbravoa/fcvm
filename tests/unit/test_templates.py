@@ -21,6 +21,15 @@ class Validate(unittest.TestCase):
             with self.assertRaises(tp.Invalid, msg=bad):
                 tp.validate(bad)
 
+    def test_lifetimes(self):
+        t = tp.validate({"image": "a", "ttl": "2h", "idle_stop": 900})
+        self.assertEqual((t["ttl"], t["idle_stop"]), ("2h", "900"))
+        self.assertEqual(tp.options(t)[-4:], ["--ttl", "2h", "--idle-stop", "900"])
+        self.assertEqual(tp.validate({"image": "a", "ttl": "", "idle_stop": "none"})["ttl"], None)
+        for bad in ("2 hours", "1h30m", "-5", "h"):
+            with self.assertRaises(tp.Invalid, msg=bad):
+                tp.validate({"image": "a", "ttl": bad})
+
     def test_builtins_are_valid(self):
         for f in os.listdir(tp.BUILTIN_DIR):
             with open(os.path.join(tp.BUILTIN_DIR, f)) as fh:

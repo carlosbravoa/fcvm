@@ -15,6 +15,10 @@ removes). Exits are recorded in `last-exit` by the reaper. Restarts back off
 from 1 s, doubling up to 60 s, and the count resets once a VM has run for a
 minute.
 
+Lifetimes (vm.json "ttl_s" and "idle_stop_s", from `--ttl` / `--idle-stop`)
+are applied here too: a running VM is stopped once its TTL since boot, or its
+time since the last exec/shell/cp/console operation, runs out.
+
 At startup the supervisor also cleans up after a crash or reboot: a VM whose
 pid file doesn't match a live process of its own is reaped as stale, and VMs
 that were running then (stale, or marked `resume` by `fcvm _shutdown`) come
@@ -75,6 +79,25 @@ def vm_state(d):
     except OSError:
         return "stopped"
     return "stale" if age > REAP_GRACE else "exiting"
+
+
+def mtime(path):
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return None
+
+
+def expiry(cfg, booted, active, now):
+    """Why a running VM should stop now: "ttl" (vm.json ttl_s since its pid
+    file was written) or "idle" (idle_stop_s since its last activity, which
+    exec/shell/cp and the console's agent operations record), else None."""
+    ttl, idle = cfg.get("ttl_s"), cfg.get("idle_stop_s")
+    if ttl and booted and now - booted >= ttl:
+        return "ttl"
+    if idle and (active or booted) and now - (active or booted) >= idle:
+        return "idle"
+    return None
 
 
 def failed(last):
@@ -192,14 +215,30 @@ class Supervisor:
         await asyncio.gather(*(one(n) for n in todo))
 
     # --- while running ---------------------------------------------------------------
+    async def expire(self, name, d, cfg, now):
+        """Stop a running VM whose --ttl or --idle-stop ran out. The stop
+        counts as the user's (restart policies then leave it alone) and says
+        why in `expired`; a throwaway VM is deleted by its reap."""
+        why = expiry(cfg, mtime(os.path.join(d, "pid")), mtime(os.path.join(d, "activity")), now)
+        if not why:
+            return False
+        self.log(f"{name}: stopping ({'ttl' if why == 'ttl' else 'idle time'} ran out)")
+        code, out = await self.cli("stop", name, env={"FCVM_EXPIRED": why, "QUIET_STOP": "1"})
+        if code != 0:
+            self.log(f"{name}: stop failed: {out.strip()[-300:]}")
+        return True
+
     async def tick(self):
         now = time.time()
         for name, d in list(self.vm_dirs()):
-            policy = self.config(d).get("restart", "no")
+            cfg = self.config(d)
+            policy = cfg.get("restart", "no")
+            state = vm_state(d)
+            if state == "running" and await self.expire(name, d, cfg, now):
+                continue
             if policy == "no":
                 self.pending.pop(name, None)
                 continue
-            state = vm_state(d)
             if state == "running":
                 if now - self.started.get(name, now) > STABLE_AFTER:
                     self.tries.pop(name, None)

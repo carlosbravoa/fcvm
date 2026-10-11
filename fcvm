@@ -50,6 +50,10 @@ VMs:
                              --jail (run under the Firecracker jailer; see jail-setup)
                              --restart no|on-failure|unless-stopped|always (applied by
                              fcvm serve / the fcvm service, like docker's)
+                             --ttl DURATION (stop it that long after boot: 90s, 30m, 2h, 1d)
+                             --idle-stop DURATION (stop it after that long without exec/cp/files)
+                             --secret NAME=VALUE|NAME=@FILE|NAME (into /run/secrets and the env,
+                             never on the VM's disk; NAME alone: from your environment)
   create VM --template NAME [opts] [-- CMD...]
                              create from a saved template; your options override its
   start [-a] VM              boot a VM in the background; -a attaches its console
@@ -60,9 +64,11 @@ VMs:
   stop VM                    ask the guest to shut down (Ctrl-Alt-Del), kill after a timeout
   console VM                 attach to the serial console (Ctrl-] detaches)
   logs [-f] VM               console output of the current or last boot
-  exec [-i] [-t] [-u USER] [-w DIR] [-e K=V]... [--timeout S] VM CMD...
+  exec [-i] [-t] [-d] [-u USER] [-w DIR] [-e K=V]... [--timeout S] VM CMD...
                              run a command in a running VM, like docker exec (over vsock);
-                             USER is name|uid[:group|gid], default: the image's USER
+                             USER is name|uid[:group|gid], default: the image's USER;
+                             -d: in the background as a job (prints its id)
+  jobs VM [ID [-f|--kill]]   background commands: list them, show one's output, kill one
   shell [-u USER] VM         interactive shell in a running VM (= exec -it VM bash|sh)
   ssh VM [args]              ssh root@VM (base images)
   cp SRC DST                 copy files in/out of a running VM (VM:PATH on one side)
@@ -71,11 +77,14 @@ VMs:
   prune                      delete the build cache and leftover build VMs
   mount VM HOST/DIR[:GUEST/PATH][:ro]  add a live host directory (at once if running)
   umount VM PATH             remove it (by its guest path or host directory)
+  publish VM [BIND:][HOST]:GUEST  publish a TCP port (at once if running; no HOST: a free one)
+  unpublish VM HOSTPORT      stop publishing it
   snapshot VM NAME           save a running VM's memory + disk (it keeps running)
   snapshot ls [--json] | rm NAME
   fork SNAPSHOT [NAME] [-n N]  new running VM(s) from a snapshot in ~150 ms, with their own
                              disk, IP, MAC and hostname (processes keep running)
-  update VM --restart POLICY change a VM's restart policy
+  update VM [--restart POLICY] [--ttl D|none] [--idle-stop D|none] [--secret SPEC] [--unset-secret NAME]
+                             change a VM's restart policy, lifetime or secrets
   template ls|show NAME|rm NAME   launch templates (* = built in)
   template save NAME --from VM | IMAGE [create opts] [-- CMD]  [-d DESCRIPTION]
                              save a recipe: create/run --template NAME use it
@@ -116,7 +125,7 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|snapshot|fork|mount|umount|update|template|_reap|_shutdown)
+    images|create|start|run|stop|console|logs|ssh|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|update|template|_reap|_shutdown)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     serve)              exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;

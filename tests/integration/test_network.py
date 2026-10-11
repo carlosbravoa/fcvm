@@ -24,6 +24,31 @@ class Ports(VMTestCase):
         self.assertIn(f"0100007F:{port:04X}", listeners)
         self.assertNotIn(f"00000000:{port:04X}", listeners)
 
+    def test_publish_and_unpublish_live(self):
+        vm = self.vm()
+        self.sh(vm, 'setsid sh -c "while :; do echo hello-live | nc -l -p 8000; done" >/dev/null 2>&1 </dev/null &')
+        spec = fcvm("publish", vm, ":8000").stdout.strip()          # a free host port, picked by fcvm
+        self.assertRegex(spec, r"^\d+:8000$")
+        port = int(spec.split(":")[0])
+        time.sleep(0.5)
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            self.assertEqual(s.recv(100).strip(), b"hello-live")
+        self.assertEqual(self.inspect(vm)["ports"], [spec])
+        self.assertNotEqual(fcvm("publish", vm, spec, check=False).returncode, 0)   # twice: refused
+        fcvm("unpublish", vm, str(port))
+        self.assertEqual(self.inspect(vm)["ports"], [])
+        with self.assertRaises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=2)
+        # on a stopped VM it's kept for the next start
+        fcvm("stop", vm)
+        port2 = free_port()
+        fcvm("publish", vm, f"{port2}:8000")
+        fcvm("start", vm)
+        self.sh(vm, 'setsid sh -c "echo hello-again | nc -l -p 8000" >/dev/null 2>&1 </dev/null &')
+        time.sleep(0.5)
+        with socket.create_connection(("127.0.0.1", port2), timeout=5) as s:
+            self.assertEqual(s.recv(100).strip(), b"hello-again")
+
 
 class Isolation(VMTestCase):
     def test_host_services_are_unreachable(self):

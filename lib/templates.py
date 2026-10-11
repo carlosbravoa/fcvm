@@ -10,7 +10,11 @@ lib/builtin-templates/, which a user template of the same name replaces):
    "network": "full" | "none" | "restricted", "allow": ["@pypi"],
    "ports": ["8080:80"], "volumes": ["cache:/root/.cache", "~/src"],
    "process": "image" | "idle" | "command", "command": ["python", "app.py"],
-   "entrypoint": null, "jail": true | false | null, "restart": "no"}
+   "entrypoint": null, "jail": true | false | null, "restart": "no",
+   "ttl": "2h" | null, "idle_stop": "30m" | null, "secrets": ["GITHUB_TOKEN"]}
+
+`secrets` names environment variables of whoever creates the VM; their
+values go to the VM (fcvm create --secret NAME), never into the template.
 
 `ref`, when set, is imported if the image is missing. `jail: null` means the
 default (JAIL for the CLI, jailed for MCP when the helper exists).
@@ -33,7 +37,10 @@ NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 POLICIES = ("no", "on-failure", "unless-stopped", "always")
 FIELDS = {"description": "", "image": None, "ref": None, "vcpus": None, "mem_mib": None, "disk": None,
           "copy": False, "network": "full", "allow": [], "ports": [], "volumes": [], "process": "image",
-          "command": [], "entrypoint": None, "jail": None, "restart": "no"}
+          "command": [], "entrypoint": None, "jail": None, "restart": "no", "ttl": None, "idle_stop": None,
+          "secrets": []}
+DURATION = re.compile(r"^[0-9]+[smhd]?$")   # as --ttl / --idle-stop take it: 90s, 30m, 2h, 1d
+SECRET = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")   # names only: values come from the environment at create
 
 
 class Invalid(Exception):
@@ -57,9 +64,11 @@ def validate(t):
         raise Invalid("network must be full, none or restricted")
     if out["network"] == "restricted" and not out["allow"]:
         raise Invalid("a restricted network needs an allowlist")
-    for k in ("allow", "ports", "volumes", "command"):
+    for k in ("allow", "ports", "volumes", "command", "secrets"):
         if not isinstance(out[k], list) or not all(isinstance(x, str) for x in out[k]):
             raise Invalid(f"{k} must be a list of strings")
+    if not all(SECRET.match(s) for s in out["secrets"]):
+        raise Invalid("secrets must be a list of names (letters, digits and _), taken from the environment at create")
     if out["process"] not in ("image", "idle", "command"):
         raise Invalid("process must be image, idle or command")
     if out["process"] == "command" and not out["command"]:
@@ -68,6 +77,13 @@ def validate(t):
         raise Invalid(f"restart must be one of {', '.join(POLICIES)}")
     if out["jail"] not in (True, False, None):
         raise Invalid("jail must be true, false or null (the default)")
+    for k in ("ttl", "idle_stop"):
+        if out[k] in ("", 0, "0", "none"):
+            out[k] = None
+        elif out[k] is not None and not (isinstance(out[k], (str, int)) and DURATION.match(str(out[k]))):
+            raise Invalid(f"{k} must be a duration such as 90s, 30m, 2h or 1d (or null)")
+        elif out[k] is not None:
+            out[k] = str(out[k])
     return out
 
 
@@ -141,6 +157,12 @@ def options(t):
         a.append("--jail" if t["jail"] else "--no-jail")
     if t["restart"] != "no":
         a += ["--restart", t["restart"]]
+    if t["ttl"]:
+        a += ["--ttl", t["ttl"]]
+    if t["idle_stop"]:
+        a += ["--idle-stop", t["idle_stop"]]
+    for s in t["secrets"]:
+        a += ["--secret", s]
     return a
 
 
@@ -171,7 +193,13 @@ def from_vm(vm, description=""):
          "volumes": (c.get("volumes") or []) + [f"{s['host']}:{s['path']}" + (":ro" if s.get("ro") else "")
                                                  for s in c.get("shares") or []],
          "network": (c.get("net") or {}).get("mode") or "full", "allow": (c.get("net") or {}).get("allow") or [],
-         "jail": bool(c.get("jail")), "restart": c.get("restart") or "no"}
+         "jail": bool(c.get("jail")), "restart": c.get("restart") or "no",
+         "ttl": f"{c['ttl_s']}s" if c.get("ttl_s") else None,
+         "idle_stop": f"{c['idle_stop_s']}s" if c.get("idle_stop_s") else None}
+    try:
+        t["secrets"] = sorted(_read(os.path.join(vms, "secrets.json")))   # names only
+    except (OSError, ValueError):
+        pass
     # The command lives on the VM's writable layer (/.fcvm/argv, NUL-separated).
     disk = next((os.path.join(vms, d) for d in ("rw.ext4", "disk.ext4") if os.path.exists(os.path.join(vms, d))), None)
     if disk and c.get("type") == "app":

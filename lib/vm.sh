@@ -79,16 +79,20 @@ use_daemon() {   # (the pid test also covers a daemon older than FCVM_DAEMON)
         [ "$PPID" != "$(jq -r .pid "$VMS_DIR/.serve.json")" ] &&
         systemctl is-active -q fcvm.service 2>/dev/null
 }
-daemon_api() {   # METHOD PATH [JSON]: prints the reply; 1 = refused (message on stderr), 2 = unreachable
-    local st=$VMS_DIR/.serve.json out code
+daemon_api() {   # METHOD PATH [JSON]: prints the reply; 1 = refused (message on stderr), 2 = unreachable,
+    local st=$VMS_DIR/.serve.json out code msg   # 3 = a daemon too old to know the operation
     out=$(curl -sS -m 900 -X "$1" -H "Authorization: Bearer $(jq -r .token "$st")" \
         -H 'Content-Type: application/json' ${3:+-d "$3"} -w '\n%{http_code}' \
         "http://127.0.0.1:$(jq -r .port "$st")/api/$2" 2>/dev/null) || return 2
     code=${out##*$'\n'} out=${out%$'\n'*}
     if [[ $code == 2* ]]; then printf '%s' "$out"; return 0; fi
-    printf '\e[1;31merror:\e[0m %s\n' "$(jq -r '.error // .' <<<"$out" 2>/dev/null || echo "$out")" >&2
+    msg=$(jq -r '.error // .' <<<"$out" 2>/dev/null || echo "$out")
+    [[ $msg != "unknown action "* && $msg != "unknown API endpoint" ]] || return 3
+    printf '\e[1;31merror:\e[0m %s\n' "$msg" >&2
     return 1
 }
+# After daemon_api returned 3: say the service is behind, and carry on locally.
+daemon_too_old() { warn "the fcvm service runs an older fcvm (fcvm service install updates it); $1"; }
 
 # A host directory spec, HOST[:GUEST][:ro]; sets SHARE_HOST (resolved),
 # SHARE_GUEST and SHARE_RO. HOST may start with ~. Without GUEST, a directory
@@ -186,6 +190,59 @@ EOF2
 
 RESTART_POLICIES="no on-failure unless-stopped always"
 valid_restart() { [[ " $RESTART_POLICIES " == *" $1 "* ]] || die "--restart wants one of: $RESTART_POLICIES"; }
+
+# A duration (90, 90s, 30m, 2h, 1d) in seconds; "0" and "none" mean unset
+# (prints nothing). For --ttl and --idle-stop.
+duration_s() {   # option value
+    local v=$2
+    [ "$v" != 0 ] && [ "$v" != none ] || return 0
+    [[ $v =~ ^([0-9]+)([smhd])?$ ]] || die "$1 wants a duration such as 90s, 30m, 2h or 1d (0 or none to unset)"
+    case ${BASH_REMATCH[2]:-s} in s) echo "${BASH_REMATCH[1]}" ;; m) echo $((BASH_REMATCH[1] * 60)) ;;
+                                h) echo $((BASH_REMATCH[1] * 3600)) ;; d) echo $((BASH_REMATCH[1] * 86400)) ;; esac
+}
+# vm.json's lifetime fields from --ttl / --idle-stop values ("" = none).
+lifetime_json() {   # ttl idle
+    jq -n --arg t "$1" --arg i "$2" \
+        '(if $t == "" then {} else {ttl_s: ($t | tonumber)} end) + (if $i == "" then {} else {idle_stop_s: ($i | tonumber)} end)'
+}
+# Record a sign of life (exec, shell, cp, files...): --idle-stop counts from the last one.
+touch_activity() { touch "$VMS_DIR/$1/activity" 2>/dev/null || true; }
+
+# --- secrets (create/update --secret): vms/VM/secrets.json, 0600, handed to the
+# guest at boot over vsock into a tmpfs (never on its disk). A spec is
+# NAME=VALUE, NAME=@FILE (the file's content) or NAME (from this environment).
+SECRETS_PORT=9000
+secret_name_ok() { [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "bad secret name '$1' (letters, digits and _)"; }
+# Sets SECRET_NAME and SECRET_VALUE from a spec.
+parse_secret() {
+    local spec=$1
+    SECRET_NAME=${spec%%=*}
+    secret_name_ok "$SECRET_NAME"
+    if [[ $spec != *=* ]]; then
+        [ -n "${!SECRET_NAME+x}" ] || die "--secret $SECRET_NAME: not set in the environment (use NAME=VALUE or NAME=@FILE)"
+        SECRET_VALUE=${!SECRET_NAME}
+    elif [[ ${spec#*=} == @* ]]; then
+        local f=${spec#*=@}
+        [ -f "$f" ] || die "--secret $SECRET_NAME: no such file: $f"
+        SECRET_VALUE=$(cat "$f"; echo x); SECRET_VALUE=${SECRET_VALUE%x}   # keep a final newline as is
+    else
+        SECRET_VALUE=${spec#*=}
+    fi
+}
+# Merge specs ($@) into DIR/secrets.json, removing the names in SECRETS_DEL.
+write_secrets() {   # dir specs...
+    local dir=$1 f=$1/secrets.json cur='{}' n; shift
+    [ ! -f "$f" ] || cur=$(cat "$f")
+    for n in "${SECRETS_DEL[@]}"; do secret_name_ok "$n"; cur=$(jq --arg n "$n" 'del(.[$n])' <<<"$cur"); done
+    local spec
+    for spec in "$@"; do
+        parse_secret "$spec"
+        cur=$(jq --arg n "$SECRET_NAME" --arg v "$SECRET_VALUE" '.[$n] = $v' <<<"$cur")
+    done
+    if [ "$cur" = '{}' ]; then rm -f "$f"; return; fi
+    (umask 077; printf '%s\n' "$cur" > "$f.tmp") && mv "$f.tmp" "$f"
+}
+secret_names() { jq -r 'keys[]' "$1/secrets.json" 2>/dev/null || true; }
 
 # jaild, printing the helper's reply only when it refuses.
 jaild_quiet() { local r; r=$(jaild "$@") || { jq -r '.error // .' <<<"$r" >&2; return 1; }; }
@@ -302,15 +359,17 @@ exit_code() {
 }
 
 create() {
-    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [--restart POLICY] [-- CMD...]"
+    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [--restart POLICY] [--ttl DURATION] [--idle-stop DURATION] [-- CMD...]"
     local vm=${1:?$usage}
     if [ "${2:-}" = --template ]; then template_expand "${@:3}"; set -- "$vm" "${TEMPLATE_ARGS[@]}"; fi
     local image=${2:?$usage}
     shift 2
     local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full allow=()
     local entrypoint=() set_entrypoint=0 jail=${JAIL:-0} jail_set="" vcpus_set=null mem_set=null restart=no agent=1
+    local ttl="" idle_stop="" ttl_raw="" idle_raw="" secrets=()
     while [ $# -gt 0 ]; do
         case $1 in
+            --secret)       parse_secret "${2:?--secret wants NAME=VALUE, NAME=@FILE or NAME}"; secrets+=("$2"); shift 2 ;;
             --vcpus)        vcpus=$2 vcpus_set=$2; shift 2 ;;
             --mem)          mem=$2 mem_set=$2; shift 2 ;;
             --disk)         disk=$2; shift 2 ;;
@@ -320,6 +379,8 @@ create() {
             --no-agent)     agent=0; shift ;;
             --no-jail)      jail=0 jail_set=0; shift ;;
             --restart)      valid_restart "${2:-}"; restart=$2; shift 2 ;;
+            --ttl)          ttl=$(duration_s --ttl "${2:?--ttl wants a duration}") ttl_raw=$2; shift 2 ;;
+            --idle-stop)    idle_stop=$(duration_s --idle-stop "${2:?--idle-stop wants a duration}") idle_raw=$2; shift 2 ;;
             --entrypoint)   set_entrypoint=1; [ -z "${2-}" ] || entrypoint=("$2"); shift 2 ;;
             -p|--publish)   ports+=("$2"); shift 2 ;;
             -v|--volume)    case $2 in
@@ -377,6 +438,11 @@ create() {
         [ -n "${FCVM_TEMPLATE_OUT:-}" ] || [ -f "$VOLUMES_DIR/${p%%:*}.ext4" ] || volume_create "${p%%:*}"
     done
     [ -z "${FCVM_TEMPLATE_OUT:-}" ] || [ $agent = 1 ] || die "--no-agent can't be saved in a template"
+    local secret_names=() s
+    for s in "${secrets[@]}"; do
+        [ -z "${FCVM_TEMPLATE_OUT:-}" ] || [[ $s != *=* ]] || die "a template takes secret names only (--secret NAME, from the environment at create), not values"
+        secret_names+=("${s%%=*}")
+    done
     [ $agent = 1 ] || [ -z "${EPHEMERAL:-}" ] || [ "$type" = app ] ||
         die "run needs the agent for a system image's shell; use create --no-agent, then fcvm console"
     [ $agent = 1 ] || [ -n "${FCVM_TEMPLATE_OUT:-}" ] || confirm_no_agent
@@ -389,11 +455,14 @@ create() {
             --arg net "$netmode" --argjson allow "$(json_list "${allow[@]}")" \
             --arg proc "$proc" --argjson command "$(json_list "${raw_cmd[@]}")" \
             --argjson ep_set "$set_entrypoint" --arg ep "${raw_ep[*]}" --arg jail "$jail_set" --arg restart "$restart" \
+            --arg ttl "${ttl:+$ttl_raw}" --arg idle_stop "${idle_stop:+$idle_raw}" --argjson secrets "$(json_list "${secret_names[@]}")" \
             '{image: $image, ref: (if $ref == "" then null else $ref end), vcpus: $vcpus, mem_mib: $mem,
               disk: (if $disk == "" then null else $disk end), copy: $copy, network: $net, allow: $allow,
               ports: $ports, volumes: $volumes, process: $proc, command: $command,
               entrypoint: (if $ep_set == 1 then $ep else null end),
-              jail: (if $jail == "" then null else ($jail == "1") end), restart: $restart}' > "$FCVM_TEMPLATE_OUT"
+              jail: (if $jail == "" then null else ($jail == "1") end), restart: $restart,
+              ttl: (if $ttl == "" then null else $ttl end), idle_stop: (if $idle_stop == "" then null else $idle_stop end),
+              secrets: $secrets}' > "$FCVM_TEMPLATE_OUT"
         unlock_vm; rm -f "$VMS_DIR/.locks/vm-$vm"
         return 0
     fi
@@ -424,8 +493,12 @@ create() {
         --argjson net "$(jq -n --arg mode "$netmode" '{mode: $mode, allow: $ARGS.positional}' --args "${allow[@]}")" \
         '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
           shares: $shares, net: $net, jail: $jail, restart: $restart, ephemeral: $ephemeral, created: (now | todate)}
-         + (if $agent then {} else {agent: false} end) + (if $hostkey == "" then {} else {ssh_host_key: $hostkey} end)' \
-        --arg hostkey "$hostkey" --argjson agent "$([ $agent = 1 ] && echo true || echo false)" > "$dir/vm.json"
+         + (if $agent then {} else {agent: false} end) + (if $hostkey == "" then {} else {ssh_host_key: $hostkey} end)
+         + $lifetime' \
+        --arg hostkey "$hostkey" --argjson agent "$([ $agent = 1 ] && echo true || echo false)" \
+        --argjson lifetime "$(lifetime_json "$ttl" "$idle_stop")" > "$dir/vm.json"
+    local SECRETS_DEL=()
+    [ ${#secrets[@]} -eq 0 ] || write_secrets "$dir" "${secrets[@]}"
     [ -n "${EPHEMERAL:-}" ] || log "created VM '$vm' from $image ($([ $copy = 1 ] && echo 'private copy' || echo 'shared image + writable layer'))"
 }
 
@@ -500,15 +573,32 @@ ensure_proxy() {
 }
 
 
-# Publish ports for the VM whose firecracker runs as pid $1 (see portfwd.py).
+# Publish ports for the VM whose firecracker runs as pid $1 (see portfwd.py):
+# one forwarder per port, so `fcvm unpublish` can end one while the VM runs.
 start_portfwd() {
     [ ${#PORTS[@]} -gt 0 ] || return 0
     if [ -z "$IP" ]; then warn "no network: ports not published"; return 0; fi
-    setsid python3 "$FCVM_ROOT/lib/portfwd.py" --watch "$1" --target "$IP" "${PORTS[@]}" \
-        </dev/null >"$DIR/portfwd.log" 2>&1 {VM_LOCK}>&- &
-    echo $! > "$DIR/portfwd.pid"
+    local p
+    for p in "${PORTS[@]}"; do forward_port "$1" "$IP" "$p" || return 1; done
+}
+# A forwarder for port spec $3 to the VM at $2 (Firecracker pid $1), recorded
+# in $DIR/portfwd.live as "SPEC PID"; it exits with the VM.
+forward_port() {   # fcpid ip spec
+    local pid
+    setsid python3 "$FCVM_ROOT/lib/portfwd.py" --watch "$1" --target "$2" "$3" \
+        </dev/null >>"$DIR/portfwd.log" 2>&1 {VM_LOCK}>&- &
+    pid=$!
     sleep 0.3
-    kill -0 $! 2>/dev/null || { cat "$DIR/portfwd.log" >&2; return 1; }
+    kill -0 $pid 2>/dev/null || { tail -n 3 "$DIR/portfwd.log" >&2; return 1; }
+    echo "$3 $pid" >> "$DIR/portfwd.live"
+}
+# End the forwarders listed in $1/portfwd.live (all, or only spec $2).
+stop_portfwd() {   # dir [spec]
+    [ -f "$1/portfwd.live" ] || return 0
+    local s p
+    while read -r s p; do [ -n "${2:-}" ] && [ "$s" != "$2" ] || kill_ours "$p" portfwd.py; done < "$1/portfwd.live"
+    if [ -n "${2:-}" ]; then awk -v s="$2" '$1 != s' "$1/portfwd.live" > "$1/portfwd.live.tmp" && mv "$1/portfwd.live.tmp" "$1/portfwd.live"
+    else rm -f "$1/portfwd.live"; fi
 }
 
 # fcvm start [-a] VM: boot in the background (like docker start); -a attaches the
@@ -539,7 +629,8 @@ start() {
     lock_vm "$vm"
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" && die "VM '$vm' is already running (pid $(vm_pid "$vm"))"
-    rm -f "$VMS_DIR/$vm/stopped" "$VMS_DIR/$vm/resume"
+    rm -f "$VMS_DIR/$vm/stopped" "$VMS_DIR/$vm/resume" "$VMS_DIR/$vm/expired"
+    touch_activity "$vm"   # --idle-stop counts from the boot until the first exec
     [ -x "$FIRECRACKER" ] || die "firecracker not installed (run: fcvm firecracker)"
     sock_room "$vm"
     local kernel type vcpus mem image
@@ -631,6 +722,8 @@ start() {
         gspecs+=("$((10000 + i)):$(jq -r ".shares[$i].path + (if .shares[$i].ro then \":ro\" else \"\" end)" "$DIR/vm.json")")
     done
     [ $nshares = 0 ] || args+=" fcvm.shares=$(IFS=,; echo "${gspecs[*]}")"
+    local secrets=0; [ ! -s "$DIR/secrets.json" ] || secrets=$(jq length "$DIR/secrets.json")
+    [ "$secrets" = 0 ] || args+=" fcvm.secrets=$SECRETS_PORT"
     [ "$type" = system ] && args+=" fcvm.exec=/sbin/init"
     [ "$(jq -r '.agent != false' "$DIR/vm.json")" = true ] || args+=" fcvm.agent=0"
     if [ "$type" = app ]; then
@@ -665,9 +758,9 @@ start() {
               vcpus: $vcpus, mem_mib: $mem, tap: (if $tap == "" then null else $tap end), mac: $mac}
               + (if $restore == "" then {} else {restore: $restore} end)' --arg restore "${RESTORE:-}" > "$DIR/jail-request.json"
     fi
-    rm -f "$DIR/fc.sock" "$DIR/vsock.sock" "$DIR/console.sock" "$DIR/pid" "$DIR/waiter" "$DIR/firecracker.log"
+    rm -f "$DIR/fc.sock" "$DIR/vsock.sock" "$DIR/console.sock" "$DIR/pid" "$DIR/waiter" "$DIR/firecracker.log" "$DIR/portfwd.live"
     [ $jailed = 1 ] || : > "$DIR/firecracker.log"
-    : > "$DIR/console.log"
+    : > "$DIR/console.log"; : > "$DIR/portfwd.log"
     local fc=("$FIRECRACKER" --api-sock "$DIR/fc.sock" --config-file "$DIR/fc.json"
               --log-path "$DIR/firecracker.log" --level Warning)
     local info="$type, ${vcpus} vCPU, ${mem} MiB, kernel ${kernel##*/}${IP:+, ip $IP}"
@@ -693,8 +786,22 @@ start() {
         [ -S "${1}_10000" ] || { cat "$DIR/share.log" >&2; die "host directory server failed to start"; }
     }
     if [ ${#exports[@]} -gt 0 ] && [ $jailed = 0 ]; then start_shares "$DIR/vsock.sock"; fi
+    # Secrets: a server at <vsock uds>_9000 (lib/secrets.py), started like the shares.
+    start_secrets() {   # uds-prefix
+        (
+            if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
+            exec {VM_LOCK}>&-
+            exec setsid python3 "$FCVM_ROOT/lib/secrets.py" serve --uds "${1}_$SECRETS_PORT" --file "$DIR/secrets.json" \
+                --pidfile "$DIR/pid" </dev/null >"$DIR/secrets.log" 2>&1
+        ) &
+        echo $! > "$DIR/secrets.pid"
+        for ((i = 0; i < 50; i++)); do [ -S "${1}_$SECRETS_PORT" ] && break; sleep 0.02; done
+        [ -S "${1}_$SECRETS_PORT" ] || { cat "$DIR/secrets.log" >&2; die "the secrets server failed to start"; }
+    }
+    if [ "$secrets" != 0 ] && [ $jailed = 0 ]; then start_secrets "$DIR/vsock.sock"; fi
     local launch=(-- "${fc[@]}")
     [ $jailed = 0 ] || launch=(--jail "$DIR/jail-request.json" --link-dir "$DIR")
+    [ "$secrets" = 0 ] || info+=", $secrets secret(s)"
     setsid python3 "$FCVM_ROOT/lib/console.py" serve --sock "$DIR/console.sock" --log "$DIR/console.log" \
         --pidfile "$DIR/pid" --on-exit "$(printf '%q _reap %q' "$FCVM_ROOT/fcvm" "$vm")" "${launch[@]}" \
         </dev/null >"$DIR/relay.log" 2>&1 {VM_LOCK}>&- &
@@ -703,6 +810,7 @@ start() {
     [ -n "$pid" ] || { cat "$DIR/relay.log" >&2; die "console relay failed to start"; }
     record_pid_id "$vm" "$pid"
     if [ ${#exports[@]} -gt 0 ] && [ $jailed = 1 ]; then start_shares "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi
+    if [ "$secrets" != 0 ] && [ $jailed = 1 ]; then start_secrets "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi
     if ! start_portfwd "$pid"; then
         if [ $jailed = 1 ]; then jaild kill "$vm" >/dev/null || true; else kill "$pid" 2>/dev/null || true; fi
         die "cannot publish ports; VM not started"
@@ -760,8 +868,11 @@ stop() {
     vm_exists "$vm" || die "no VM '$vm'"
     dir=$(vm_dir "$vm")
     # Stopped by you: restart policies leave it alone until you start it again.
-    # A stop for host shutdown (fcvm _shutdown) marks it to resume instead.
+    # A stop for host shutdown (fcvm _shutdown) marks it to resume instead. A
+    # stop because its --ttl or --idle-stop ran out (the supervisor sets
+    # FCVM_EXPIRED) counts as yours, and says why in `expired`.
     [ -n "${FCVM_SYSTEM_STOP:-}" ] || touch "$dir/stopped"
+    [ -z "${FCVM_EXPIRED:-}" ] || echo "$FCVM_EXPIRED" > "$dir/expired"
     if vm_running "$vm"; then
         pid=$(vm_pid "$vm")
         # Resent every 2 s: during early boot the guest's keyboard driver isn't listening yet.
@@ -778,7 +889,7 @@ stop() {
             if vm_jailed "$vm"; then jaild kill "$vm" >/dev/null || true; else kill -9 "$pid"; fi
         fi
         for ((i = 0; i < 50; i++)); do [ -f "$dir/pid" ] || break; sleep 0.1; done   # relay reaps
-        [ -n "${QUIET_STOP:-}" ] || log "stopped '$vm'"
+        [ -n "${QUIET_STOP:-}" ] || log "stopped '$vm'${FCVM_EXPIRED:+ (its ${FCVM_EXPIRED/idle/idle time} ran out)}"
     fi
     [ -f "$dir/pid" ] && reap "$vm"   # relay gone (crash, host reboot): reap here
     return 0
@@ -809,8 +920,10 @@ reap() {
     fi
     jq -n --arg code "$app" --arg fcs "$fcs" --argjson stale "$([ -n "${FCVM_STALE:-}" ] && echo true || echo false)" \
         '{code: ($code | tonumber? // null), fc_status: ($fcs | tonumber? // null), stale: $stale, at: now}' > "$dir/last-exit"
-    kill_ours "$(cat "$dir/portfwd.pid" 2>/dev/null)" portfwd.py
+    kill_ours "$(cat "$dir/portfwd.pid" 2>/dev/null)" portfwd.py   # VMs started before 0.7: one forwarder for all ports
+    stop_portfwd "$dir"
     kill_ours "$(cat "$dir/share.pid" 2>/dev/null)" share9p.py; rm -f "$dir/share.pid"
+    kill_ours "$(cat "$dir/secrets.pid" 2>/dev/null)" secrets.py; rm -f "$dir/secrets.pid"
     if [ -f "$dir/share.live" ]; then
         local sp; for sp in $(awk '{print $2}' "$dir/share.live"); do kill_ours "$sp" share9p.py; done
         rm -f "$dir/share.live"
@@ -906,13 +1019,14 @@ ssh_vm() {
 # fcvm exec [-i] [-t] [-u USER] VM [CMD...]: like `docker exec`, over vsock
 # (no network or sshd needed). USER is name|uid[:group|gid], resolved in the guest.
 exec_vm() {
-    local usage="usage: fcvm exec [-i] [-t] [-u USER] [-w DIR] [-e KEY=VAL]... [--timeout SECS] VM [CMD...]" flags=()
+    local usage="usage: fcvm exec [-i] [-t] [-d] [-u USER] [-w DIR] [-e KEY=VAL]... [--timeout SECS] VM [CMD...]" flags=() detach=0
     while [[ ${1:-} == -* ]]; do
         case $1 in
             -u|--user)     flags+=(-u "${2:?$usage}"); shift 2 ;;
             -w|--workdir)  flags+=(-w "${2:?$usage}"); shift 2 ;;
             -e|--env)      [[ ${2:-} == *=* ]] || die "-e wants KEY=VALUE"; flags+=(-e "$2"); shift 2 ;;
             --timeout)     [[ ${2:-} =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--timeout wants seconds"; flags+=(--timeout "$2"); shift 2 ;;
+            -d|--detach)   detach=1; shift ;;
             -i|-t|-it|-ti) [[ $1 == *i* ]] && flags+=(-i); [[ $1 == *t* ]] && flags+=(-t); shift ;;
             *)             die "unknown option $1 ($usage)" ;;
         esac
@@ -922,7 +1036,86 @@ exec_vm() {
     vm_running "$vm" || die "VM '$vm' is not running"
     need_agent "$vm" exec
     [ "$(jq -r '.net.mode // "full"' "$(vm_dir "$vm")/vm.json")" != restricted ] || ensure_proxy
+    touch_activity "$vm"
+    if [ $detach = 1 ]; then
+        [ $# -gt 0 ] || die "exec -d wants a command"
+        start_job "$vm" "$@"
+        return
+    fi
     python3 "$FCVM_ROOT/lib/exec_client.py" "${flags[@]}" "$(vm_dir "$vm")/vsock.sock" -- "$@"
+}
+
+# --- background commands: fcvm exec -d, fcvm jobs ---------------------------------------
+# A job is a command started with `exec -d`: it runs through the agent like any
+# exec, but from a host-side process of its own, with its output in
+# vms/VM/jobs/ID.out and ID.err and its exit status in ID.status once it ends.
+# Killing that process drops the agent connection, and the agent kills the
+# command's process group in the guest. (Uses `flags` from exec_vm.)
+start_job() {   # vm cmd...
+    local vm=$1 dir jd id; shift
+    dir=$(vm_dir "$vm"); jd=$dir/jobs
+    mkdir -p "$jd"
+    id=$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    jq -n --arg id "$id" --argjson command "$(json_list "$@")" '{id: $id, command: $command, started: now}' > "$jd/$id.json"
+    (
+        exec {VM_LOCK}>&-
+        if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
+        exec setsid bash -c '
+            python3 "$1" "${@:3}" </dev/null >"$2.out" 2>"$2.err" & echo $! > "$2.pid"
+            wait $!; echo $? > "$2.status"' job \
+            "$FCVM_ROOT/lib/exec_client.py" "$jd/$id" "${flags[@]}" "$dir/vsock.sock" -- "$@" </dev/null >/dev/null 2>&1
+    ) &
+    log "job $id started in '$vm' (fcvm jobs $vm $id shows its output)"
+    echo "$id"
+}
+
+# One job's state as JSON: status running | exited | lost (the connection
+# dropped: the VM stopped, or the job was killed), with its exit code.
+job_json() {   # jobs-dir id
+    local jd=$1 id=$2 status=running code="" ended=null
+    if [ -f "$jd/$id.status" ]; then
+        code=$(cat "$jd/$id.status"); ended=$(stat -c %Y "$jd/$id.status")
+        status=exited; [ "$code" -lt 128 ] || [ "$code" = 124 ] || status=lost   # killed, or the VM went away (255)
+    elif ! kill -0 "$(cat "$jd/$id.pid" 2>/dev/null)" 2>/dev/null; then
+        status=lost
+    fi
+    jq --arg s "$status" --arg c "$code" --argjson ended "$ended" \
+        '. + {status: $s, exit_code: ($c | tonumber? // null), ended: $ended}' "$jd/$id.json"
+}
+
+# fcvm jobs VM [--json] | VM ID [-f] | VM ID --kill | VM --clear
+jobs_cmd() {
+    local usage="usage: fcvm jobs VM [--json] | fcvm jobs VM ID [-f] | fcvm jobs VM ID --kill | fcvm jobs VM --clear"
+    local vm=${1:?$usage} jd f id; shift
+    vm_exists "$vm" || die "no VM '$vm'"
+    jd=$(vm_dir "$vm")/jobs
+    case ${1:-} in
+        ""|--json)
+            for f in "$jd"/*.json; do [ -f "$f" ] || continue; job_json "$jd" "$(basename "$f" .json)"; done |
+            if [ "${1:-}" = --json ]; then jq -s 'sort_by(.started)'; else
+                jq -rs 'sort_by(.started)[] | [.id, (if .status == "exited" then "exited(\(.exit_code))" else .status end),
+                    (.started | todate), (.command | join(" ") | .[0:60])] | @tsv' |
+                { printf 'ID\tSTATUS\tSTARTED\tCOMMAND\n'; cat; } | column -t -s $'\t'
+            fi ;;
+        --clear)
+            local n=0
+            for f in "$jd"/*.status; do [ -f "$f" ] || continue; id=$(basename "$f" .status); rm -f "$jd/$id".*; n=$((n + 1)); done
+            log "removed $n finished job(s) of '$vm'" ;;
+        *)
+            id=$1; shift
+            [ -f "$jd/$id.json" ] || die "no job '$id' in '$vm' (see: fcvm jobs $vm)"
+            case ${1:-} in
+                --kill)
+                    [ ! -f "$jd/$id.status" ] || die "job $id has already ended"
+                    kill_ours "$(cat "$jd/$id.pid" 2>/dev/null)" exec_client.py
+                    log "killed job $id" ;;
+                -f) tail -n +1 -f --pid="$(cat "$jd/$id.pid")" "$jd/$id.out" 2>/dev/null
+                    cat "$jd/$id.err" >&2 ;;
+                "") cat "$jd/$id.out"; cat "$jd/$id.err" >&2
+                    [ ! -f "$jd/$id.status" ] || exit "$(cat "$jd/$id.status")" ;;
+                *)  die "$usage" ;;
+            esac ;;
+    esac
 }
 
 # fcvm shell [-u USER] VM: interactive shell (bash, else sh), as the image's user by default.
@@ -1448,6 +1641,65 @@ umount_cmd() {
     log "unmounted $gpath from '$vm'"
 }
 
+# --- published ports: fcvm publish / unpublish ----------------------------------------
+
+# fcvm publish VM [BIND:][HOSTPORT]:GUESTPORT: publish a port of a VM, running
+# or not. On a running VM the forwarder starts at once; either way the port is
+# saved for the next start. Without HOSTPORT a free one is picked. Prints the
+# spec (for scripts: `fcvm publish box :8000` -> 43127:8000).
+publish_cmd() {
+    local usage="usage: fcvm publish VM [BIND:][HOSTPORT]:GUESTPORT   (no HOSTPORT: a free one is picked)"
+    local vm=${1:?$usage} spec=${2:?$usage} dir bind hport gport
+    vm_exists "$vm" || die "no VM '$vm'"
+    [[ $spec =~ ^(([0-9.]+):)?([0-9]*):([0-9]+)(/tcp)?$ ]] || die "bad port spec '$spec' ($usage)"
+    bind=${BASH_REMATCH[2]} hport=${BASH_REMATCH[3]} gport=${BASH_REMATCH[4]}
+    if [ -z "${FCVM_DAEMON:-}" ] && vm_running "$vm" && use_daemon; then   # its forwarder must live where the VM does
+        local reply rc=0
+        reply=$(daemon_api POST "vms/$vm/ports" "$(jq -n --arg p "$spec" '{port: $p}')") || rc=$?
+        if [ $rc = 0 ]; then jq -r '.ports[-1]' <<<"$reply"; return; fi
+        [ $rc = 2 ] || [ $rc = 3 ] || exit 1
+        [ $rc = 2 ] || daemon_too_old "the forwarder runs from this terminal and ends with it"
+    fi
+    lock_vm "$vm"
+    dir=$(vm_dir "$vm")
+    [ "$(jq -r '.net.mode // "full"' "$dir/vm.json")" != none ] || die "'$vm' has no network (--net none); nothing to publish"
+    if [ -z "$hport" ]; then
+        hport=$(python3 -c 'import socket, sys; s = socket.socket(); s.bind((sys.argv[1], 0)); print(s.getsockname()[1])' "${bind:-127.0.0.1}") ||
+            die "cannot pick a free port on ${bind:-127.0.0.1}"
+    fi
+    spec="${bind:+$bind:}$hport:$gport"
+    jq -e --arg p "$spec" '.ports | index($p)' "$dir/vm.json" >/dev/null && die "'$vm' already publishes $spec"
+    local live=""
+    if vm_running "$vm"; then
+        [ -s "$dir/ip" ] || die "'$vm' is running without a network; nothing to publish"
+        DIR=$dir forward_port "$(vm_pid "$vm")" "$(cat "$dir/ip")" "$spec" || die "cannot publish $spec"
+        live=" (live)"
+    fi
+    jq --arg p "$spec" '.ports = ((.ports // []) + [$p])' "$dir/vm.json" > "$dir/vm.json.tmp" && mv "$dir/vm.json.tmp" "$dir/vm.json"
+    log "published $spec -> '$vm' port $gport${live:-" (from its next start)"}"
+    echo "$spec"
+}
+
+# fcvm unpublish VM HOSTPORT|SPEC: the opposite, by host port or the full spec.
+unpublish_cmd() {
+    local usage="usage: fcvm unpublish VM HOSTPORT|[BIND:]HOSTPORT:GUESTPORT"
+    local vm=${1:?$usage} arg=${2:?$usage} dir spec
+    vm_exists "$vm" || die "no VM '$vm'"
+    if [ -z "${FCVM_DAEMON:-}" ] && vm_running "$vm" && use_daemon; then
+        local rc=0
+        daemon_api DELETE "vms/$vm/ports?port=$arg" >/dev/null || rc=$?
+        if [ $rc = 0 ]; then log "unpublished $arg from '$vm'"; return; fi
+        [ $rc = 2 ] || [ $rc = 3 ] || exit 1
+    fi
+    lock_vm "$vm"
+    dir=$(vm_dir "$vm")
+    spec=$(jq -r --arg a "$arg" '[(.ports // [])[] | select(. == $a or (split(":") | .[-2]) == $a)][0] // empty' "$dir/vm.json")
+    [ -n "$spec" ] || die "'$vm' doesn't publish $arg (fcvm ls shows its ports)"
+    ! vm_running "$vm" || stop_portfwd "$dir" "$spec"
+    jq --arg p "$spec" '.ports -= [$p]' "$dir/vm.json" > "$dir/vm.json.tmp" && mv "$dir/vm.json.tmp" "$dir/vm.json"
+    log "unpublished $spec from '$vm'"
+}
+
 # --- machine-readable state ------------------------------------------------------
 
 # Host memory a running VM actually uses: its Firecracker process's resident
@@ -1465,14 +1717,22 @@ inspect_json() {
         code=$(exit_code "$vm"); [ -z "$code" ] || state=exited
     fi
     local rss=""; [ -z "$pid" ] || rss=$(vm_rss "$pid")
+    # Lifetime: when --ttl and --idle-stop would stop a running VM (Unix time).
+    local booted="" active=""
+    if [ "$state" = running ]; then booted=$(stat -c %Y "$d/pid" 2>/dev/null || true); active=$(stat -c %Y "$d/activity" 2>/dev/null || echo "$booted"); fi
     jq --arg name "$vm" --arg state "$state" --arg pid "$pid" --arg ip "$ip" --arg code "$code" --arg rss "$rss" \
         --argjson disk "$(( $(stat -c %b "$d"/*.ext4 | head -1) * 512 ))" \
         --arg mode "$([ -f "$d/disk.ext4" ] && echo copy || echo overlay)" \
         --argjson chain "$(jq -n '$ARGS.positional' --args $(image_chain "$(jq -r .image "$d/vm.json")"))" \
-        '{name: $name, state: $state, pid: ($pid | tonumber? // null), ip: ($ip | select(. != "") // null),
+        --arg booted "$booted" --arg active "$active" --arg expired "$(cat "$d/expired" 2>/dev/null || true)" \
+        --argjson secrets "$(jq -c 'keys' "$d/secrets.json" 2>/dev/null || echo '[]')" \
+        '{name: $name, state: $state, pid: ($pid | tonumber? // null), ip: ($ip | select(. != "") // null), secrets: $secrets,
           mem_used_bytes: ($rss | tonumber? // null),
           exit_code: ($code | tonumber? // null), image_chain: $chain, disk_mode: $mode, disk_used_bytes: $disk,
-          stopped_by_user: $stopped, last_exit: $last} + {restart: "no"} + .' \
+          stopped_by_user: $stopped, last_exit: $last,
+          expires_at: (if .ttl_s and $booted != "" then ($booted | tonumber) + .ttl_s else null end),
+          idle_expires_at: (if .idle_stop_s and $active != "" then ($active | tonumber) + .idle_stop_s else null end),
+          expired: (if $expired == "" then null else $expired end)} + {restart: "no"} + .' \
         --argjson stopped "$([ -f "$d/stopped" ] && echo true || echo false)" \
         --argjson last "$(cat "$d/last-exit" 2>/dev/null || echo null)" "$d/vm.json"
 }
@@ -1554,7 +1814,10 @@ list_vms() {
         used=$(du -h "$d"/*.ext4 2>/dev/null | awk '{print $1; exit}')
         [ -f "$d/disk.ext4" ] && used+=" copy"
         printf "$fmt" "$vm" "$state" "$ip" "$(jq -r .image "$d/vm.json")" "$mem" "$used" \
-            "$(jq -r '[(if .jail then "jail" else empty end), (if .agent == false then "no-agent" else empty end), (if (.restart // "no") != "no" then "restart:\(.restart)" else empty end), (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
+            "$(jq -r 'def dur: if . % 86400 == 0 then "\(. / 86400 | floor)d" elif . % 3600 == 0 then "\(. / 3600 | floor)h" elif . % 60 == 0 then "\(. / 60 | floor)m" else "\(.)s" end;
+                [(if .jail then "jail" else empty end), (if .agent == false then "no-agent" else empty end), (if (.restart // "no") != "no" then "restart:\(.restart)" else empty end),
+                 (if .ttl_s then "ttl:\(.ttl_s | dur)" else empty end), (if .idle_stop_s then "idle-stop:\(.idle_stop_s | dur)" else empty end),
+                 (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
                 + (.ports // []) + ((.volumes // []) | map("-v " + .))
                 + ((.shares // []) | map("-v \(.host):\(.path)\(if .ro then ":ro" else "" end)")) | join(" ")' "$d/vm.json")"
     done
@@ -1589,23 +1852,43 @@ list_images() {
     done
 }
 
-# fcvm update VM --restart POLICY: change settings of an existing VM.
+# fcvm update VM [--restart POLICY] [--ttl D] [--idle-stop D]: change settings of an existing VM.
 update() {
-    local usage="usage: fcvm update VM --restart no|on-failure|unless-stopped|always" vm=${1:-} restart=""
+    local usage="usage: fcvm update VM [--restart no|on-failure|unless-stopped|always] [--ttl DURATION|none] [--idle-stop DURATION|none] [--secret SPEC]... [--unset-secret NAME]..."
+    local vm=${1:-} restart="" ttl="" idle="" set_ttl=0 set_idle=0 what=() secrets=() SECRETS_DEL=()
     [ -n "$vm" ] || die "$usage"; shift
     while [ $# -gt 0 ]; do
         case $1 in
-            --restart) valid_restart "${2:-}"; restart=$2; shift 2 ;;
-            *)         die "unknown option $1 ($usage)" ;;
+            --restart)   valid_restart "${2:-}"; restart=$2; shift 2 ;;
+            --ttl)       ttl=$(duration_s --ttl "${2:?$usage}") set_ttl=1; shift 2 ;;
+            --idle-stop) idle=$(duration_s --idle-stop "${2:?$usage}") set_idle=1; shift 2 ;;
+            --secret)    parse_secret "${2:?$usage}"; secrets+=("$2"); shift 2 ;;
+            --unset-secret) SECRETS_DEL+=("${2:?$usage}"); shift 2 ;;
+            *)           die "unknown option $1 ($usage)" ;;
         esac
     done
-    [ -n "$restart" ] || die "$usage"
+    [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || die "$usage"
     lock_vm "$vm"
     vm_exists "$vm" || die "no VM '$vm'"
     local f=$VMS_DIR/$vm/vm.json
-    [ "$restart" = no ] || [ "$(jq -r .ephemeral "$f")" != true ] || die "'$vm' is a throwaway VM (fcvm run); restart policies don't apply"
-    jq --arg r "$restart" '.restart = $r' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-    log "'$vm': restart policy $restart$([ "$restart" = no ] || echo " (applied by fcvm serve / the fcvm service)")"
+    if [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ]; then
+        write_secrets "$VMS_DIR/$vm" "${secrets[@]}"
+        what+=("secrets: $(secret_names "$VMS_DIR/$vm" | tr '\n' ' ')(from its next start)")
+    fi
+    if [ -n "$restart" ]; then
+        [ "$restart" = no ] || [ "$(jq -r .ephemeral "$f")" != true ] || die "'$vm' is a throwaway VM (fcvm run); restart policies don't apply"
+        jq --arg r "$restart" '.restart = $r' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+        what+=("restart policy $restart")
+    fi
+    if [ $set_ttl = 1 ]; then
+        jq --arg t "$ttl" 'if $t == "" then del(.ttl_s) else .ttl_s = ($t | tonumber) end' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+        what+=("ttl ${ttl:+${ttl}s}${ttl:-none}")
+    fi
+    if [ $set_idle = 1 ]; then
+        jq --arg t "$idle" 'if $t == "" then del(.idle_stop_s) else .idle_stop_s = ($t | tonumber) end' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+        what+=("idle-stop ${idle:+${idle}s}${idle:-none}")
+    fi
+    log "'$vm': $(IFS=,; echo "${what[*]}") (applied by fcvm serve / the fcvm service)"
 }
 
 # fcvm _shutdown [--force]: run by fcvm.service when it stops. Only while the
@@ -1693,6 +1976,9 @@ case $cmd in
     fork)    fork_cmd "$@" ;;
     mount)   mount_cmd "$@" ;;
     umount)  umount_cmd "$@" ;;
+    publish) publish_cmd "$@" ;;
+    unpublish) unpublish_cmd "$@" ;;
+    jobs)    jobs_cmd "$@" ;;
     rm)      rm_vm "$@" ;;
     update)  update "$@" ;;
     template) template_cmd "$@" ;;

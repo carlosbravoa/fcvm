@@ -31,6 +31,15 @@ JAIL = os.environ.get("FCVM_MCP_JAIL", "1") != "0" and os.path.exists("/run/fcvm
 # The template create_sandbox uses when the agent names neither an image nor a
 # template, e.g. FCVM_MCP_TEMPLATE=python-sandbox (see `fcvm template ls`).
 DEFAULT_TEMPLATE = os.environ.get("FCVM_MCP_TEMPLATE", "").strip()
+# Lifetimes for sandboxes the agent doesn't give one (agents leak VMs):
+# FCVM_MCP_TTL=4h stops a sandbox that long after boot, FCVM_MCP_IDLE_STOP=30m
+# one that saw no exec/file operation for that long. Applied by fcvm serve.
+DEFAULT_TTL = os.environ.get("FCVM_MCP_TTL", "").strip()
+DEFAULT_IDLE_STOP = os.environ.get("FCVM_MCP_IDLE_STOP", "").strip()
+# Secrets every sandbox gets, by name, from this server's own environment
+# (FCVM_MCP_SECRETS=GITHUB_TOKEN,API_KEY): the agent never sees the values,
+# and there is no tool to set them.
+SECRETS = [s.strip() for s in os.environ.get("FCVM_MCP_SECRETS", "").split(",") if s.strip()]
 
 INSTRUCTIONS = """fcvm runs Firecracker microVMs: real kernel isolation, ~1 s to boot a container
 image, ~2 s for Ubuntu. Typical loop: images (or pull_image) -> create_sandbox ->
@@ -43,7 +52,10 @@ for installs. Network: "full" (NAT), "none", or an allowlist of hosts/@presets
 (@pypi, @npm, @github, ...) enforced by a host-side HTTP(S) proxy; the sandbox's
 http(s)_proxy variables are preset, and egress_log shows what was allowed or
 denied. Files in a sandbox are lost on remove_vm unless committed or stored on
-a volume."""
+a volume. Sandboxes you don't remove stay up: give create_sandbox a ttl or
+idle_stop (e.g. "2h", "30m") so they stop on their own.""" + (
+    f" Every sandbox gets these secrets as files in /run/secrets and environment variables: {', '.join(SECRETS)}."
+    if SECRETS else "")
 
 
 class ToolError(Exception):
@@ -132,7 +144,7 @@ def t_templates():
 
 
 def t_create_sandbox(image=None, template=None, name=None, command=None, vcpus=None, mem_mib=None, ports=None,
-                     volumes=None, network=None):
+                     volumes=None, network=None, ttl=None, idle_stop=None):
     if not image and not template:
         template = DEFAULT_TEMPLATE
         if not template:
@@ -159,7 +171,13 @@ def t_create_sandbox(image=None, template=None, name=None, command=None, vcpus=N
     if not name:
         name = f"{image.split('-')[0]}-{os.urandom(3).hex()}"
     t = {**t, "jail": bool(JAIL or t["jail"]), "vcpus": vcpus or t["vcpus"], "mem_mib": mem_mib or t["mem_mib"],
-         "ports": t["ports"] + list(ports or []), "volumes": t["volumes"] + list(volumes or [])}
+         "ports": t["ports"] + list(ports or []), "volumes": t["volumes"] + list(volumes or []),
+         "ttl": str(ttl or t["ttl"] or DEFAULT_TTL or "") or None,
+         "idle_stop": str(idle_stop or t["idle_stop"] or DEFAULT_IDLE_STOP or "") or None}
+    try:
+        t = templates.validate(t)
+    except templates.Invalid as e:
+        raise ToolError(str(e))
     if command:
         t["process"], t["command"] = "command", list(command)
     if PINNED_NETWORK or network is not None:
@@ -172,6 +190,10 @@ def t_create_sandbox(image=None, template=None, name=None, command=None, vcpus=N
         elif net:
             t["network"], t["allow"] = "restricted", net[1].split(",")
     args = ["create", name, image, *templates.options(t)]
+    for s in SECRETS:
+        if s not in os.environ:
+            raise ToolError(f"the server is configured to pass secret {s}, which isn't set in its environment")
+        args += ["--secret", s]
     if img["type"] == "app":
         # with no template, a container image stays up idle for exec
         args += templates.process(t) if template or command else ["--idle"]
@@ -180,12 +202,14 @@ def t_create_sandbox(image=None, template=None, name=None, command=None, vcpus=N
     return inspect(name)
 
 
-def t_exec(vm, command=None, argv=None, workdir=None, env=None, user=None, timeout=300, stdin=None):
+def t_exec(vm, command=None, argv=None, workdir=None, env=None, user=None, timeout=300, stdin=None, background=False):
     if bool(command) == bool(argv):
         raise ToolError("pass exactly one of command (a shell string) or argv (a list)")
     running(vm)
     args = ["exec", "--timeout", timeout]
-    if stdin is not None:
+    if background:
+        args.append("-d")
+    elif stdin is not None:
         args.append("-i")
     if workdir:
         args += ["-w", workdir]
@@ -194,6 +218,9 @@ def t_exec(vm, command=None, argv=None, workdir=None, env=None, user=None, timeo
     for k, v in (env or {}).items():
         args += ["-e", f"{k}={v}"]
     args += [vm, *(["sh", "-c", command] if command else argv)]
+    if background:
+        job = fcvm(*args)[1].strip()
+        return {"job": job, "vm": vm, "hint": f"job(vm, '{job}') shows its output and status; kill_job ends it"}
     code, out, err = fcvm(*args, input=(stdin or "").encode() if stdin is not None else None,
                           timeout=timeout + 30, check=False)
     out, t1 = cap(out)
@@ -204,6 +231,27 @@ def t_exec(vm, command=None, argv=None, workdir=None, env=None, user=None, timeo
     if t1 or t2:
         result["truncated"] = True
     return result
+
+
+def t_jobs(vm):
+    return json.loads(fcvm("jobs", vm, "--json")[1])
+
+
+def t_job(vm, job, tail_lines=100):
+    info = next((j for j in t_jobs(vm) if j["id"] == job), None)
+    if not info:
+        raise ToolError(f"no job {job} in {vm} (see jobs)")
+    code, out, err = fcvm("jobs", vm, job, check=False)
+    for k, text in (("stdout", out), ("stderr", err)):
+        lines = text.splitlines()
+        info[k] = "\n".join(lines[-tail_lines:])
+        info[f"{k}_truncated"] = len(lines) > tail_lines
+    return info
+
+
+def t_kill_job(vm, job):
+    fcvm("jobs", vm, job, "--kill")
+    return {"killed": job}
 
 
 def t_write_file(vm, path, content, user=None):
@@ -286,6 +334,18 @@ def t_remove_snapshot(name):
     return {"removed": name}
 
 
+def t_publish_port(vm, guest_port, host_port=None, bind=None):
+    spec = f"{bind + ':' if bind else ''}{host_port or ''}:{int(guest_port)}"
+    out = fcvm("publish", vm, spec)[1].strip()
+    hp = out.split(":")[-2]
+    return {"spec": out, "host_port": int(hp), "url": f"http://{bind or '127.0.0.1'}:{hp}"}
+
+
+def t_unpublish_port(vm, host_port):
+    fcvm("unpublish", vm, host_port)
+    return {"unpublished": host_port}
+
+
 def t_egress_log(vm, lines=50):
     return {"log": ANSI.sub("", fcvm("egress", vm, "-n", lines)[1])}
 
@@ -320,7 +380,11 @@ TOOLS = {
          "volumes": {"type": "array", "items": S, "description": "NAME:/PATH[:ro] for a named volume (created on first use), or /HOST/DIR:/PATH[:ro] to mount a host directory live (edits show up on both sides)"},
          "network": {"description": 'full (default), "none", or an allowlist: ["@pypi", "github.com", "*.example.com"]'
                      + (f". Pinned by the server to: {PINNED_NETWORK}" if PINNED_NETWORK else ""),
-                     "anyOf": [S, {"type": "array", "items": S}]}},
+                     "anyOf": [S, {"type": "array", "items": S}]},
+         "ttl": {**S, "description": "stop the sandbox this long after boot, e.g. 2h, 30m, 90s"
+                 + (f" (default {DEFAULT_TTL})" if DEFAULT_TTL else "")},
+         "idle_stop": {**S, "description": "stop it after this long without exec or file operations, e.g. 30m"
+                       + (f" (default {DEFAULT_IDLE_STOP})" if DEFAULT_IDLE_STOP else "")}},
         []),
     "exec": (t_exec, "Run a command in a running VM. Returns exit_code, stdout and stderr (capped).",
              {"vm": S, "command": {**S, "description": "shell command, run with sh -c"},
@@ -328,7 +392,13 @@ TOOLS = {
               "workdir": S, "env": {"type": "object", "additionalProperties": S},
               "user": {**S, "description": "name|uid[:group|gid]; default: the image's USER"},
               "timeout": {**I, "description": "seconds, default 300; exit_code 124 on timeout"},
-              "stdin": {**S, "description": "text fed to the command's stdin"}}, ["vm"]),
+              "stdin": {**S, "description": "text fed to the command's stdin"},
+              "background": {"type": "boolean", "description": "don't wait: start it as a job and return its id (for servers and long builds); see job, jobs, kill_job"}}, ["vm"]),
+    "jobs": (t_jobs, "List the background commands of a VM (started with exec background=true): id, command, status running|exited|lost, exit_code.",
+             {"vm": S}, ["vm"]),
+    "job": (t_job, "A background command's status and the tail of its stdout and stderr.",
+            {"vm": S, "job": S, "tail_lines": I}, ["vm", "job"]),
+    "kill_job": (t_kill_job, "End a background command (its process group in the VM is killed).", {"vm": S, "job": S}, ["vm", "job"]),
     "write_file": (t_write_file, "Write a text file in a running VM (parent directories are created).",
                    {"vm": S, "path": S, "content": S, "user": S}, ["vm", "path", "content"]),
     "read_file": (t_read_file, "Read a text file from a running VM.",
@@ -357,6 +427,11 @@ TOOLS = {
     "remove_snapshot": (t_remove_snapshot, "Delete a snapshot (forks made from it keep running).", {"name": S}, ["name"]),
     "egress_log": (t_egress_log, "A sandbox's network policy and its recent allowed/denied requests.",
                    {"vm": S, "lines": I}, ["vm"]),
+    "publish_port": (t_publish_port,
+        "Publish a TCP port of a running VM on the host, e.g. to reach a dev server it runs: returns the host port and a URL (http://127.0.0.1:PORT). A free host port is picked unless host_port is given. Stays published across restarts of the VM.",
+        {"vm": S, "guest_port": I, "host_port": I, "bind": {**S, "description": "host address to listen on (default 127.0.0.1)"}},
+        ["vm", "guest_port"]),
+    "unpublish_port": (t_unpublish_port, "Stop publishing a host port of a VM.", {"vm": S, "host_port": I}, ["vm", "host_port"]),
 }
 
 

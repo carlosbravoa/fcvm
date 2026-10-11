@@ -74,12 +74,16 @@ an SSH key.
 | `POST /vms/{vm}/start` | | `fcvm start` |
 | `POST /vms/{vm}/stop` | | `fcvm stop`; restart policies then leave it alone |
 | `POST /vms/{vm}/restart` | | stop, then start |
-| `POST /vms/{vm}/update` | `{"restart": "no\|on-failure\|unless-stopped\|always"}` | `fcvm update --restart` |
+| `POST /vms/{vm}/update` | `{"restart": "no\|on-failure\|unless-stopped\|always", "ttl": "2h", "idle_stop": null, "secrets": {"NAME": "value"}, "unset_secrets": ["OLD"]}` | `fcvm update`: any of these; `null` or `""` clears a lifetime; secrets apply from the next start |
 | `POST /vms/{vm}/snapshot` | `{"name": "snap"}` | `fcvm snapshot` |
 | `POST /vms/{vm}/commit` | `{"image": "name"}` | `fcvm commit` (the VM must be stopped) |
 | `DELETE /vms/{vm}` | | stop it if running, then delete it |
 | `GET /vms/{vm}/stats` | `?range=10m\|1h\|6h\|24h` | `{"span", "samples": [...], "guest": [...]}`. `samples`, from the host: `cpu_pct`, `rss`, `disk_read_bps`, `disk_write_bps`, `net_rx_bps`, `net_tx_bps`. `guest`, from inside the VM: `g_cpu_pct` (100 = one vCPU), `g_mem_used`, `g_mem_total`, `g_disk_used`, `g_disk_total`, `g_load1`, `g_procs`. `10m` (the default) is every 2 s (guest: 10 s); longer ranges are one-minute averages, with both sets of fields in each point |
 | `GET /vms/{vm}/processes` | | the guest's processes: `{"t", "uptime", "load1", "mem_used", "mem_total", "cpus", "processes": [{pid, ppid, uid, user, state, comm, cmd, rss, ticks, cpu_pct, kernel, fcvm}]}`. `cpu_pct` is since the previous call (null on the first); `fcvm` labels fcvm's own processes |
+| `POST /vms/{vm}/exec` | `{"command": "sh string"}` or `{"argv": [...]}`, plus `workdir`, `env` (object), `user`, `stdin`, `timeout` (s, default 300), `background` | `fcvm exec`: `{"exit_code", "stdout", "stderr"}` (`timed_out` on a timeout), or with `background` `{"job": id}` |
+| `GET /vms/{vm}/jobs` | | background commands: `[{id, command, started, status: running\|exited\|lost, exit_code, ended}]` |
+| `GET /vms/{vm}/jobs/{id}` | `?tail=200` | one job, plus `stdout` and `stderr` (the last `tail` lines; `0` for all) |
+| `DELETE /vms/{vm}/jobs/{id}` | | kill it |
 | `GET /vms/{vm}/logs` | | `{"log": "..."}`: console output, the last 200 KB |
 | `GET /vms/{vm}/egress` | | `{"text": "..."}`: a restricted VM's allowlist and recent decisions |
 
@@ -92,6 +96,7 @@ an SSH key.
   "ports": ["8080:80"], "volumes": ["cache:/root/.cache", "/home/me/src:/work:ro"],
   "idle": true, "command": "shell command (app images, when not idle)",
   "jail": true, "restart": "unless-stopped", "start": true,
+  "ttl": "2h", "idle_stop": "30m", "secrets": {"API_KEY": "sk-..."},
   "disk": "16G", "copy": false, "entrypoint": null, "ref": "python:3.13-slim"
 }
 ```
@@ -109,6 +114,8 @@ Fields worth knowing in a VM object (as `fcvm inspect`, plus `vm.json`):
 | `stopped_by_user` | stopped with `fcvm stop`, so restart policies leave it alone |
 | `last_exit` | how it last ended: `code` (an app's exit code), `fc_status` (Firecracker's: 0 = the guest shut down; negative = killed by that signal), `stale` (it was running when the host crashed or rebooted), `at` (Unix time) |
 | `supervisor` | `null`, or `{"restart_at", "attempts", "error"}` while a restart is pending or after a failed one |
+| `ttl_s`, `idle_stop_s`, `expires_at`, `idle_expires_at`, `expired` | [lifetimes](vms.md#lifetimes---ttl-and---idle-stop): the settings in seconds, when they would stop a running VM (Unix time), and `"ttl"` or `"idle"` after one did |
+| `secrets` | the names of the VM's [secrets](vms.md#secrets) (never their values) |
 | `jail`, `net`, `ports`, `volumes`, `shares`, `ip`, `pid`, `mem_used_bytes`, `disk_used_bytes` | as the names say |
 
 ## Files and host directories in a VM
@@ -124,6 +131,8 @@ even one without a shell.
 | `POST /vms/{vm}/files` | `{"op": "mkdir\|remove\|rename", "path": "...", "to": "..."}` | directory operations; `remove` is recursive |
 | `POST /vms/{vm}/mounts` | `{"host": "~/dir", "path": "/guest/path", "ro": false}` | `fcvm mount`: a live host directory. `host` may start with `~`; `path` may be empty (a directory in the home goes to the image user's home, any other to the same path) or start with `~` |
 | `DELETE /vms/{vm}/mounts` | `?path=/guest/path` | `fcvm umount` (the guest path, e.g. `~/dir`) |
+| `POST /vms/{vm}/ports` | `{"port": "[BIND:][HOSTPORT]:GUESTPORT"}` | `fcvm publish`: live on a running VM, kept for the next start; without a host port a free one is picked (the new spec is the last of `ports` in the reply) |
+| `DELETE /vms/{vm}/ports` | `?port=HOSTPORT` (or the full spec) | `fcvm unpublish` |
 
 ## Images, snapshots, volumes
 

@@ -72,10 +72,10 @@ class HTTPError(Exception):
 
 # --- fcvm CLI ------------------------------------------------------------------------
 
-async def fcvm(*args, timeout=120, stdin=None):
+async def fcvm(*args, timeout=120, stdin=None, env=None):
     p = await asyncio.create_subprocess_exec(
         FCVM, *map(str, args), stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env={**os.environ, **(env or {})})
     try:
         out, err = await asyncio.wait_for(p.communicate(stdin), timeout)
     except asyncio.TimeoutError:
@@ -375,6 +375,27 @@ def frame(kind, payload=b""):
     return kind + struct.pack(">I", len(payload)) + payload
 
 
+def secret_env(d):
+    """The request's secrets ({NAME: VALUE}) as an environment for `fcvm
+    create/update --secret NAME`, so values stay off the command line."""
+    secrets = d.get("secrets") or {}
+    if not isinstance(secrets, dict):
+        raise HTTPError(400, "secrets must be an object of NAME: VALUE")
+    for n, v in secrets.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n) or not isinstance(v, str) or "\0" in v:
+            raise HTTPError(400, f"bad secret {n!r}: names are letters, digits and _; values are text")
+    return secrets
+
+
+def touch_activity(vmdir):
+    """Record a sign of life for --idle-stop (as `fcvm exec` does)."""
+    try:
+        with open(os.path.join(vmdir, "activity"), "w"):
+            pass
+    except OSError:
+        pass
+
+
 async def read_frame(r):
     hdr = await r.readexactly(5)
     return hdr[:1], await r.readexactly(struct.unpack(">I", hdr[1:])[0])
@@ -394,6 +415,8 @@ async def agent_open(vmdir, *fields):
         r, w = await asyncio.open_unix_connection(os.path.join(vmdir, "vsock.sock"))
     except OSError:
         raise HTTPError(409, "the instance is not running")
+    if fields[:1] != ("metrics",):
+        touch_activity(vmdir)                    # a file operation counts as use (--idle-stop); sampling doesn't
     w.write(b"CONNECT 1024\n")
     await w.drain()
     if not (await r.readline()).startswith(b"OK "):
@@ -595,7 +618,16 @@ class App:
                 return {**await fcvm_json("inspect", name), "supervisor": self.supervisor.status(name)}
             case ("POST", "vms", 1):
                 return await self.launch(d)
-            case ("POST", "vms", 3) if parts[2] not in ("files", "mounts"):
+            case ("POST", "vms", 3) if parts[2] == "exec":
+                return await self.exec(name, d)
+            case ("GET", "vms", 3) if parts[2] == "jobs":
+                return await fcvm_json("jobs", name, "--json")
+            case ("GET", "vms", 4) if parts[2] == "jobs":
+                return await self.job(name, parts[3], int(q.get("tail", 200)))
+            case ("DELETE", "vms", 4) if parts[2] == "jobs":
+                await fcvm_ok("jobs", name, parts[3], "--kill")
+                return {"killed": parts[3]}
+            case ("POST", "vms", 3) if parts[2] not in ("files", "mounts", "ports"):
                 return await self.vm_action(name, parts[2], d)
             case ("DELETE", "vms", 2):
                 await fcvm("stop", name, timeout=60)
@@ -696,6 +728,18 @@ class App:
                 if not re.fullmatch(r"(/|~/|~$)[^:,\0]*", path):
                     raise HTTPError(400, "a path is required")
                 await fcvm_ok("umount", name, path)
+                return await fcvm_json("inspect", name)
+            case ("POST", "vms", 3) if parts[2] == "ports":
+                port = str(d.get("port", "")).strip()        # [BIND:][HOST]:GUEST, as fcvm publish
+                if not re.fullmatch(r"([0-9.]+:)?[0-9]*:[0-9]+(/tcp)?", port):
+                    raise HTTPError(400, "port must be [BIND:][HOSTPORT]:GUESTPORT")
+                await fcvm_ok("publish", name, port)
+                return await fcvm_json("inspect", name)
+            case ("DELETE", "vms", 3) if parts[2] == "ports":
+                port = q.get("port", "")
+                if not re.fullmatch(r"([0-9.]+:)?[0-9]+(:[0-9]+(/tcp)?)?", port):
+                    raise HTTPError(400, "port must be a host port or a full spec")
+                await fcvm_ok("unpublish", name, port)
                 return await fcvm_json("inspect", name)
             # --- build projects (W3)
             case ("GET", "builds", 1):
@@ -941,18 +985,66 @@ class App:
             args.append("--jail")
         if d.get("restart") and d["restart"] != "no":
             args += ["--restart", d["restart"]]
+        for opt in ("ttl", "idle_stop"):
+            if d.get(opt):
+                args += [f"--{opt.replace('_', '-')}", str(d[opt]).strip()]
+        secrets = secret_env(d)
+        args += [a for n in secrets for a in ("--secret", n)]   # values through the environment, not argv
         if itype == "app" and d.get("entrypoint") is not None:
             args += ["--entrypoint", str(d["entrypoint"])]
         cmd = d.get("command", "").strip()
         if cmd and not d.get("idle"):
             args += ["--", "sh", "-c", cmd]
-        await fcvm_ok(*args)
+        await fcvm_ok(*args, env=secrets)
         if d.get("start", True):
             try:
                 await fcvm_ok("start", name, timeout=60)
             except HTTPError as e:
                 raise HTTPError(400, f"created '{name}', but it failed to start: {e.message}")
         return await fcvm_json("inspect", name)
+
+    async def exec(self, name, d):
+        """POST /vms/{vm}/exec: `fcvm exec`, with the same arguments as the MCP
+        tool. {"exit_code", "stdout", "stderr"}, or {"job": id} in the background."""
+        command, argv = d.get("command"), d.get("argv")
+        if bool(command) == bool(argv):
+            raise HTTPError(400, "pass exactly one of command (a shell string) or argv (a list)")
+        if argv and not (isinstance(argv, list) and all(isinstance(a, str) for a in argv)):
+            raise HTTPError(400, "argv must be a list of strings")
+        timeout = int(d.get("timeout") or 300)
+        args = ["exec", "--timeout", timeout]
+        if d.get("background"):
+            args.append("-d")
+        elif d.get("stdin") is not None:
+            args.append("-i")
+        if d.get("workdir"):
+            args += ["-w", d["workdir"]]
+        if d.get("user"):
+            args += ["-u", d["user"]]
+        for k, v in (d.get("env") or {}).items():
+            args += ["-e", f"{k}={v}"]
+        args += [name, *(["sh", "-c", command] if command else argv)]
+        if d.get("background"):
+            out, _ = await fcvm_ok(*args)
+            return {"job": out.strip()}
+        stdin = (d.get("stdin") or "").encode() if d.get("stdin") is not None else None
+        code, out, err = await fcvm(*args, timeout=timeout + 30, stdin=stdin)
+        return {"exit_code": code, "stdout": out, "stderr": err, **({"timed_out": True} if code == 124 else {})}
+
+    async def job(self, name, jid, tail):
+        """GET /vms/{vm}/jobs/{id}: its state and the tails of its output."""
+        if not NAME.match(jid):
+            raise HTTPError(400, "invalid job id")
+        jobs = await fcvm_json("jobs", name, "--json")
+        job = next((j for j in jobs if j["id"] == jid), None)
+        if not job:
+            raise HTTPError(404, f"no job {jid}")
+        jd = os.path.join(VMS, name, "jobs", jid)
+        for stream in ("out", "err"):
+            lines = read(f"{jd}.{stream}").splitlines()
+            job[f"std{stream}"] = "\n".join(lines[-tail:]) if tail else "\n".join(lines)
+            job[f"std{stream}_truncated"] = bool(tail) and len(lines) > tail
+        return job
 
     async def vm_action(self, name, action, d):
         if action == "start":
@@ -968,10 +1060,23 @@ class App:
                 raise HTTPError(400, "a snapshot name is required")
             await fcvm_ok("snapshot", name, snap, timeout=300)
         elif action == "update":
-            policy = d.get("restart", "")
-            if policy not in ("no", "on-failure", "unless-stopped", "always"):
-                raise HTTPError(400, "restart must be no, on-failure, unless-stopped or always")
-            await fcvm_ok("update", name, "--restart", policy)
+            args = []
+            if "restart" in d:
+                if d["restart"] not in ("no", "on-failure", "unless-stopped", "always"):
+                    raise HTTPError(400, "restart must be no, on-failure, unless-stopped or always")
+                args += ["--restart", d["restart"]]
+            for opt in ("ttl", "idle_stop"):      # a duration, or "" / null / "none" to unset
+                if opt in d:
+                    args += [f"--{opt.replace('_', '-')}", str(d[opt] or "none").strip()]
+            secrets = secret_env(d)
+            args += [a for n in secrets for a in ("--secret", n)]
+            for n in d.get("unset_secrets") or []:
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(n)):
+                    raise HTTPError(400, f"bad secret name {n!r}")
+                args += ["--unset-secret", n]
+            if not args:
+                raise HTTPError(400, "nothing to update: give restart, ttl, idle_stop, secrets or unset_secrets")
+            await fcvm_ok("update", name, *args, env=secrets)
         elif action == "commit":
             img = d.get("image", "").strip()
             if not NAME.match(img or "-"):
@@ -1011,6 +1116,7 @@ class App:
         op, first = await ws.recv()         # {"rows": R, "cols": C, "user": "..."}
         opts = json.loads(first or b"{}") if op == 0x1 else {}
         r, w = await asyncio.open_unix_connection(os.path.join(d, "vsock.sock"))
+        touch_activity(d)
         w.write(b"CONNECT 1024\n")
         await w.drain()
         line = await r.readline()

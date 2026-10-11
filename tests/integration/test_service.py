@@ -97,6 +97,77 @@ class Service(VMTestCase):
         self.assertEqual(self.server.api("DELETE", "templates/python-sandbox")[0], 400)   # built in
         self.assertEqual(self.server.api("DELETE", f"templates/{name}")[0], 200)
 
+    def test_ttl_stops_the_vm(self):
+        vm = self.vm("--ttl", "4s")
+        self.new_api("templates")
+        info = self.inspect(vm)
+        self.assertEqual(info["ttl_s"], 4)
+        self.assertGreater(info["expires_at"], 0)
+        self.assertIn("ttl:4s", fcvm("ls").stdout)
+        wait_for(lambda: self.inspect(vm)["state"] != "running", 30, what="the TTL to stop the VM")
+        info = self.inspect(vm)
+        self.assertEqual((info["expired"], info["stopped_by_user"]), ("ttl", True))
+        fcvm("start", vm)                                     # a new life, the marker gone
+        self.assertIsNone(self.inspect(vm)["expired"])
+        fcvm("update", vm, "--ttl", "none", "--idle-stop", "1h")
+        info = self.inspect(vm)
+        self.assertEqual((info.get("ttl_s"), info["idle_stop_s"]), (None, 3600))
+
+    def test_idle_stop_counts_from_the_last_use(self):
+        import time
+        vm = self.vm("--idle-stop", "5s")
+        self.new_api("templates")
+        for _ in range(4):                                    # kept alive by use for longer than the idle time
+            time.sleep(2)
+            self.sh(vm, "true")
+        self.assertEqual(self.inspect(vm)["state"], "running")
+        wait_for(lambda: self.inspect(vm)["state"] != "running", 30, what="the idle stop")
+        self.assertEqual(self.inspect(vm)["expired"], "idle")
+
+    def test_ttl_through_the_api_and_a_template(self):
+        self.new_api("templates")
+        name = unique("tpl")
+        self.addCleanup(fcvm, "template", "rm", name, check=False)
+        code, body = self.server.api("POST", "templates", {"name": name, "image": IMAGE, "ttl": "3h", "idle_stop": "20m"})
+        self.assertEqual((code, body["ttl"], body["idle_stop"]), (200, "3h", "20m"), body)
+        vm = unique("vm")
+        self.addCleanup(self.remove_vm, vm)
+        code, body = self.server.api("POST", "vms", {"name": vm, "image": IMAGE, "idle": True, "start": False,
+                                                      "ttl": "3h", "idle_stop": "20m"})
+        self.assertEqual((code, body["ttl_s"], body["idle_stop_s"]), (200, 10800, 1200), body)
+        code, body = self.server.api("POST", f"vms/{vm}/update", {"idle_stop": None})
+        self.assertEqual((code, body.get("idle_stop_s")), (200, None), body)
+        self.assertEqual(self.server.api("POST", f"vms/{vm}/update", {"ttl": "soon"})[0], 400)
+
+    def test_exec_api_and_jobs(self):
+        vm = self.vm()
+        self.new_api("templates")
+        code, body = self.server.api("POST", f"vms/{vm}/exec", {"command": "echo $X; echo e >&2; exit 3", "env": {"X": "hi"}})
+        self.assertEqual((code, body["exit_code"], body["stdout"].strip(), body["stderr"].strip()), (200, 3, "hi", "e"), body)
+        code, body = self.server.api("POST", f"vms/{vm}/exec", {"argv": ["wc", "-c"], "stdin": "12345"})
+        self.assertEqual((code, body["stdout"].strip()), (200, "5"), body)
+        self.assertEqual(self.server.api("POST", f"vms/{vm}/exec", {})[0], 400)
+        code, body = self.server.api("POST", f"vms/{vm}/exec", {"command": "echo bg; sleep 60", "background": True})
+        self.assertEqual(code, 200, body)
+        job = body["job"]
+        code, body = wait_for(lambda: (lambda r: r if r[1].get("stdout", "").strip() == "bg" else None)(
+            self.server.api("GET", f"vms/{vm}/jobs/{job}")), 15, what="the job's output")
+        self.assertEqual(body["status"], "running")
+        self.assertEqual(self.server.api("DELETE", f"vms/{vm}/jobs/{job}")[0], 200)
+        wait_for(lambda: self.server.api("GET", f"vms/{vm}/jobs/{job}")[1]["status"] == "lost", 10, what="the kill")
+        self.assertEqual(self.server.api("GET", f"vms/{vm}/jobs")[1][0]["id"], job)
+
+    def test_ports_api(self):
+        vm = self.vm()
+        self.new_api("templates")
+        code, body = self.server.api("POST", f"vms/{vm}/ports", {"port": ":8000"})
+        self.assertEqual(code, 200, body)
+        spec = body["ports"][-1]
+        self.assertRegex(spec, r"^\d+:8000$")
+        self.assertEqual(self.server.api("POST", f"vms/{vm}/ports", {"port": "nope"})[0], 400)
+        code, body = self.server.api("DELETE", f"vms/{vm}/ports?port={spec.split(':')[0]}")
+        self.assertEqual((code, body["ports"]), (200, []), body)
+
     def test_throwaway_vms_take_no_policy(self):
         r = fcvm("run", IMAGE, "--restart", "always", "--", "true", check=False)
         self.assertNotEqual(r.returncode, 0)

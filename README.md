@@ -180,13 +180,15 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ Docker semantics: ENTRYPOINT/CMD, env, workdir, user, exit codes passed through
 
 **Day-to-day**
-- ✅ `run` (throwaway), `create`/`start`/`stop`, `exec` (TTY or pipes, timeouts, `-u`, `-w`, `-e`), `shell`, `cp`
+- ✅ `run` (throwaway), `create`/`start`/`stop`, `exec` (TTY or pipes, timeouts, `-u`, `-w`, `-e`, `-d` for background jobs), `shell`, `cp`
 - ✅ Serial console with attach/detach, and logs
 - ✅ Shared read-only images, a copy-on-write layer per VM, `commit` to new layers, `squash`
 - ✅ Named volumes and live host directories (at boot, or added to a running VM)
-- ✅ Published TCP ports, bound to localhost by default
+- ✅ Published TCP ports, bound to localhost by default, added and removed live (`publish`/`unpublish`)
 - ✅ Snapshots of running VMs, and forks in ~150 ms with their own disk, IP, MAC and hostname
 - ✅ Restart policies (`no`, `on-failure`, `unless-stopped`, `always`), recovery after crashes and reboots
+- ✅ Lifetimes: `--ttl 2h` and `--idle-stop 30m` end forgotten sandboxes on their own
+- ✅ Secrets (`--secret API_KEY`): into a tmpfs and the environment at boot, never onto the VM's disk
 - ✅ Templates: saved launch recipes, built-in sandboxes for Python, Node and offline work, shared by the CLI, console and MCP
 - ✅ JSON output everywhere (`--json`, `inspect`)
 - ✅ One-line install (per user, or `--system`), `fcvm upgrade` with rollback, versioned releases

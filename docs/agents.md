@@ -8,6 +8,8 @@ behaves exactly as on the command line.
 - [Tools](#tools)
 - [Network policy](#network-policy)
 - [Jailing](#jailing)
+- [Secrets](#secrets)
+- [Lifetimes](#lifetimes)
 - [Behaviour and limits](#behaviour-and-limits)
 - [Patterns](#patterns)
 
@@ -34,15 +36,17 @@ The agent needs the images it will use. It can import them itself
 | tool | does |
 |---|---|
 | `images`, `pull_image` | list images; import from Docker Hub or any registry, or a local archive |
-| `create_sandbox` | create and boot a VM from an `image` or a `template`. App images stay idle for `exec` unless given a command (or the template says otherwise) |
+| `create_sandbox` | create and boot a VM from an `image` or a `template`. App images stay idle for `exec` unless given a command (or the template says otherwise). `ttl` and `idle_stop` (`"2h"`, `"30m"`) make it stop on its own |
 | `templates` | list [templates](templates.md): saved recipes with an image, resources, network and process |
-| `exec` | run a shell command (`command`) or exact `argv`, with `workdir`, `env`, `user`, `stdin` and `timeout` (default 300 s). Returns `exit_code`, `stdout`, `stderr` |
+| `exec` | run a shell command (`command`) or exact `argv`, with `workdir`, `env`, `user`, `stdin` and `timeout` (default 300 s). Returns `exit_code`, `stdout`, `stderr`. With `background`, starts it as a job and returns its id at once |
+| `jobs`, `job`, `kill_job` | background commands: list them, get one's status and output tail, end one. The way to run a dev server and then `publish_port` it |
 | `write_file`, `read_file` | text files in the VM |
 | `copy_to_vm`, `copy_from_vm` | host files and directories in or out (`fcvm cp`) |
 | `commit_vm` | save a VM's state as an image; new sandboxes start from it |
 | `build_image` | build an image from a Dockerfile in a host directory (cached per step) |
 | `snapshot_vm`, `fork`, `snapshots`, `remove_snapshot` | snapshot a prepared sandbox and fork running copies in ~150 ms, for parallel attempts or rollback |
 | `egress_log` | a sandbox's network policy and its allowed/denied requests |
+| `publish_port`, `unpublish_port` | publish a TCP port of a running sandbox on the host (a free host port unless given): returns `host_port` and a `url`, so the agent can reach a server it started |
 | `logs`, `list_vms`, `start_vm`, `stop_vm`, `remove_vm`, `volumes` | lifecycle and state |
 
 ## Network policy
@@ -76,6 +80,36 @@ asks for the jailer gets it.
 Once `fcvm-jaild` is installed (`fcvm jail-setup`), every sandbox the
 server creates runs under the Firecracker jailer. Set `FCVM_MCP_JAIL=0` to
 turn that off.
+
+## Secrets
+
+An agent often needs a token (GitHub, a package registry, an API) inside
+its sandbox, and it shouldn't be the one holding it. Name the secrets when
+registering the server, with their values in its environment:
+
+```sh
+GITHUB_TOKEN=ghp_... claude mcp add fcvm -e FCVM_MCP_SECRETS=GITHUB_TOKEN -- "$(command -v fcvm)" mcp
+```
+
+Every sandbox then gets them as files in `/run/secrets` and as environment
+variables of `exec`, as described in [Secrets](vms.md#secrets): never on
+the sandbox's disk, so a `commit_vm` can't leak them. There is no tool to
+read or set secrets; the agent only learns their names from the server's
+instructions.
+
+## Lifetimes
+
+Agents forget sandboxes. `create_sandbox` takes `ttl` (stop that long after
+boot) and `idle_stop` (stop after that long without `exec` or file
+operations), and you can set defaults for sandboxes the agent gives none:
+
+```sh
+claude mcp add fcvm -e FCVM_MCP_TTL=4h -e FCVM_MCP_IDLE_STOP=30m -- "$(command -v fcvm)" mcp
+```
+
+A template's `ttl` and `idle_stop` apply too. The stops are made by the
+supervisor in `fcvm serve` (the fcvm service), see
+[lifetimes](vms.md#lifetimes---ttl-and---idle-stop).
 
 ## Behaviour and limits
 

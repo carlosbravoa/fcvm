@@ -19,6 +19,19 @@ class Jail(VMTestCase):
         self.assertEqual(fcvm("exec", vm, "--", "echo", "inside").stdout.strip(), "inside")
         self.assertTrue(os.path.islink(os.path.join(VMS, vm, "fc.sock")))   # links into the chroot
 
+    def test_secrets_and_live_ports_in_a_jail(self):
+        """The secrets server and the port forwarder work through the chroot's sockets."""
+        import socket
+        import time
+        vm = self.vm("--jail", "--secret", "TOKEN=jailed-secret")
+        self.assertEqual(fcvm("exec", vm, "--", "sh", "-c", "cat /run/secrets/TOKEN; echo; echo $TOKEN").stdout.split(),
+                         ["jailed-secret", "jailed-secret"])
+        fcvm("exec", vm, "--", "sh", "-c", 'setsid sh -c "echo from-jail | nc -l -p 8000" >/dev/null 2>&1 </dev/null &')
+        spec = fcvm("publish", vm, ":8000").stdout.strip()
+        time.sleep(0.5)
+        with socket.create_connection(("127.0.0.1", int(spec.split(":")[0])), timeout=5) as s:
+            self.assertEqual(s.recv(100).strip(), b"from-jail")
+
     def test_cleanup_after_stop(self):
         vm = self.vm("--jail")
         fcvm("stop", vm)

@@ -74,7 +74,7 @@ an SSH key.
 | `POST /vms/{vm}/start` | | `fcvm start` |
 | `POST /vms/{vm}/stop` | | `fcvm stop`; restart policies then leave it alone |
 | `POST /vms/{vm}/restart` | | stop, then start |
-| `POST /vms/{vm}/update` | `{"restart": "no\|on-failure\|unless-stopped\|always", "ttl": "2h", "idle_stop": null, "secrets": {"NAME": "value"}, "unset_secrets": ["OLD"]}` | `fcvm update`: any of these; `null` or `""` clears a lifetime; secrets apply from the next start |
+| `POST /vms/{vm}/update` | `{"restart": "no\|on-failure\|unless-stopped\|always", "ttl": "2h", "idle_stop": null, "secrets": {"NAME": "value"}, "unset_secrets": ["OLD"], "forward": ["ssh-agent", "git"]}` | `fcvm update`: any of these; `null` or `""` clears a lifetime; secrets and forwarding apply from the next start |
 | `POST /vms/{vm}/snapshot` | `{"name": "snap"}` | `fcvm snapshot` |
 | `POST /vms/{vm}/commit` | `{"image": "name"}` | `fcvm commit` (the VM must be stopped) |
 | `DELETE /vms/{vm}` | | stop it if running, then delete it |
@@ -96,7 +96,7 @@ an SSH key.
   "ports": ["8080:80"], "volumes": ["cache:/root/.cache", "/home/me/src:/work:ro"],
   "idle": true, "command": "shell command (app images, when not idle)",
   "jail": true, "restart": "unless-stopped", "start": true,
-  "ttl": "2h", "idle_stop": "30m", "secrets": {"API_KEY": "sk-..."},
+  "ttl": "2h", "idle_stop": "30m", "secrets": {"API_KEY": "sk-..."}, "forward": ["ssh-agent", "git"],
   "disk": "16G", "copy": false, "entrypoint": null, "ref": "python:3.13-slim"
 }
 ```
@@ -116,6 +116,7 @@ Fields worth knowing in a VM object (as `fcvm inspect`, plus `vm.json`):
 | `supervisor` | `null`, or `{"restart_at", "attempts", "error"}` while a restart is pending or after a failed one |
 | `ttl_s`, `idle_stop_s`, `expires_at`, `idle_expires_at`, `expired` | [lifetimes](vms.md#lifetimes---ttl-and---idle-stop): the settings in seconds, when they would stop a running VM (Unix time), and `"ttl"` or `"idle"` after one did |
 | `secrets` | the names of the VM's [secrets](vms.md#secrets) (never their values) |
+| `forward` | what the host [forwards](vms.md#forwarding-your-credentials) into it: `"ssh-agent"`, `"git"` |
 | `jail`, `net`, `ports`, `volumes`, `shares`, `ip`, `pid`, `mem_used_bytes`, `disk_used_bytes` | as the names say |
 
 ## Files and host directories in a VM

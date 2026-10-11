@@ -1,6 +1,7 @@
 """VM lifecycle: run, create/start/stop/rm, exec, cp, inspect."""
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -147,6 +148,60 @@ class Secrets(VMTestCase):
         for spec in ("1BAD=x", "A-B=x", "NOT_SET_ANYWHERE_XYZ", "F=@/nonexistent"):
             r = fcvm("create", unique("vm"), IMAGE, "--idle", "--secret", spec, check=False)
             self.assertNotEqual(r.returncode, 0, spec)
+
+
+class Forward(VMTestCase):
+    """--forward: the host's ssh-agent and git credentials, used from the guest."""
+
+    def test_git_credentials(self):
+        d = tempfile.mkdtemp(prefix="fcvmtest-fwd-")
+        with open(os.path.join(d, "creds"), "w") as f:
+            f.write("https://bob:hunter2@example.test\n")
+        subprocess.run(["git", "config", "--file", os.path.join(d, "gitconfig"), "credential.helper",
+                        f"store --file={d}/creds"], check=True)
+        name = unique("vm")
+        fcvm("create", name, IMAGE, "--idle", "--forward", "git")
+        self.addCleanup(self.remove_vm, name)
+        self.assertEqual(self.inspect(name)["forward"], ["git"])
+        self.assertIn("forward:git", fcvm("ls").stdout)
+        # the relay inherits the environment of whoever starts the VM: start it here, not through the service
+        fcvm("start", name, env={"GIT_CONFIG_GLOBAL": f"{d}/gitconfig", "GIT_CONFIG_NOSYSTEM": "1", "FCVM_DAEMON": "1"})
+        # what the guest's git would run, and the variables that make it run it
+        out = self.sh(name, 'printf "protocol=https\\nhost=example.test\\n\\n" | /.fcvm/bin/fc-init --git-credential get; '
+                            'echo "$GIT_CONFIG_KEY_0=$GIT_CONFIG_VALUE_0"').stdout
+        self.assertIn("username=bob\npassword=hunter2\n", out)
+        self.assertIn("credential.helper=/.fcvm/bin/fc-init --git-credential", out)
+        out = self.sh(name, 'printf "protocol=https\\nhost=nowhere.test\\n\\n" | /.fcvm/bin/fc-init --git-credential get').stdout
+        self.assertEqual(out.strip(), "")
+        self.sh(name, 'printf "protocol=https\\nhost=example.test\\n\\n" | /.fcvm/bin/fc-init --git-credential store')
+        with open(os.path.join(VMS, name, "forward.log")) as f:
+            log = f.read()
+        self.assertIn("https://example.test: found", log)
+        self.assertIn("https://nowhere.test: none", log)
+        self.assertNotIn("store", log)
+
+    def test_ssh_agent(self):
+        if not any(i["name"] == "python-3.13-slim" for i in json.loads(fcvm("images", "--json").stdout)):
+            self.skipTest("needs the python-3.13-slim image (to talk the agent protocol from the guest)")
+        d = tempfile.mkdtemp(prefix="fcvmtest-agent-")
+        agent = subprocess.run(["ssh-agent", "-s", "-a", f"{d}/agent.sock"], capture_output=True, text=True, check=True)
+        pid = int(re.search(r"SSH_AGENT_PID=(\d+)", agent.stdout).group(1))
+        self.addCleanup(os.kill, pid, 15)
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "fcvmtest-key", "-f", f"{d}/key"], check=True)
+        subprocess.run(["ssh-add", "-q", f"{d}/key"], env={**os.environ, "SSH_AUTH_SOCK": f"{d}/agent.sock"}, check=True)
+        name = unique("vm")
+        fcvm("create", name, "python-3.13-slim", "--idle", "--forward", "ssh-agent",
+             env={"SSH_AUTH_SOCK": f"{d}/agent.sock"})
+        self.addCleanup(self.remove_vm, name)
+        fcvm("start", name, env={"SSH_AUTH_SOCK": f"{d}/agent.sock", "FCVM_DAEMON": "1"})
+        script = ("import os, socket, struct\n"
+                  "s = socket.socket(socket.AF_UNIX); s.connect(os.environ['SSH_AUTH_SOCK'])\n"
+                  "s.sendall(struct.pack('>IB', 1, 11))\n"                     # SSH_AGENTC_REQUEST_IDENTITIES
+                  "n = struct.unpack('>I', s.recv(4))[0]; d = b''\n"
+                  "while len(d) < n: d += s.recv(n - len(d))\n"
+                  "print(d[0], struct.unpack('>I', d[1:5])[0], b'fcvmtest-key' in d)\n")
+        out = fcvm("exec", "-i", name, "--", "python3", "-", input=script).stdout.strip()
+        self.assertEqual(out, "12 1 True")                                   # SSH_AGENT_IDENTITIES_ANSWER, our one key
 
 
 class Names(VMTestCase):

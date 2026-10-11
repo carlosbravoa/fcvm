@@ -11,7 +11,8 @@ lib/builtin-templates/, which a user template of the same name replaces):
    "ports": ["8080:80"], "volumes": ["cache:/root/.cache", "~/src"],
    "process": "image" | "idle" | "command", "command": ["python", "app.py"],
    "entrypoint": null, "jail": true | false | null, "restart": "no",
-   "ttl": "2h" | null, "idle_stop": "30m" | null, "secrets": ["GITHUB_TOKEN"]}
+   "ttl": "2h" | null, "idle_stop": "30m" | null, "secrets": ["GITHUB_TOKEN"],
+   "forward": ["ssh-agent", "git"]}
 
 `secrets` names environment variables of whoever creates the VM; their
 values go to the VM (fcvm create --secret NAME), never into the template.
@@ -38,7 +39,7 @@ POLICIES = ("no", "on-failure", "unless-stopped", "always")
 FIELDS = {"description": "", "image": None, "ref": None, "vcpus": None, "mem_mib": None, "disk": None,
           "copy": False, "network": "full", "allow": [], "ports": [], "volumes": [], "process": "image",
           "command": [], "entrypoint": None, "jail": None, "restart": "no", "ttl": None, "idle_stop": None,
-          "secrets": []}
+          "secrets": [], "forward": []}
 DURATION = re.compile(r"^[0-9]+[smhd]?$")   # as --ttl / --idle-stop take it: 90s, 30m, 2h, 1d
 SECRET = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")   # names only: values come from the environment at create
 
@@ -64,11 +65,13 @@ def validate(t):
         raise Invalid("network must be full, none or restricted")
     if out["network"] == "restricted" and not out["allow"]:
         raise Invalid("a restricted network needs an allowlist")
-    for k in ("allow", "ports", "volumes", "command", "secrets"):
+    for k in ("allow", "ports", "volumes", "command", "secrets", "forward"):
         if not isinstance(out[k], list) or not all(isinstance(x, str) for x in out[k]):
             raise Invalid(f"{k} must be a list of strings")
     if not all(SECRET.match(s) for s in out["secrets"]):
         raise Invalid("secrets must be a list of names (letters, digits and _), taken from the environment at create")
+    if not all(f in ("ssh-agent", "git") for f in out["forward"]):
+        raise Invalid('forward must be a list of "ssh-agent" and/or "git"')
     if out["process"] not in ("image", "idle", "command"):
         raise Invalid("process must be image, idle or command")
     if out["process"] == "command" and not out["command"]:
@@ -163,6 +166,8 @@ def options(t):
         a += ["--idle-stop", t["idle_stop"]]
     for s in t["secrets"]:
         a += ["--secret", s]
+    if t["forward"]:
+        a += ["--forward", ",".join(t["forward"])]
     return a
 
 
@@ -195,7 +200,8 @@ def from_vm(vm, description=""):
          "network": (c.get("net") or {}).get("mode") or "full", "allow": (c.get("net") or {}).get("allow") or [],
          "jail": bool(c.get("jail")), "restart": c.get("restart") or "no",
          "ttl": f"{c['ttl_s']}s" if c.get("ttl_s") else None,
-         "idle_stop": f"{c['idle_stop_s']}s" if c.get("idle_stop_s") else None}
+         "idle_stop": f"{c['idle_stop_s']}s" if c.get("idle_stop_s") else None,
+         "forward": c.get("forward") or []}
     try:
         t["secrets"] = sorted(_read(os.path.join(vms, "secrets.json")))   # names only
     except (OSError, ValueError):

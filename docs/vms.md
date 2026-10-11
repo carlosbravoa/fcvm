@@ -16,6 +16,7 @@ them, moving files, publishing ports and attaching storage.
 - [Restart policies](#restart-policies)
 - [Lifetimes: --ttl and --idle-stop](#lifetimes---ttl-and---idle-stop)
 - [Secrets](#secrets)
+- [Forwarding your credentials](#forwarding-your-credentials)
 - [Jailed VMs](#jailed-vms)
 - [Without the exec agent](#without-the-exec-agent)
 - [Listing and inspecting](#listing-and-inspecting)
@@ -309,6 +310,37 @@ into an image, and it isn't in `vm.json` either: it's in
   in `FCVM_MCP_SECRETS` from its own environment, and gives the agent no
   tool to see or set them ([Agents](agents.md#secrets)).
 - `fcvm inspect` lists the names, never the values.
+
+## Forwarding your credentials
+
+```sh
+fcvm create dev ubuntu-26.04 --forward ssh-agent,git   # or either one
+fcvm update dev --forward none                           # from its next start
+```
+
+Instead of copying keys or tokens into a VM, let it use yours through the
+host, the way `ssh -A` does:
+
+- **`ssh-agent`.** The host relays its agent (`SSH_AUTH_SOCK`) over vsock,
+  and the VM gets `SSH_AUTH_SOCK=/run/fcvm/ssh-agent.sock` for the app and
+  every `exec`/`shell` session. `git clone git@github.com:...` and `ssh`
+  work; the private keys stay on the host. The agent socket is the one of
+  whoever runs `fcvm start` (or the one recorded at `create`, when the
+  fcvm service starts the VM). Run `ssh-add -c` on the host to confirm each
+  use.
+- **`git`.** The VM's git asks the host for credentials
+  (`git credential fill`): whatever your helpers hold (`gh auth`, a
+  credential store, a keychain) works for `https://` remotes in the VM.
+  Only lookups are forwarded; the VM can't store or erase anything.
+
+Both are logged in `vms/VM/forward.log`. In system VMs, `exec` sessions
+have the variables; ssh logins can `export
+SSH_AUTH_SOCK=/run/fcvm/ssh-agent.sock` themselves.
+
+**What this trusts.** A forwarded agent signs for whatever is running in
+the VM while it runs, and the git relay answers for any host your helpers
+know. That's the deal with any forwarding; use it with code you'd give
+your laptop, not with `run --jail --allow` sandboxes for untrusted code.
 
 ## Jailed VMs
 

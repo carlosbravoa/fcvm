@@ -40,6 +40,12 @@ New:
   secrets named in `FCVM_MCP_SECRETS` from its own environment, with no
   tool for the agent to see or set them. Needs the initramfs of this
   release (rebuilt at the next VM start).
+- **Credential forwarding.** `create --forward ssh-agent,git` relays the
+  host's ssh-agent into the VM (`SSH_AUTH_SOCK` for the app and `exec`
+  sessions) and answers the VM's git credential lookups with the host's
+  `git credential fill`, so cloning and pushing work with no key or token
+  inside the VM. Logged in `vms/VM/forward.log`. Templates, the API
+  (`forward`) and the MCP server (`FCVM_MCP_FORWARD`) take it too.
 
 Fixes from a code review:
 

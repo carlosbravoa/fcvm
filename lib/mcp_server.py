@@ -40,6 +40,9 @@ DEFAULT_IDLE_STOP = os.environ.get("FCVM_MCP_IDLE_STOP", "").strip()
 # (FCVM_MCP_SECRETS=GITHUB_TOKEN,API_KEY): the agent never sees the values,
 # and there is no tool to set them.
 SECRETS = [s.strip() for s in os.environ.get("FCVM_MCP_SECRETS", "").split(",") if s.strip()]
+# Credentials relayed into every sandbox (FCVM_MCP_FORWARD=ssh-agent,git): the
+# agent can push and clone with your keys and logins without holding them.
+FORWARD = [f.strip() for f in os.environ.get("FCVM_MCP_FORWARD", "").split(",") if f.strip()]
 
 INSTRUCTIONS = """fcvm runs Firecracker microVMs: real kernel isolation, ~1 s to boot a container
 image, ~2 s for Ubuntu. Typical loop: images (or pull_image) -> create_sandbox ->
@@ -55,7 +58,9 @@ denied. Files in a sandbox are lost on remove_vm unless committed or stored on
 a volume. Sandboxes you don't remove stay up: give create_sandbox a ttl or
 idle_stop (e.g. "2h", "30m") so they stop on their own.""" + (
     f" Every sandbox gets these secrets as files in /run/secrets and environment variables: {', '.join(SECRETS)}."
-    if SECRETS else "")
+    if SECRETS else "") + (
+    f" Every sandbox can use the host's {' and '.join(FORWARD)} (forwarded; e.g. git clone/push over "
+    f"{'ssh' if 'ssh-agent' in FORWARD else 'https'} works without any key or token in the sandbox)." if FORWARD else "")
 
 
 class ToolError(Exception):
@@ -194,6 +199,8 @@ def t_create_sandbox(image=None, template=None, name=None, command=None, vcpus=N
         if s not in os.environ:
             raise ToolError(f"the server is configured to pass secret {s}, which isn't set in its environment")
         args += ["--secret", s]
+    if FORWARD:
+        args += ["--forward", ",".join(FORWARD)]
     if img["type"] == "app":
         # with no template, a container image stays up idle for exec
         args += templates.process(t) if template or command else ["--idle"]

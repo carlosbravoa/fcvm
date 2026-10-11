@@ -94,6 +94,7 @@ User templates are JSON files in `~/.local/share/fcvm/templates/` (or
 | `restart` | the restart policy (`create` only) |
 | `ttl`, `idle_stop` | [lifetimes](vms.md#lifetimes---ttl-and---idle-stop) as `--ttl` and `--idle-stop` take them (`"2h"`, `"30m"`), or `null` |
 | `secrets` | names of [secrets](vms.md#secrets) to pass, taken from the environment of whoever creates the VM (`--secret NAME`); a template never holds a value |
+| `forward` | `["ssh-agent", "git"]`: [credentials to forward](vms.md#forwarding-your-credentials) |
 
 ## With agents
 

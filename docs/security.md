@@ -448,6 +448,12 @@ Every one of these gives a guest access to something outside it:
   tmpfs (`/run/secrets`, mode 0400, the image user's) and never touch the
   disk. On the host they're in `vms/VM/secrets.json`, mode 0600, and
   `inspect` shows only their names. A snapshot still holds them, in memory.
+- **Forwarded credentials** (`--forward ssh-agent,git`) never enter the VM
+  at all: the host signs with your agent and answers `git credential`
+  lookups over vsock (`lib/forward.py`, running as you, logging to
+  `vms/VM/forward.log`). While it runs, the VM can use them for anything,
+  like a machine you `ssh -A` into. Don't forward into sandboxes for
+  untrusted code.
 - **SSH keys** aren't part of any image. Each system VM gets
   `authorized_keys` and its own host key at `create`, and `fcvm ssh`
   verifies that host key strictly. VMs created before fcvm 0.6.1 have no

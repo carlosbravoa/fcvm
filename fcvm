@@ -54,6 +54,8 @@ VMs:
                              --idle-stop DURATION (stop it after that long without exec/cp/files)
                              --secret NAME=VALUE|NAME=@FILE|NAME (into /run/secrets and the env,
                              never on the VM's disk; NAME alone: from your environment)
+                             --forward ssh-agent,git (relay your ssh-agent and git credentials
+                             into the VM; it uses them without holding them)
   create VM --template NAME [opts] [-- CMD...]
                              create from a saved template; your options override its
   start [-a] VM              boot a VM in the background; -a attaches its console
@@ -83,8 +85,8 @@ VMs:
   snapshot ls [--json] | rm NAME
   fork SNAPSHOT [NAME] [-n N]  new running VM(s) from a snapshot in ~150 ms, with their own
                              disk, IP, MAC and hostname (processes keep running)
-  update VM [--restart POLICY] [--ttl D|none] [--idle-stop D|none] [--secret SPEC] [--unset-secret NAME]
-                             change a VM's restart policy, lifetime or secrets
+  update VM [--restart POLICY] [--ttl D|none] [--idle-stop D|none] [--secret SPEC] [--unset-secret NAME] [--forward LIST|none]
+                             change a VM's restart policy, lifetime, secrets or forwarding
   template ls|show NAME|rm NAME   launch templates (* = built in)
   template save NAME --from VM | IMAGE [create opts] [-- CMD]  [-d DESCRIPTION]
                              save a recipe: create/run --template NAME use it

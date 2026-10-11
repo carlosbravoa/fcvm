@@ -244,6 +244,21 @@ write_secrets() {   # dir specs...
 }
 secret_names() { jq -r 'keys[]' "$1/secrets.json" 2>/dev/null || true; }
 
+# --forward ssh-agent,git (create/update): what the host relays into the VM
+# (lib/forward.py). Prints the checked, deduplicated list, one per line.
+parse_forward() {   # LIST[,LIST...] ("none" clears)
+    local f out=()
+    IFS=, read -ra _f <<<"$1"
+    for f in "${_f[@]}"; do
+        case $f in
+            ssh-agent|git) [[ " ${out[*]:-} " == *" $f "* ]] || out+=("$f") ;;
+            none|"")       ;;
+            *)             die "--forward wants ssh-agent and/or git (comma-separated), or none" ;;
+        esac
+    done
+    printf '%s\n' "${out[@]:-}" | sed '/^$/d'
+}
+
 # jaild, printing the helper's reply only when it refuses.
 jaild_quiet() { local r; r=$(jaild "$@") || { jq -r '.error // .' <<<"$r" >&2; return 1; }; }
 
@@ -366,10 +381,11 @@ create() {
     shift 2
     local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full allow=()
     local entrypoint=() set_entrypoint=0 jail=${JAIL:-0} jail_set="" vcpus_set=null mem_set=null restart=no agent=1
-    local ttl="" idle_stop="" ttl_raw="" idle_raw="" secrets=()
+    local ttl="" idle_stop="" ttl_raw="" idle_raw="" secrets=() forward=()
     while [ $# -gt 0 ]; do
         case $1 in
             --secret)       parse_secret "${2:?--secret wants NAME=VALUE, NAME=@FILE or NAME}"; secrets+=("$2"); shift 2 ;;
+            --forward)      mapfile -t forward < <(parse_forward "$(IFS=,; echo "${forward[*]:-},${2:?--forward wants ssh-agent and/or git}")"); shift 2 ;;
             --vcpus)        vcpus=$2 vcpus_set=$2; shift 2 ;;
             --mem)          mem=$2 mem_set=$2; shift 2 ;;
             --disk)         disk=$2; shift 2 ;;
@@ -456,13 +472,14 @@ create() {
             --arg proc "$proc" --argjson command "$(json_list "${raw_cmd[@]}")" \
             --argjson ep_set "$set_entrypoint" --arg ep "${raw_ep[*]}" --arg jail "$jail_set" --arg restart "$restart" \
             --arg ttl "${ttl:+$ttl_raw}" --arg idle_stop "${idle_stop:+$idle_raw}" --argjson secrets "$(json_list "${secret_names[@]}")" \
+            --argjson forward "$(json_list "${forward[@]}")" \
             '{image: $image, ref: (if $ref == "" then null else $ref end), vcpus: $vcpus, mem_mib: $mem,
               disk: (if $disk == "" then null else $disk end), copy: $copy, network: $net, allow: $allow,
               ports: $ports, volumes: $volumes, process: $proc, command: $command,
               entrypoint: (if $ep_set == 1 then $ep else null end),
               jail: (if $jail == "" then null else ($jail == "1") end), restart: $restart,
               ttl: (if $ttl == "" then null else $ttl end), idle_stop: (if $idle_stop == "" then null else $idle_stop end),
-              secrets: $secrets}' > "$FCVM_TEMPLATE_OUT"
+              secrets: $secrets, forward: $forward}' > "$FCVM_TEMPLATE_OUT"
         unlock_vm; rm -f "$VMS_DIR/.locks/vm-$vm"
         return 0
     fi
@@ -494,9 +511,14 @@ create() {
         '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
           shares: $shares, net: $net, jail: $jail, restart: $restart, ephemeral: $ephemeral, created: (now | todate)}
          + (if $agent then {} else {agent: false} end) + (if $hostkey == "" then {} else {ssh_host_key: $hostkey} end)
-         + $lifetime' \
+         + $lifetime + (if ($forward | length) == 0 then {} else {forward: $forward} end)
+         + (if ($forward | index("ssh-agent")) then {ssh_auth_sock: $sock} else {} end)' \
         --arg hostkey "$hostkey" --argjson agent "$([ $agent = 1 ] && echo true || echo false)" \
-        --argjson lifetime "$(lifetime_json "$ttl" "$idle_stop")" > "$dir/vm.json"
+        --argjson lifetime "$(lifetime_json "$ttl" "$idle_stop")" \
+        --argjson forward "$(json_list "${forward[@]}")" --arg sock "${SSH_AUTH_SOCK:-}" > "$dir/vm.json"
+    if [[ " ${forward[*]:-} " == *" ssh-agent "* ]] && [ ! -S "${SSH_AUTH_SOCK:-}" ]; then
+        warn "--forward ssh-agent: no agent in this environment (SSH_AUTH_SOCK); set it before fcvm start"
+    fi
     local SECRETS_DEL=()
     [ ${#secrets[@]} -eq 0 ] || write_secrets "$dir" "${secrets[@]}"
     [ -n "${EPHEMERAL:-}" ] || log "created VM '$vm' from $image ($([ $copy = 1 ] && echo 'private copy' || echo 'shared image + writable layer'))"
@@ -724,6 +746,20 @@ start() {
     [ $nshares = 0 ] || args+=" fcvm.shares=$(IFS=,; echo "${gspecs[*]}")"
     local secrets=0; [ ! -s "$DIR/secrets.json" ] || secrets=$(jq length "$DIR/secrets.json")
     [ "$secrets" = 0 ] || args+=" fcvm.secrets=$SECRETS_PORT"
+    # Credential forwarding (lib/forward.py): the agent socket of whoever starts
+    # the VM, else the one recorded at create (the service starts VMs as you).
+    local fwd_args=() fwd="" agent_sock
+    if jq -e '.forward | index("ssh-agent")' "$DIR/vm.json" >/dev/null 2>&1; then
+        agent_sock=${SSH_AUTH_SOCK:-$(jq -r '.ssh_auth_sock // empty' "$DIR/vm.json")}
+        if [ -S "$agent_sock" ]; then
+            args+=" fcvm.ssh_agent=9001"; fwd_args+=(--ssh-agent "$agent_sock"); fwd+="ssh-agent "
+        else
+            warn "ssh-agent forwarding: no agent socket (SSH_AUTH_SOCK=${agent_sock:-unset}); '$vm' gets none this time"
+        fi
+    fi
+    if jq -e '.forward | index("git")' "$DIR/vm.json" >/dev/null 2>&1; then
+        args+=" fcvm.git_cred=9002"; fwd_args+=(--git); fwd+="git"
+    fi
     [ "$type" = system ] && args+=" fcvm.exec=/sbin/init"
     [ "$(jq -r '.agent != false' "$DIR/vm.json")" = true ] || args+=" fcvm.agent=0"
     if [ "$type" = app ]; then
@@ -799,9 +835,23 @@ start() {
         [ -S "${1}_$SECRETS_PORT" ] || { cat "$DIR/secrets.log" >&2; die "the secrets server failed to start"; }
     }
     if [ "$secrets" != 0 ] && [ $jailed = 0 ]; then start_secrets "$DIR/vsock.sock"; fi
+    start_forward() {   # uds-prefix
+        (
+            if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
+            exec {VM_LOCK}>&-
+            exec setsid python3 "$FCVM_ROOT/lib/forward.py" serve --uds-prefix "$1" --pidfile "$DIR/pid" \
+                --log "$DIR/forward.log" "${fwd_args[@]}" </dev/null >"$DIR/forward.err" 2>&1
+        ) &
+        echo $! > "$DIR/forward.pid"
+        local want="${1}_9002"; [[ $fwd != ssh-agent* ]] || want="${1}_9001"
+        for ((i = 0; i < 50; i++)); do [ -S "$want" ] && break; sleep 0.02; done
+        [ -S "$want" ] || { cat "$DIR/forward.err" >&2; die "the credential forwarder failed to start"; }
+    }
+    if [ ${#fwd_args[@]} -gt 0 ] && [ $jailed = 0 ]; then start_forward "$DIR/vsock.sock"; fi
     local launch=(-- "${fc[@]}")
     [ $jailed = 0 ] || launch=(--jail "$DIR/jail-request.json" --link-dir "$DIR")
     [ "$secrets" = 0 ] || info+=", $secrets secret(s)"
+    [ -z "$fwd" ] || info+=", forwards ${fwd% }"
     setsid python3 "$FCVM_ROOT/lib/console.py" serve --sock "$DIR/console.sock" --log "$DIR/console.log" \
         --pidfile "$DIR/pid" --on-exit "$(printf '%q _reap %q' "$FCVM_ROOT/fcvm" "$vm")" "${launch[@]}" \
         </dev/null >"$DIR/relay.log" 2>&1 {VM_LOCK}>&- &
@@ -811,6 +861,7 @@ start() {
     record_pid_id "$vm" "$pid"
     if [ ${#exports[@]} -gt 0 ] && [ $jailed = 1 ]; then start_shares "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi
     if [ "$secrets" != 0 ] && [ $jailed = 1 ]; then start_secrets "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi
+    if [ ${#fwd_args[@]} -gt 0 ] && [ $jailed = 1 ]; then start_forward "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi
     if ! start_portfwd "$pid"; then
         if [ $jailed = 1 ]; then jaild kill "$vm" >/dev/null || true; else kill "$pid" 2>/dev/null || true; fi
         die "cannot publish ports; VM not started"
@@ -924,6 +975,7 @@ reap() {
     stop_portfwd "$dir"
     kill_ours "$(cat "$dir/share.pid" 2>/dev/null)" share9p.py; rm -f "$dir/share.pid"
     kill_ours "$(cat "$dir/secrets.pid" 2>/dev/null)" secrets.py; rm -f "$dir/secrets.pid"
+    kill_ours "$(cat "$dir/forward.pid" 2>/dev/null)" forward.py; rm -f "$dir/forward.pid"
     if [ -f "$dir/share.live" ]; then
         local sp; for sp in $(awk '{print $2}' "$dir/share.live"); do kill_ours "$sp" share9p.py; done
         rm -f "$dir/share.live"
@@ -1817,6 +1869,7 @@ list_vms() {
             "$(jq -r 'def dur: if . % 86400 == 0 then "\(. / 86400 | floor)d" elif . % 3600 == 0 then "\(. / 3600 | floor)h" elif . % 60 == 0 then "\(. / 60 | floor)m" else "\(.)s" end;
                 [(if .jail then "jail" else empty end), (if .agent == false then "no-agent" else empty end), (if (.restart // "no") != "no" then "restart:\(.restart)" else empty end),
                  (if .ttl_s then "ttl:\(.ttl_s | dur)" else empty end), (if .idle_stop_s then "idle-stop:\(.idle_stop_s | dur)" else empty end),
+                 (if (.forward // []) != [] then "forward:\(.forward | join(","))" else empty end),
                  (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
                 + (.ports // []) + ((.volumes // []) | map("-v " + .))
                 + ((.shares // []) | map("-v \(.host):\(.path)\(if .ro then ":ro" else "" end)")) | join(" ")' "$d/vm.json")"
@@ -1854,8 +1907,8 @@ list_images() {
 
 # fcvm update VM [--restart POLICY] [--ttl D] [--idle-stop D]: change settings of an existing VM.
 update() {
-    local usage="usage: fcvm update VM [--restart no|on-failure|unless-stopped|always] [--ttl DURATION|none] [--idle-stop DURATION|none] [--secret SPEC]... [--unset-secret NAME]..."
-    local vm=${1:-} restart="" ttl="" idle="" set_ttl=0 set_idle=0 what=() secrets=() SECRETS_DEL=()
+    local usage="usage: fcvm update VM [--restart no|on-failure|unless-stopped|always] [--ttl DURATION|none] [--idle-stop DURATION|none] [--secret SPEC]... [--unset-secret NAME]... [--forward ssh-agent,git|none]"
+    local vm=${1:-} restart="" ttl="" idle="" set_ttl=0 set_idle=0 what=() secrets=() SECRETS_DEL=() forward=() set_fwd=0
     [ -n "$vm" ] || die "$usage"; shift
     while [ $# -gt 0 ]; do
         case $1 in
@@ -1864,13 +1917,20 @@ update() {
             --idle-stop) idle=$(duration_s --idle-stop "${2:?$usage}") set_idle=1; shift 2 ;;
             --secret)    parse_secret "${2:?$usage}"; secrets+=("$2"); shift 2 ;;
             --unset-secret) SECRETS_DEL+=("${2:?$usage}"); shift 2 ;;
+            --forward)   mapfile -t forward < <(parse_forward "${2:?$usage}"); set_fwd=1; shift 2 ;;
             *)           die "unknown option $1 ($usage)" ;;
         esac
     done
-    [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || die "$usage"
+    [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || [ $set_fwd = 1 ] || die "$usage"
     lock_vm "$vm"
     vm_exists "$vm" || die "no VM '$vm'"
     local f=$VMS_DIR/$vm/vm.json
+    if [ $set_fwd = 1 ]; then
+        jq --argjson fwd "$(json_list "${forward[@]}")" --arg sock "${SSH_AUTH_SOCK:-}" \
+            'del(.forward, .ssh_auth_sock) + (if ($fwd | length) == 0 then {} else {forward: $fwd} end)
+             + (if ($fwd | index("ssh-agent")) then {ssh_auth_sock: $sock} else {} end)' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+        what+=("forwarding ${forward[*]:-none} (from its next start)")
+    fi
     if [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ]; then
         write_secrets "$VMS_DIR/$vm" "${secrets[@]}"
         what+=("secrets: $(secret_names "$VMS_DIR/$vm" | tr '\n' ' ')(from its next start)")

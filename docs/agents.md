@@ -9,6 +9,7 @@ behaves exactly as on the command line.
 - [Network policy](#network-policy)
 - [Jailing](#jailing)
 - [Secrets](#secrets)
+- [Forwarded credentials](#forwarded-credentials)
 - [Lifetimes](#lifetimes)
 - [Behaviour and limits](#behaviour-and-limits)
 - [Patterns](#patterns)
@@ -96,6 +97,21 @@ variables of `exec`, as described in [Secrets](vms.md#secrets): never on
 the sandbox's disk, so a `commit_vm` can't leak them. There is no tool to
 read or set secrets; the agent only learns their names from the server's
 instructions.
+
+## Forwarded credentials
+
+For an agent that clones and pushes, forwarding beats handing it a token:
+
+```sh
+claude mcp add fcvm -e FCVM_MCP_FORWARD=ssh-agent,git -- "$(command -v fcvm)" mcp
+```
+
+Every sandbox can then use your ssh-agent and your git credential helpers
+through the host, without any key or token inside it
+([details](vms.md#forwarding-your-credentials)). The server's instructions
+tell the agent so. Keep in mind that a sandbox with a forwarded agent can
+sign with your keys while it runs; `ssh-add -c` makes the host confirm
+each use.
 
 ## Lifetimes
 

@@ -13,6 +13,8 @@
  *   fcvm.shares=PORT:PATH[:ro],...  live host directories over vsock + 9P
  *   fcvm.proxy=URL         restricted network: http(s)_proxy for the container
  *   fcvm.secrets=PORT      secrets from the host (vsock) into a tmpfs at /run/secrets
+ *   fcvm.ssh_agent=PORT    relay the host's ssh-agent (fcvm create --forward ssh-agent)
+ *   fcvm.git_cred=PORT     ask the host for git credentials (--forward git)
  *   fcvm.agent=0           no exec agent (fcvm create --no-agent)
  *                          command and exec sessions (systemd images get it via
  *                          systemd.setenv=)
@@ -66,6 +68,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <termios.h>
@@ -589,6 +592,148 @@ static char **with_secrets_env(char **env)
         free(v);
     }
     closedir(d);
+    return out;
+}
+
+/*
+ * Credential forwarding (fcvm create --forward): the host relays its ssh-agent
+ * and `git credential fill` over vsock (lib/forward.py), so the guest can use
+ * your keys and logins without ever holding them.
+ *   fcvm.ssh_agent=PORT  a relay here listens on /run/fcvm/ssh-agent.sock and
+ *                        joins each client to the host's agent; the app and
+ *                        exec sessions get SSH_AUTH_SOCK
+ *   fcvm.git_cred=PORT   git is told (GIT_CONFIG_*) to use
+ *                        `fc-init --git-credential` as its credential helper,
+ *                        which sends "get" requests to the host
+ */
+#define FWD_DIR "/run/fcvm"
+#define SSH_AGENT_SOCK FWD_DIR "/ssh-agent.sock"
+
+static int vsock_connect(unsigned port)
+{
+    struct sockaddr_vm addr = {.svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST, .svm_port = port};
+    int s = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s >= 0 && connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(s);
+        return -1;
+    }
+    return s;
+}
+
+/* Copy between a and b in both directions until each side has ended. */
+static void splice2(int a, int b)
+{
+    int ab = 1, ba = 1;
+    static char buf[65536];
+    while (ab || ba) {
+        struct pollfd p[2] = {{ab ? a : -1, POLLIN, 0}, {ba ? b : -1, POLLIN, 0}};
+        if (poll(p, 2, -1) < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (p[0].revents) {
+            ssize_t n = read(a, buf, sizeof(buf));
+            if (n <= 0) {
+                shutdown(b, SHUT_WR);
+                ab = 0;
+            } else if (write_all(b, buf, n) < 0)
+                break;
+        }
+        if (p[1].revents) {
+            ssize_t n = read(b, buf, sizeof(buf));
+            if (n <= 0) {
+                shutdown(a, SHUT_WR);
+                ba = 0;
+            } else if (write_all(a, buf, n) < 0)
+                break;
+        }
+    }
+}
+
+static void ssh_agent_relay(const char *owner)
+{
+    char *port = karg("fcvm.ssh_agent");
+    if (!port)
+        return;
+    mkdir_p(FWD_DIR, 0755);
+    unlink(SSH_AGENT_SOCK);
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    struct sockaddr_un un = {.sun_family = AF_UNIX};
+    strcpy(un.sun_path, SSH_AGENT_SOCK);
+    if (s < 0 || bind(s, (struct sockaddr *)&un, sizeof(un)) < 0 || listen(s, 16) < 0) {
+        msg("ssh-agent relay: %s", strerror(errno));
+        return;
+    }
+    uid_t uid = strtoul(owner, NULL, 10);
+    gid_t gid = strchr(owner, ':') ? strtoul(strchr(owner, ':') + 1, NULL, 10) : 0;
+    chown(SSH_AGENT_SOCK, uid, gid);
+    chmod(SSH_AGENT_SOCK, 0600);
+    if (fork() != 0) { /* the relay lives on as a daemon */
+        close(s);
+        return;
+    }
+    signal(SIGCHLD, SIG_IGN);
+    for (;;) {
+        int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
+        if (c < 0)
+            continue;
+        if (fork() == 0) {
+            close(s);
+            int h = vsock_connect((unsigned)atoi(port));
+            if (h >= 0)
+                splice2(c, h);
+            _exit(0);
+        }
+        close(c);
+    }
+}
+
+/* `fc-init --git-credential get`: git's credential helper protocol, answered by the host. */
+static int git_credential_main(int argc, char **argv)
+{
+    char *port = karg("fcvm.git_cred");
+    static char req[65536];
+    size_t len = 0;
+    ssize_t n;
+    while (len < sizeof(req) - 1 && (n = read(0, req + len, sizeof(req) - 1 - len)) > 0)
+        len += n;
+    if (!port || argc < 3 || strcmp(argv[2], "get") != 0) /* store and erase: nothing to do */
+        return 0;
+    int s = vsock_connect((unsigned)atoi(port));
+    if (s < 0 || write_all(s, req, len) < 0)
+        return 0;
+    shutdown(s, SHUT_WR);
+    while ((n = read(s, req, sizeof(req))) > 0)
+        write_all(1, req, n);
+    close(s);
+    return 0;
+}
+
+static void start_forwarding(const char *owner)
+{
+    ssh_agent_relay(owner);
+}
+
+/* env + what the app and exec sessions need to use the forwarded credentials. */
+static char **with_forward_env(char **env)
+{
+    char *sa = karg("fcvm.ssh_agent"), *gc = karg("fcvm.git_cred");
+    if (!sa && !gc)
+        return env;
+    int n = 0;
+    while (env && env[n])
+        n++;
+    char **out = calloc(n + 5, sizeof(*out));
+    for (int i = 0; i < n; i++)
+        out[i] = env[i];
+    if (sa)
+        out[n++] = "SSH_AUTH_SOCK=" SSH_AGENT_SOCK;
+    if (gc) {
+        out[n++] = "GIT_CONFIG_COUNT=1";
+        out[n++] = "GIT_CONFIG_KEY_0=credential.helper";
+        out[n++] = "GIT_CONFIG_VALUE_0=/.fcvm/bin/fc-init --git-credential";
+    }
     return out;
 }
 
@@ -1570,7 +1715,7 @@ static void agent_session(int conn)
     int ni = 0;
     while (image_env && image_env[ni])
         ni++;
-    image_env = with_secrets_env(with_proxy_env(image_env));
+    image_env = with_forward_env(with_secrets_env(with_proxy_env(image_env)));
     ni = 0;
     while (image_env && image_env[ni])
         ni++;
@@ -1719,6 +1864,8 @@ int main(int argc, char **argv_)
                 pause();
         return agent_main();    /* systemd images run the agent as a service */
     }
+    if (argc > 1 && strcmp(argv_[1], "--git-credential") == 0)
+        return git_credential_main(argc, argv_);   /* git's credential helper (fcvm --forward git) */
     if (argc > 1 && strcmp(argv_[1], "--idle") == 0) {
         /* `fcvm create --idle`: keep a container VM up for exec, stop cleanly */
         signal(SIGTERM, idle_stop);
@@ -1747,6 +1894,7 @@ int main(int argc, char **argv_)
             mnt("tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV | MS_STRICTATIME, "mode=0755");
             fetch_secrets("0:0");
         }
+        start_forwarding("0:0");
         char *host = karg("systemd.hostname");
         if (host && *host)
             hosts_entry(host);
@@ -1765,6 +1913,7 @@ int main(int argc, char **argv_)
         }
         mount_shares(owner);
         fetch_secrets(owner);
+        start_forwarding(owner);
     }
     reboot(RB_DISABLE_CAD); /* Ctrl-Alt-Del arrives as SIGINT: graceful stop */
     unlink(CONF "exit-status");
@@ -1780,7 +1929,7 @@ int main(int argc, char **argv_)
 
     static char *fallback[] = {"/bin/sh", NULL};
     char **argv = abuf && alen ? split0(abuf, alen) : fallback;
-    char **env = with_secrets_env(with_proxy_env(ebuf && elen ? split0(ebuf, elen) : NULL));
+    char **env = with_forward_env(with_secrets_env(with_proxy_env(ebuf && elen ? split0(ebuf, elen) : NULL)));
 
     sigset_t all, old;
     sigfillset(&all);

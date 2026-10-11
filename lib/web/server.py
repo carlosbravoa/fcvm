@@ -387,6 +387,14 @@ def secret_env(d):
     return secrets
 
 
+def forward_list(d):
+    """The request's forward list (["ssh-agent", "git"]), checked."""
+    fwd = d.get("forward") or []
+    if not isinstance(fwd, list) or not all(f in ("ssh-agent", "git") for f in fwd):
+        raise HTTPError(400, 'forward must be a list of "ssh-agent" and/or "git"')
+    return fwd
+
+
 def touch_activity(vmdir):
     """Record a sign of life for --idle-stop (as `fcvm exec` does)."""
     try:
@@ -990,6 +998,8 @@ class App:
                 args += [f"--{opt.replace('_', '-')}", str(d[opt]).strip()]
         secrets = secret_env(d)
         args += [a for n in secrets for a in ("--secret", n)]   # values through the environment, not argv
+        if forward_list(d):
+            args += ["--forward", ",".join(forward_list(d))]
         if itype == "app" and d.get("entrypoint") is not None:
             args += ["--entrypoint", str(d["entrypoint"])]
         cmd = d.get("command", "").strip()
@@ -1074,6 +1084,8 @@ class App:
                 if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(n)):
                     raise HTTPError(400, f"bad secret name {n!r}")
                 args += ["--unset-secret", n]
+            if "forward" in d:
+                args += ["--forward", ",".join(forward_list(d)) or "none"]
             if not args:
                 raise HTTPError(400, "nothing to update: give restart, ttl, idle_stop, secrets or unset_secrets")
             await fcvm_ok("update", name, *args, env=secrets)

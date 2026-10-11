@@ -189,6 +189,7 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ Restart policies (`no`, `on-failure`, `unless-stopped`, `always`), recovery after crashes and reboots
 - ✅ Lifetimes: `--ttl 2h` and `--idle-stop 30m` end forgotten sandboxes on their own
 - ✅ Secrets (`--secret API_KEY`): into a tmpfs and the environment at boot, never onto the VM's disk
+- ✅ Credential forwarding (`--forward ssh-agent,git`): the VM uses your keys and logins through the host, without holding them
 - ✅ Templates: saved launch recipes, built-in sandboxes for Python, Node and offline work, shared by the CLI, console and MCP
 - ✅ JSON output everywhere (`--json`, `inspect`)
 - ✅ One-line install (per user, or `--system`), `fcvm upgrade` with rollback, versioned releases

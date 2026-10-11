@@ -90,6 +90,7 @@ class Registry:
         self.base = f"https://{registry}/v2/{repo}"
         self.repo = repo
         self.token = None
+        self.scope = None       # asked for when the challenge names none (a push: pull,push)
         self.opener = urllib.request.build_opener(NoRedirect)
 
     def _auth(self, challenge):
@@ -103,7 +104,7 @@ class Registry:
             self.token = basic
             return
         query = {"service": fields.get("service", ""),
-                 "scope": fields.get("scope", f"repository:{self.repo}:pull")}
+                 "scope": fields.get("scope") or self.scope or f"repository:{self.repo}:pull"}
         req = urllib.request.Request(fields["realm"] + "?" + urllib.parse.urlencode(query))
         if basic:
             req.add_header("Authorization", basic)

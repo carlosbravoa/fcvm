@@ -172,9 +172,10 @@ def t_create_sandbox(image=None, template=None, name=None, command=None, vcpus=N
         if not template:
             raise ToolError("give an image (see images) or a template (see templates)")
     plain = not any((image, name, command, vcpus, mem_mib, ports, volumes, network))
-    if pool or (template and plain and pool_for(template)):
+    warm = pool_for(template) if template and plain and not pool else None
+    if pool or warm:
         # a VM already booted from that recipe: claimed in milliseconds instead of a boot
-        pname = pool or pool_for(template)["name"]
+        pname = pool or warm["name"]
         args = ["pool", "claim", pname]
         for opt, val in (("ttl", ttl or DEFAULT_TTL), ("idle_stop", idle_stop or DEFAULT_IDLE_STOP)):
             if val:

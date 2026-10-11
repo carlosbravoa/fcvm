@@ -96,6 +96,11 @@ class Exec(VMTestCase):
         wait_for(lambda: next(j for j in json.loads(fcvm("jobs", self.name, "--json").stdout) if j["id"] == job)["status"] == "lost",
                  10, what="the killed job to be lost")
         self.assertNotIn("sleep 300", self.sh(self.name, "ps").stdout)        # its process group went with it
+        # killed by a signal inside the VM: that is an exit (128+N), not a lost connection
+        job = fcvm("exec", "-d", self.name, "--", "sh", "-c", "kill -9 $$").stdout.strip()
+        mine = wait_for(lambda: (lambda j: j if j["status"] == "exited" else None)(
+            next(j for j in json.loads(fcvm("jobs", self.name, "--json").stdout) if j["id"] == job)), 20, what="the signalled job")
+        self.assertEqual(mine["exit_code"], 137)
         fcvm("jobs", self.name, "--clear")
         self.assertEqual(json.loads(fcvm("jobs", self.name, "--json").stdout), [])
 
@@ -180,20 +185,27 @@ class Forward(VMTestCase):
         self.assertIn("https://nowhere.test: none", log)
         self.assertNotIn("store", log)
 
-    def test_ssh_agent(self):
-        if not any(i["name"] == "python-3.13-slim" for i in json.loads(fcvm("images", "--json").stdout)):
-            self.skipTest("needs the python-3.13-slim image (to talk the agent protocol from the guest)")
+    def agent_with_a_key(self):
+        """A fresh ssh-agent holding one key named fcvmtest-key: its socket path."""
         d = tempfile.mkdtemp(prefix="fcvmtest-agent-")
         agent = subprocess.run(["ssh-agent", "-s", "-a", f"{d}/agent.sock"], capture_output=True, text=True, check=True)
         pid = int(re.search(r"SSH_AGENT_PID=(\d+)", agent.stdout).group(1))
         self.addCleanup(os.kill, pid, 15)
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "fcvmtest-key", "-f", f"{d}/key"], check=True)
         subprocess.run(["ssh-add", "-q", f"{d}/key"], env={**os.environ, "SSH_AUTH_SOCK": f"{d}/agent.sock"}, check=True)
+        return f"{d}/agent.sock"
+
+    def forwarding_vm(self, image, sock, *args):
         name = unique("vm")
-        fcvm("create", name, "python-3.13-slim", "--idle", "--forward", "ssh-agent",
-             env={"SSH_AUTH_SOCK": f"{d}/agent.sock"})
+        fcvm("create", name, image, "--forward", "ssh-agent", *args, env={"SSH_AUTH_SOCK": sock})
         self.addCleanup(self.remove_vm, name)
-        fcvm("start", name, env={"SSH_AUTH_SOCK": f"{d}/agent.sock", "FCVM_DAEMON": "1"})
+        fcvm("start", name, env={"SSH_AUTH_SOCK": sock, "FCVM_DAEMON": "1"})
+        return name
+
+    def test_ssh_agent(self):
+        if not any(i["name"] == "python-3.13-slim" for i in json.loads(fcvm("images", "--json").stdout)):
+            self.skipTest("needs the python-3.13-slim image (to talk the agent protocol from the guest)")
+        name = self.forwarding_vm("python-3.13-slim", self.agent_with_a_key(), "--idle")
         script = ("import os, socket, struct\n"
                   "s = socket.socket(socket.AF_UNIX); s.connect(os.environ['SSH_AUTH_SOCK'])\n"
                   "s.sendall(struct.pack('>IB', 1, 11))\n"                     # SSH_AGENTC_REQUEST_IDENTITIES
@@ -202,6 +214,15 @@ class Forward(VMTestCase):
                   "print(d[0], struct.unpack('>I', d[1:5])[0], b'fcvmtest-key' in d)\n")
         out = fcvm("exec", "-i", name, "--", "python3", "-", input=script).stdout.strip()
         self.assertEqual(out, "12 1 True")                                   # SSH_AGENT_IDENTITIES_ANSWER, our one key
+
+    def test_ssh_agent_on_a_system_image(self):
+        """systemd mounts its own /run: the relay socket must survive that."""
+        if not any(i["name"] == "ubuntu-26.04" for i in json.loads(fcvm("images", "--json").stdout)):
+            self.skipTest("needs the ubuntu-26.04 system image")
+        name = self.forwarding_vm("ubuntu-26.04", self.agent_with_a_key(), "--mem", "768")
+        wait_for(lambda: fcvm("exec", name, "--", "ssh-add", "-l", check=False).returncode == 0, 30, what="ssh-add in the guest")
+        out = fcvm("exec", name, "--", "ssh-add", "-l").stdout
+        self.assertIn("fcvmtest-key", out)
 
 
 class Balloon(VMTestCase):

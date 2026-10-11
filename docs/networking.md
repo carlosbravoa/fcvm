@@ -110,7 +110,7 @@ adds a mirror on the proxy, `http://172.30.1.1:3128/cache/HOST/PATH`:
   `PIP_TRUSTED_HOST`, `npm_config_registry`), and `FCVM_CACHE` names it for
   other tools: `curl $FCVM_CACHE/github.com/org/repo/archive/v1.tar.gz`;
 - the proxy fetches `https://HOST/PATH` itself, with the VM's allowlist
-  applied to HOST, and keeps artifacts (wheels, tarballs, anything the
+  applied to HOST (and to every host a redirect leads to), and keeps artifacts (wheels, tarballs, anything the
   server marks immutable or cacheable for a day) in `cache/egress/` on the
   host; index pages and package metadata are fetched fresh, with their
   links rewritten to the mirror, so the files behind them go through it too;

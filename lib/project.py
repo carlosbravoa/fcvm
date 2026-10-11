@@ -104,9 +104,7 @@ def load(path):
                 raise Invalid(f"{path}: [vms.{key}]: {e}")
         if spec.pop("idle", False):
             spec["process"] = "idle"
-        if "command" in spec and spec.get("process", t.get("process")) not in ("command", None):
-            spec["process"] = "command"
-        if "command" in spec and "process" not in spec:
+        if "command" in spec:       # a command is what the VM runs, whatever the template's process
             spec["process"] = "command"
         for k in ("ports", "volumes", "allow", "secrets", "forward"):   # lists add to the template's
             if k in spec and k in t:

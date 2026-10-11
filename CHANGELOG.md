@@ -127,6 +127,27 @@ Fixes from a code review:
 - `host-setup`, `setup` and `status` broke under `su`, cron or `sudo -u`
   (`$USER` unset).
 
+And from a second review of this release's own changes, before it shipped:
+
+- The mirror could be made to fetch from a host outside the VM's allowlist
+  (a host string a URL reads differently, such as `evil.com?x.pypi.org`,
+  or an allowed host redirecting elsewhere): the host must now be a plain
+  name, and redirects are followed only to allowed hosts.
+- `--forward ssh-agent` on a system image: systemd's own `/run` hid the
+  relay socket unless a secret was set too.
+- `fcvm import` could still create directories outside the work directory
+  through a symlinked parent (the check ran after `makedirs`).
+- npm's package metadata was never rewritten to the mirror, so `--cache`
+  cached nothing of npm's.
+- `fcvm push` asked for a pull-only token when the registry's challenge
+  named no scope, and failed with "authentication failed".
+- A job whose command a signal killed inside the VM (exit 137 from an
+  OOM, say) was listed `lost`; only a dropped connection or `--kill` is.
+- The mirror left a temporary file behind for every failed upstream fetch,
+  and a truncated upstream body crashed the request.
+- The client libraries now find the server of an fcvm run from a checkout
+  (`fcvm _home` tells them where its state is).
+
 ## 0.6.2 (2026-10-02)
 
 Provenance for the vendored web console files. Nothing to run after

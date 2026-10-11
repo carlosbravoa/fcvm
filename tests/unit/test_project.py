@@ -50,6 +50,8 @@ ttl = "4h"
         box = vms["shop-box"]
         self.assertEqual((box["image"], box["network"], box["allow"]), ("python-3.13-slim", "restricted", ["@pypi", "@github"]))
         self.assertEqual((box["process"], box["command"], box["ttl"]), ("command", ["python", "/work/app.py"], "4h"))
+        _, vms = pj.load(self.write('[vms.w]\nimage = "python-3.13-slim"\nidle = true\ncommand = ["sleep", "1"]\n'))
+        self.assertEqual(vms["shop-w"]["process"], "command")
         self.assertEqual(box["volumes"], [f"{self.sub}:/work"])
         args = pj.create_args("shop-box", box)
         self.assertEqual(args[-3:], ["--", "python", "/work/app.py"])

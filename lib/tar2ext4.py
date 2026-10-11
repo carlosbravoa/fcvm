@@ -51,13 +51,14 @@ def unpack(tar, root):
             if not path:
                 continue
             dest = os.path.join(root, path)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
             # A layer may put a symlink where a later entry's parent should be
-            # (a -> /home/x, then a/file): never write through it, nor over an
-            # existing symlink at the destination. Untrusted images reach here.
-            if not os.path.realpath(os.path.dirname(dest)).startswith(real_root + os.sep) and \
-                    os.path.realpath(os.path.dirname(dest)) != real_root:
+            # (a -> /home/x, then a/sub/file): never write through it (not even
+            # the parent directories), nor over an existing symlink at the
+            # destination. Untrusted images reach here.
+            parent = os.path.realpath(os.path.dirname(dest))
+            if parent != real_root and not parent.startswith(real_root + os.sep):
                 continue
+            os.makedirs(parent, exist_ok=True)
             if os.path.lexists(dest) and not (m.isdir() and os.path.isdir(dest) and not os.path.islink(dest)):
                 if os.path.isdir(dest) and not os.path.islink(dest):
                     shutil.rmtree(dest)

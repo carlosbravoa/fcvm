@@ -1201,13 +1201,16 @@ start_job() {   # vm cmd...
 }
 
 # One job's state as JSON: status running | exited | lost (the connection
-# dropped: the VM stopped, or the job was killed), with its exit code.
+# dropped: the VM stopped, or `--kill` ended it), with its exit code. A command
+# killed by a signal in the VM exited (128+N), like in a shell.
 job_json() {   # jobs-dir id
     local jd=$1 id=$2 status=running code="" ended=null
     if [ -f "$jd/$id.status" ]; then
         code=$(cat "$jd/$id.status"); ended=$(stat -c %Y "$jd/$id.status")
-        status=exited; [ "$code" -lt 128 ] || [ "$code" = 124 ] || status=lost   # killed, or the VM went away (255)
+        status=exited; [ "$code" != 255 ] && [ ! -f "$jd/$id.killed" ] || status=lost
     elif ! kill -0 "$(cat "$jd/$id.pid" 2>/dev/null)" 2>/dev/null; then
+        sleep 0.3     # its status is being written right now, or it is gone for good
+        [ -f "$jd/$id.status" ] && job_json "$jd" "$id" && return
         status=lost
     fi
     jq --arg s "$status" --arg c "$code" --argjson ended "$ended" \
@@ -1238,6 +1241,7 @@ jobs_cmd() {
             case ${1:-} in
                 --kill)
                     [ ! -f "$jd/$id.status" ] || die "job $id has already ended"
+                    : > "$jd/$id.killed"
                     kill_ours "$(cat "$jd/$id.pid" 2>/dev/null)" exec_client.py
                     log "killed job $id" ;;
                 -f) tail -n +1 -f --pid="$(cat "$jd/$id.pid")" "$jd/$id.out" 2>/dev/null

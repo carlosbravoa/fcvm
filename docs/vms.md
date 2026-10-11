@@ -130,8 +130,9 @@ fcvm shell -u root unpriv                    # root shell in an image whose USER
   ```
 
   Output goes to `vms/VM/jobs/ID.out` and `ID.err`. A job is `lost` when
-  its connection dropped: the VM stopped, or it was killed. `--timeout`
-  applies to jobs too. The API (`POST /vms/{vm}/exec` with `background`)
+  its connection dropped (the VM stopped) or `--kill` ended it; a command
+  that a signal killed inside the VM `exited(128+N)`, as in a shell.
+  `--timeout` applies to jobs too. The API (`POST /vms/{vm}/exec` with `background`)
   and the MCP server (`exec` with `background`, then `job`, `jobs`,
   `kill_job`) have the same.
 - **`fcvm ssh VM`** also works for system images. Each VM gets its keys

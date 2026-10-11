@@ -2193,12 +2193,12 @@ int main(int argc, char **argv_)
     }
     if (exec) {
         mount_shares("0:0"); /* system images: files appear owned by root */
-        if (karg("fcvm.secrets")) {
-            /* /run as a tmpfs now, so systemd keeps it (and /run/secrets in it)
-             * instead of mounting its own over them */
+        if (karg("fcvm.secrets") || karg("fcvm.ssh_agent")) {
+            /* /run as a tmpfs now, so systemd keeps it (/run/secrets and the
+             * ssh-agent socket in it) instead of mounting its own over them */
             mnt("tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV | MS_STRICTATIME, "mode=0755");
-            fetch_secrets("0:0");
         }
+        fetch_secrets("0:0");
         start_forwarding("0:0");
         char *host = karg("systemd.hostname");
         if (host && *host)

@@ -31,6 +31,7 @@ proxy's.
 import argparse
 import asyncio
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -39,13 +40,15 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DEFAULT_PORTS = {80, 443}
 HEADER_LIMIT = 64 * 1024
 CACHE_DIR = None
 CACHE_SUFFIXES = (".whl", ".tgz", ".tar.gz", ".tar.bz2", ".tar.xz", ".zip", ".crate", ".gem", ".jar", ".deb", ".apk", ".egg")
-REWRITE_TYPES = ("text/html", "application/json", "application/vnd.pypi.simple")
+REWRITE_TYPES = ("text/html", "application/json", "application/vnd.pypi.simple", "application/vnd.npm.install-v1+json")
+HOST_RE = re.compile(r"^[a-z0-9.-]+$", re.I)   # a mirror host: a plain DNS name, nothing a URL could misread
 PASS_HEADERS = ("accept", "user-agent", "accept-encoding", "if-none-match", "if-modified-since", "range")
 
 
@@ -143,13 +146,27 @@ def cache_paths(host, port, path):
     return base + ".meta", base + ".data"
 
 
-def fetch(url, headers):
+class PolicyRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to a host the VM's allowlist covers (a GitHub
+    release to its CDN, say); anything else is a policy error, not a fetch."""
+    def __init__(self, patterns):
+        self.patterns = patterns
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        u = urllib.parse.urlsplit(newurl)
+        if u.scheme != "https" or not allowed(u.hostname or "", u.port or 443, self.patterns):
+            raise urllib.error.URLError(f"redirect to {u.hostname}:{u.port or 443} is not allowed")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch(url, headers, patterns=()):
     """Upstream GET in a thread: (status, headers dict, path of the body) or raises."""
     req = urllib.request.Request(url, headers={k: v for k, v in headers.items() if k.lower() in PASS_HEADERS and k.lower() != "accept-encoding"})
+    opener = urllib.request.build_opener(PolicyRedirect(patterns))
     os.makedirs(CACHE_DIR, exist_ok=True)       # `fcvm prune` may have removed it while we run
     tmp = tempfile.NamedTemporaryFile(dir=CACHE_DIR, prefix=".fetch-", delete=False)
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with opener.open(req, timeout=120) as r:
             while chunk := r.read(1 << 20):
                 tmp.write(chunk)
             tmp.close()
@@ -159,6 +176,10 @@ def fetch(url, headers):
         with open(tmp.name, "wb") as f:
             f.write(e.read())
         return e.code, dict(e.headers), tmp.name
+    except BaseException:
+        tmp.close()
+        os.unlink(tmp.name)
+        raise
 
 
 async def send_file(writer, status, ctype, path, extra=b""):
@@ -177,9 +198,14 @@ async def mirror_request(writer, pol, headers, target, listen):
     rest = target[len("/cache/"):]
     hostport, _, path = rest.partition("/")
     path = "/" + path
-    host, port = split_hostport(hostport, 443)
+    try:
+        host, port = split_hostport(hostport, 443)
+    except ValueError:
+        host, port = hostport, 0
     mirror = f"http://{listen}/cache"
-    ok = bool(pol) and allowed(host, port, pol.get("allow", []))
+    # The host goes into a URL we fetch: only a plain name may pass, so that
+    # "evil.com?x.pypi.org" (allowed by its suffix, fetched from evil.com) cannot.
+    ok = bool(pol) and bool(HOST_RE.match(host)) and allowed(host, port, pol.get("allow", []))
     entry = {"vm": pol and pol.get("vm"), "method": "GET", "host": host, "port": port, "path": path[:120]}
     if not ok:
         record(pol, {**entry, "decision": "deny"})
@@ -197,8 +223,9 @@ async def mirror_request(writer, pol, headers, target, listen):
         return
     url = f"https://{host}{'' if port == 443 else ':' + str(port)}{path}"
     try:
-        status, rheaders, body_path = await asyncio.get_running_loop().run_in_executor(None, fetch, url, headers)
-    except (OSError, ssl.SSLError, ValueError) as e:
+        status, rheaders, body_path = await asyncio.get_running_loop().run_in_executor(
+            None, fetch, url, headers, pol.get("allow", []))
+    except (OSError, ssl.SSLError, ValueError, http.client.HTTPException) as e:
         record(pol, {**entry, "decision": "error"})
         body = f"fcvm egress proxy: cannot fetch {url}: {e}\n".encode()
         writer.write(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: %d\r\n\r\n" % len(body) + body)

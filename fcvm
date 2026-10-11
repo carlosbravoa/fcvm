@@ -152,6 +152,7 @@ case $cmd in
     project)            exec python3 "$FCVM_ROOT/lib/project.py" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     serve)              exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;
+    _home)              echo "$FCVM_HOME" ;;   # for the client libraries: where vms/.serve.json is
     help|-h|--help)     usage ;;
     *)                  usage; exit 1 ;;
 esac

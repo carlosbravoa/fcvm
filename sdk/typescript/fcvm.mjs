@@ -10,6 +10,7 @@
 //   await sb.remove();
 //
 // Node 18+ (fetch), no dependencies. Types in fcvm.d.ts.
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -27,6 +28,9 @@ export function discover() {
     return { url: process.env.FCVM_URL.replace(/\/$/, ""), token: process.env.FCVM_TOKEN };
   }
   const homes = [process.env.FCVM_HOME, join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "fcvm")];
+  try {   // an fcvm run from a checkout keeps its state in the checkout
+    homes.push(execFileSync("fcvm", ["_home"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10000 }).trim());
+  } catch {}
   for (const home of homes.filter(Boolean)) {
     try {
       const s = JSON.parse(readFileSync(join(home, "vms", ".serve.json"), "utf8"));

@@ -108,11 +108,14 @@ class MkfsTar(unittest.TestCase):
         outside = tempfile.mkdtemp(prefix="fcvm-mkfs-outside-")
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         with tarfile.open(self.tar, "w", format=tarfile.PAX_FORMAT) as tf:
-            for name, target in (("escape", outside), ("plain", "/etc"), ("victim", f"{outside}/victim")):
+            for name, target in (("escape", outside), ("plain", "/etc"), ("victim", f"{outside}/victim"),
+                                 ("dangling", "/nonexistent/fcvm")):
                 ti = tarfile.TarInfo(name)
                 ti.type, ti.mode, ti.linkname = tarfile.SYMTYPE, 0o777, target
                 tf.addfile(ti)
-            for name in ("escape/pwned", "victim"):   # through a symlinked parent; over a symlink
+            # through a symlinked parent (and a directory under it, which must not be
+            # created outside either); over a symlink; under a dangling symlink
+            for name in ("escape/pwned", "escape/.ssh/pwned", "victim", "dangling/sub/file"):
                 ti = tarfile.TarInfo(name)
                 ti.type, ti.mode, ti.size = tarfile.REGTYPE, 0o644, 5
                 tf.addfile(ti, io.BytesIO(b"owned"))

@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 import threading
 import unittest
+import urllib.request
 
 from helpers import ROOT  # noqa: F401
 import oci_export as ex
@@ -99,6 +100,30 @@ class FakeRegistry(http.server.BaseHTTPRequestHandler):
 
 
 class Push(unittest.TestCase):
+    def test_token_asks_for_push_scope(self):
+        """When the 401 challenge names no scope, the token request must carry
+        the pusher's (pull,push), or the push loops on 401."""
+        asked = []
+
+        class Tok:
+            def __init__(self, req):
+                asked.append(req.full_url)
+            def __enter__(self):
+                return io.BytesIO(b'{"token": "t"}')
+            def __exit__(self, *a):
+                pass
+        p = ex.Pusher("reg.example", "org/app")
+        p.scope = "repository:org/app:pull,push"
+        saved, urllib.request.urlopen = urllib.request.urlopen, Tok
+        try:
+            p._auth('Bearer realm="https://reg.example/token",service="reg"')
+            p._auth('Bearer realm="https://reg.example/token",service="reg",scope="repository:org/app:pull"')
+        finally:
+            urllib.request.urlopen = saved
+        self.assertEqual(p.token, "Bearer t")
+        self.assertIn("scope=repository%3Aorg%2Fapp%3Apull%2Cpush", asked[0])
+        self.assertIn("scope=repository%3Aorg%2Fapp%3Apull&", asked[1] + "&")
+
     def test_push_to_a_registry(self):
         d = tempfile.mkdtemp(prefix="fcvm-ocipush-")
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

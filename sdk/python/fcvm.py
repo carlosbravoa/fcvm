@@ -16,6 +16,8 @@ CLI. Standard library only; Python 3.9+.
 """
 import json
 import os
+import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -59,6 +61,11 @@ def discover():
     if os.environ.get("FCVM_URL") and os.environ.get("FCVM_TOKEN"):
         return os.environ["FCVM_URL"].rstrip("/"), os.environ["FCVM_TOKEN"]
     homes = [os.environ.get("FCVM_HOME"), os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "fcvm")]
+    if shutil.which("fcvm"):        # an fcvm run from a checkout keeps its state in the checkout
+        try:
+            homes.append(subprocess.run(["fcvm", "_home"], capture_output=True, text=True, timeout=10).stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass
     for home in filter(None, homes):
         try:
             with open(os.path.join(home, "vms", ".serve.json")) as f:

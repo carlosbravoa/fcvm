@@ -6,6 +6,8 @@ import os
 import shutil
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 
 from helpers import ROOT  # noqa: F401  (sets up sys.path)
 import egress_proxy as ep
@@ -31,6 +33,33 @@ class Mirror(unittest.TestCase):
         self.assertEqual(ep.rewrite(page, "application/octet-stream", ["pypi.org"], "m"), page)   # binaries: never
         self.assertEqual(ep.rewrite(page, "text/html", [], "m"), page)
 
+    def test_rewrites_npm_abbreviated_metadata(self):
+        """npm asks for application/vnd.npm.install-v1+json; its tarball links
+        must point at the mirror too, or nothing of npm's is ever cached."""
+        body = b'{"versions":{"1.0.0":{"dist":{"tarball":"https://registry.npmjs.org/left-pad/-/left-pad-1.0.0.tgz"}}}}'
+        out = ep.rewrite(body, "application/vnd.npm.install-v1+json; charset=utf-8", ["registry.npmjs.org"], "http://10.1.0.1:3128/cache")
+        self.assertIn(b'"tarball":"http://10.1.0.1:3128/cache/registry.npmjs.org/left-pad/-/left-pad-1.0.0.tgz"', out)
+
+    def test_redirects_stay_inside_the_allowlist(self):
+        h = ep.PolicyRedirect(["github.com", "*.githubusercontent.com"])
+        req = urllib.request.Request("https://github.com/x/releases/download/v1/x.tar.gz")
+        self.assertIsNotNone(h.redirect_request(req, None, 302, "Found", {}, "https://objects.githubusercontent.com/a/b"))
+        with self.assertRaises(urllib.error.URLError):
+            h.redirect_request(req, None, 302, "Found", {}, "https://evil.example/a")
+        with self.assertRaises(urllib.error.URLError):
+            h.redirect_request(req, None, 302, "Found", {}, "http://github.com/plain")   # no downgrade
+
+    def test_failed_fetch_leaves_no_temp_file(self):
+        d = tempfile.mkdtemp(prefix="fcvm-mirror-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        ep.CACHE_DIR = d
+        try:
+            with self.assertRaises(OSError):
+                ep.fetch("https://invalid.invalid/x", {})
+        finally:
+            ep.CACHE_DIR = None
+        self.assertEqual(os.listdir(d), [])
+
     def test_end_to_end_with_a_fake_upstream(self):
         d = tempfile.mkdtemp(prefix="fcvm-mirror-")
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
@@ -42,7 +71,7 @@ class Mirror(unittest.TestCase):
             json.dump({"vm": "box", "allow": ["pypi.org", "files.pythonhosted.org"], "log": log}, f)
         fetched = []
 
-        def fake_fetch(url, headers):
+        def fake_fetch(url, headers, patterns=()):
             fetched.append(url)
             path = os.path.join(d, "body")
             if url.endswith(".whl"):
@@ -83,8 +112,12 @@ class Mirror(unittest.TestCase):
             out.append(get(port, "/cache/files.pythonhosted.org/packages/six.whl"))  # again: from the cache
             out.append(get(port, "/cache/evil.example/x"))                           # not allowed
             out.append(get(port, "/cache/pypi.org/missing"))                         # upstream 404
+            # allowed by its suffix, but a URL would fetch it from evil.example
+            out.append(get(port, "/cache/evil.example?x.pythonhosted.org/packages/six.whl"))
+            out.append(get(port, "/cache/evil.example#files.pythonhosted.org/x"))
+            out.append(get(port, "/cache/bob@files.pythonhosted.org/x"))
             return out
-        page, whl1, whl2, denied, missing = asyncio.run(go())
+        page, whl1, whl2, denied, missing, *injected = asyncio.run(go())
         self.assertEqual(page[0], 200)
         self.assertIn(b'href="http://127.0.0.1:', page[2])                           # rewritten to the mirror
         self.assertEqual((whl1[0], whl1[2]), (200, b"WHEEL-BYTES"))
@@ -92,8 +125,10 @@ class Mirror(unittest.TestCase):
         self.assertEqual(len([u for u in fetched if u.endswith(".whl")]), 1)         # fetched once
         self.assertEqual(denied[0], 403)
         self.assertEqual(missing[0], 404)
+        self.assertEqual([r[0] for r in injected], [403, 403, 403])
+        self.assertFalse([u for u in fetched if "evil" in u or "bob@" in u])
         decisions = [json.loads(l)["decision"] for l in open(log)]
-        self.assertEqual(decisions, ["fetch", "cache-miss", "cache-hit", "deny", "fetch"])
+        self.assertEqual(decisions, ["fetch", "cache-miss", "cache-hit", "deny", "fetch", "deny", "deny", "deny"])
         self.assertTrue(any(f.endswith(".data") for _, _, fs in os.walk(cache_dir) for f in fs))
 
 

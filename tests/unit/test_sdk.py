@@ -86,6 +86,13 @@ class SDK(unittest.TestCase):
             os.environ.pop("FCVM_URL", None)
             os.environ["FCVM_HOME"] = d
             self.assertEqual(sdk.discover(), ("http://127.0.0.1:8686", "abc"))
+            del os.environ["FCVM_HOME"]                       # a checkout: only `fcvm _home` knows
+            os.environ["XDG_DATA_HOME"] = os.path.join(d, "nowhere")
+            with open(os.path.join(d, "fcvm"), "w") as f:
+                f.write(f'#!/bin/sh\n[ "$1" = _home ] && echo {d}\n')
+            os.chmod(os.path.join(d, "fcvm"), 0o755)
+            os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
+            self.assertEqual(sdk.discover(), ("http://127.0.0.1:8686", "abc"))
             os.environ["FCVM_URL"], os.environ["FCVM_TOKEN"] = "http://h:1/", "t"
             self.assertEqual(sdk.discover(), ("http://h:1", "t"))
         finally:

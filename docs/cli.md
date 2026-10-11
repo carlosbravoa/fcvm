@@ -49,6 +49,8 @@ These use sudo.
 | `images [--all] [--json]` | lists images, with type, size, users and source. `--all` includes the build cache |
 | `commit VM IMAGE` | saves a stopped VM's changes as a new image: a read-only layer on its image |
 | `squash IMAGE NEW` | merges IMAGE's layers into one, on the same base image |
+| `export IMAGE FILE.tar` | the image, flattened, as an OCI image archive for `docker load`, `podman load` or `fcvm import` elsewhere |
+| `push IMAGE REGISTRY/REPO[:TAG]` | the same, uploaded to a registry (`REGISTRY_USER`/`REGISTRY_PASSWORD` to log in) |
 | `rmi IMAGE` | deletes an image nothing depends on |
 | `prune` | deletes the build cache and leftover build VMs |
 

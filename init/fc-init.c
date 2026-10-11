@@ -68,6 +68,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/sysmacros.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
@@ -425,6 +426,279 @@ static void merge_main(void)
     sync();
     umount("/mnt/out");
     msg("merged %d layer(s), %d error(s)", n, merge_errors);
+    shutdown_vm();
+}
+
+/*
+ * Image export (`fcvm export` / `fcvm push`), run from the initramfs like a
+ * merge:
+ *   fcvm.export=DEV,...   the image's disks, topmost layer first, base last
+ *   fcvm.export_out=DEV   an empty disk; receives /rootfs.tar and /export-ok
+ * The chain is mounted as a read-only overlay (so deletions are applied) and
+ * written as a tar in GNU format: long names in 'L'/'K' entries, xattrs such
+ * as file capabilities in pax 'x' headers, hard links as links. fcvm's own
+ * /.fcvm is left out: the import on the other side regenerates it.
+ */
+static int tar_fd, tar_errors;
+static char tar_buf[1 << 20];
+static size_t tar_len;
+
+static void tar_flush(void)
+{
+    if (tar_len && write_all(tar_fd, tar_buf, tar_len) < 0)
+        tar_errors++;
+    tar_len = 0;
+}
+
+static void tar_write(const void *p, size_t n)
+{
+    const char *c = p;
+    while (n) {
+        size_t k = sizeof(tar_buf) - tar_len;
+        if (k > n)
+            k = n;
+        memcpy(tar_buf + tar_len, c, k);
+        tar_len += k;
+        c += k;
+        n -= k;
+        if (tar_len == sizeof(tar_buf))
+            tar_flush();
+    }
+}
+
+static void tar_pad(unsigned long long n)
+{
+    static const char zeros[512];
+    if (n % 512)
+        tar_write(zeros, 512 - n % 512);
+}
+
+/* A numeric field: octal when it fits, else GNU base-256. */
+static void tar_num(char *f, size_t w, unsigned long long v)
+{
+    if (v < (1ULL << (3 * (w - 1)))) {
+        snprintf(f, w, "%0*llo", (int)w - 1, v);
+    } else {
+        f[0] = (char)0x80;
+        for (size_t i = w - 1; i > 0; i--, v >>= 8)
+            f[i] = v & 0xff;
+    }
+}
+
+static void tar_header(const char *name, char type, mode_t mode, uid_t uid, gid_t gid,
+                       unsigned long long size, time_t mtime, const char *link, dev_t rdev)
+{
+    static unsigned char hdr[512];
+    char *h = (char *)hdr;
+    memset(hdr, 0, sizeof(hdr));
+    snprintf(h, 100, "%s", name); /* a longer name was announced in an 'L' entry */
+    tar_num(h + 100, 8, mode & 07777);
+    tar_num(h + 108, 8, uid);
+    tar_num(h + 116, 8, gid);
+    tar_num(h + 124, 12, size);
+    tar_num(h + 136, 12, mtime < 0 ? 0 : (unsigned long long)mtime);
+    memset(h + 148, ' ', 8);
+    h[156] = type;
+    if (link)
+        snprintf(h + 157, 100, "%s", link);
+    memcpy(h + 257, "ustar  ", 8);
+    if (type == '3' || type == '4') {
+        tar_num(h + 329, 8, major(rdev));
+        tar_num(h + 337, 8, minor(rdev));
+    }
+    unsigned sum = 0;
+    for (int i = 0; i < 512; i++)
+        sum += hdr[i];
+    snprintf(h + 148, 8, "%06o", sum);
+    h[155] = ' ';
+    tar_write(hdr, 512);
+}
+
+static void tar_long(char type, const char *s)
+{
+    size_t n = strlen(s) + 1;
+    tar_header("././@LongLink", type, 0644, 0, 0, n, 0, NULL, 0);
+    tar_write(s, n);
+    tar_pad(n);
+}
+
+/* Extended attributes (file capabilities, SELinux labels) as a pax header. */
+static void tar_xattrs(const char *path)
+{
+    static char names[65536], val[65536], body[1 << 17];
+    ssize_t n = llistxattr(path, names, sizeof(names));
+    size_t total = 0;
+    for (char *k = names; n > 0 && k < names + n; k += strlen(k) + 1) {
+        if (!strncmp(k, "trusted.", 8))
+            continue;
+        ssize_t vl = lgetxattr(path, k, val, sizeof(val));
+        if (vl < 0)
+            continue;
+        size_t rest = 1 + 13 + strlen(k) + 1 + vl + 1, len = rest + 1, digits; /* "LEN SCHILY.xattr.K=V\n" */
+        for (;;) {
+            char tmp[24];
+            digits = snprintf(tmp, sizeof(tmp), "%zu", len);
+            if (digits + rest == len)
+                break;
+            len = rest + digits;
+        }
+        if (total + len > sizeof(body))
+            break;
+        total += snprintf(body + total, sizeof(body) - total, "%zu SCHILY.xattr.%s=", len, k);
+        memcpy(body + total, val, vl);
+        total += vl;
+        body[total++] = '\n';
+    }
+    if (!total)
+        return;
+    tar_header("././@PaxHeader", 'x', 0644, 0, 0, total, 0, NULL, 0);
+    tar_write(body, total);
+    tar_pad(total);
+}
+
+static void tar_dir(const char *fs, const char *rel)
+{
+    DIR *d = opendir(fs);
+    struct dirent *e;
+    if (!d) {
+        merr("opendir", fs);
+        return;
+    }
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+            continue;
+        if (!*rel && !strcmp(e->d_name, ".fcvm"))
+            continue;
+        char f[4096], r[4096], target[4096] = "";
+        snprintf(f, sizeof(f), "%s/%s", fs, e->d_name);
+        snprintf(r, sizeof(r), "%s%s%s", rel, *rel ? "/" : "", e->d_name);
+        struct stat st;
+        if (lstat(f, &st) < 0) {
+            merr("lstat", f);
+            continue;
+        }
+        char type;
+        const char *link = NULL;
+        unsigned long long size = 0;
+        if (S_ISDIR(st.st_mode)) {
+            type = '5';
+            strcat(r, "/");
+        } else if (S_ISREG(st.st_mode)) {
+            size_t i;
+            type = '0';
+            size = st.st_size;
+            for (i = 0; st.st_nlink > 1 && i < nlinks; i++)
+                if (links[i].dev == st.st_dev && links[i].ino == st.st_ino)
+                    break;
+            if (st.st_nlink > 1 && i < nlinks) {
+                type = '1';
+                link = links[i].path;
+                size = 0;
+            } else if (st.st_nlink > 1) {
+                links = realloc(links, (nlinks + 1) * sizeof(*links));
+                links[nlinks++] = (struct hardlink){st.st_dev, st.st_ino, strdup(r)};
+            }
+        } else if (S_ISLNK(st.st_mode)) {
+            ssize_t n = readlink(f, target, sizeof(target) - 1);
+            if (n < 0) {
+                merr("readlink", f);
+                continue;
+            }
+            target[n] = '\0';
+            type = '2';
+            link = target;
+        } else if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode) || S_ISFIFO(st.st_mode)) {
+            type = S_ISCHR(st.st_mode) ? '3' : S_ISBLK(st.st_mode) ? '4' : '6';
+        } else {
+            continue; /* sockets have no place in an image */
+        }
+        if (strlen(r) >= 100)
+            tar_long('L', r);
+        if (link && strlen(link) >= 100)
+            tar_long('K', link);
+        if (type == '0' || type == '5')
+            tar_xattrs(f);
+        tar_header(r, type, st.st_mode, st.st_uid, st.st_gid, size, st.st_mtime, link, st.st_rdev);
+        if (type == '0' && size) {
+            static char data[1 << 16];
+            int fd = open(f, O_RDONLY | O_CLOEXEC);
+            unsigned long long done = 0;
+            ssize_t n;
+            while (fd >= 0 && done < size && (n = read(fd, data, sizeof(data))) > 0) {
+                if ((unsigned long long)n > size - done)
+                    n = size - done;
+                tar_write(data, n);
+                done += n;
+            }
+            if (fd < 0)
+                merr("open", f);
+            else
+                close(fd);
+            while (done < size) { /* shorter than announced: pad */
+                size_t k = size - done < sizeof(data) ? size - done : sizeof(data);
+                memset(data, 0, k);
+                tar_write(data, k);
+                done += k;
+            }
+            tar_pad(size);
+        }
+        if (type == '5')
+            tar_dir(f, r[strlen(r) - 1] == '/' ? (r[strlen(r) - 1] = '\0', r) : r);
+    }
+    closedir(d);
+}
+
+static void export_main(void)
+{
+    char *devs = karg("fcvm.export"), *out = karg("fcvm.export_out"), *save, *list[64];
+    int n = 0;
+    if (!out || mount_dev(out, "/mnt/out", MS_NOATIME) < 0) {
+        msg("export: no output disk");
+        shutdown_vm();
+    }
+    for (char *dev = devs ? strtok_r(devs, ",", &save) : NULL; dev && n < 64; dev = strtok_r(NULL, ",", &save))
+        list[n++] = dev;
+    char lower[4096] = "";
+    const char *root = "/mnt/root";
+    for (int i = 0; i < n; i++) {
+        char dir[32];
+        snprintf(dir, sizeof(dir), "/mnt/l%d", i);
+        if (mount_dev(list[i], dir, MS_RDONLY) < 0) {
+            msg("export: cannot mount %s", list[i]);
+            shutdown_vm();
+        }
+        size_t l = strlen(lower);
+        snprintf(lower + l, sizeof(lower) - l, "%s%s%s", i ? ":" : "", dir, i < n - 1 ? "/upper" : "");
+    }
+    if (n == 1) {
+        root = "/mnt/l0";
+    } else {
+        char opts[4200];
+        snprintf(opts, sizeof(opts), "lowerdir=%s", lower);
+        mkdir_p(root, 0755);
+        if (mount("overlay", root, "overlay", MS_RDONLY, opts) < 0) {
+            msg("export: mount overlay: %s", strerror(errno));
+            shutdown_vm();
+        }
+    }
+    tar_fd = open("/mnt/out/rootfs.tar", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (tar_fd < 0) {
+        msg("export: cannot write the tar: %s", strerror(errno));
+        shutdown_vm();
+    }
+    nlinks = 0;
+    tar_dir(root, "");
+    static const char end[1024];
+    tar_write(end, sizeof(end));
+    tar_flush();
+    if (fsync(tar_fd) < 0)
+        tar_errors++;
+    close(tar_fd);
+    if (!merge_errors && !tar_errors)
+        spit("/mnt/out/export-ok", "ok\n");
+    sync();
+    umount("/mnt/out");
+    msg("exported %d level(s), %d error(s)", n, merge_errors + tar_errors);
     shutdown_vm();
 }
 
@@ -1881,6 +2155,8 @@ int main(int argc, char **argv_)
     mnt("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
     if (karg("fcvm.merge"))
         merge_main(); /* fcvm squash: never returns */
+    if (karg("fcvm.export"))
+        export_main(); /* fcvm export / push: never returns */
     char *exec = karg("fcvm.exec");
     if (assemble_root() < 0) {
         msg("cannot assemble the root filesystem; halting");

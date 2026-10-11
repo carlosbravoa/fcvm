@@ -18,6 +18,34 @@ class Build(VMTestCase):
         r = fcvm("run", img)
         self.assertIn("built", r.stdout)
 
+    def test_export_and_import_back(self):
+        """A committed image, exported as an OCI archive, imports back with its
+        content, its config and its owners."""
+        import tarfile
+        vm = self.vm()
+        self.sh(vm, "echo exported > /root/e; adduser -D -u 1234 bob; echo mine > /home/bob/f; chown bob:bob /home/bob/f; "
+                    "mkdir -p /opt/x; ln /root/e /opt/x/hard; ln -s /root/e /opt/x/soft")
+        fcvm("stop", vm)
+        img = self.image_name()
+        fcvm("commit", vm, img)
+        d = tempfile.mkdtemp(prefix="fcvmtest-export-")
+        out = os.path.join(d, "img.tar")
+        fcvm("export", img, out, timeout=600)
+        with tarfile.open(out) as tf:
+            names = tf.getnames()
+        self.assertIn("./index.json", names)
+        self.assertIn("./oci-layout", names)
+        back = self.image_name()
+        fcvm("import", f"oci-archive:{out}", back, timeout=600)
+        info = next(i for i in json.loads(fcvm("images", "--json").stdout) if i["name"] == back)
+        self.assertEqual(info["argv"], ["/bin/sh"])         # the image's own command, not the VM's --idle
+        self.assertIsNone(info["parent"])                   # one flat layer
+        vm2 = self.vm("--idle", image=back)
+        out2 = self.sh(vm2, "cat /root/e /opt/x/hard /opt/x/soft; stat -c '%u %U' /home/bob/f; "
+                            "stat -c '%i' /root/e /opt/x/hard").stdout.split("\n")
+        self.assertEqual(out2[:4], ["exported", "exported", "exported", "1234 bob"])
+        self.assertEqual(out2[4], out2[5])                  # still one inode: the hard link survived
+
     def test_commit(self):
         vm = self.vm()
         self.sh(vm, "echo committed > /root/c")

@@ -13,6 +13,7 @@ takes about 0.1 s and a few MB.
 - [Building images](#building-images)
 - [Commit a VM as an image](#commit-a-vm-as-an-image)
 - [Layers and squash](#layers-and-squash)
+- [Exporting and pushing](#exporting-and-pushing)
 - [Managing images](#managing-images)
 - [Images and the kernel](#images-and-the-kernel)
 
@@ -25,6 +26,9 @@ takes about 0.1 s and a few MB.
 | a Dockerfile | `fcvm build -t NAME ./dir` | app, or system when `FROM` a system image |
 | a stopped VM's changes | `fcvm commit VM NAME` | same as the VM's image |
 | built from scratch with `mmdebstrap` | `fcvm base` | system (Ubuntu 26.04) |
+
+And they go out again with `fcvm export` (an OCI archive) and `fcvm push`
+(a registry); see [Exporting and pushing](#exporting-and-pushing).
 
 `fcvm images` lists them, with their type, size, what uses each and where
 it came from.
@@ -233,6 +237,31 @@ fcvm squash box-ready box-flat      # merge all of box-ready's layers into one
 Squash merges layers in a throwaway VM, keeping deletions, owners, modes,
 setuid bits, xattrs (such as file capabilities), hardlinks and timestamps.
 A three-layer chain merges in about a second.
+
+## Exporting and pushing
+
+Images go out the way they come in, as OCI images, so a prepared
+environment can move to another host, a CI runner or a registry:
+
+```sh
+fcvm export box-ready box-ready.tar               # an OCI image archive, one flat layer
+docker load < box-ready.tar                       # or: podman load; or on another host:
+fcvm import oci-archive:box-ready.tar box-ready
+fcvm push box-ready ghcr.io/me/box-ready:v1       # straight to a registry
+REGISTRY_USER=me REGISTRY_PASSWORD="$(cat ~/.ghcr-token)" fcvm push box-ready ghcr.io/me/box-ready:v1
+```
+
+- **What goes out.** The image's whole chain, flattened into one layer,
+  with owners, modes, links, device nodes and capabilities intact; and
+  its configuration (ENTRYPOINT, CMD, ENV, WORKDIR, USER, exposed ports)
+  as the image config. A system image exports with `/sbin/init` as its
+  command. fcvm's own `/.fcvm` files are left out.
+- **How.** The tree is read inside a helper VM (the same way `squash`
+  merges), so no root is needed on the host. Expect a few seconds per
+  hundred MB.
+- **`push`** logs in like `import` does (anonymous, or `REGISTRY_USER` and
+  `REGISTRY_PASSWORD`), skips blobs the registry already has, and prints
+  the manifest digest.
 
 ## Managing images
 

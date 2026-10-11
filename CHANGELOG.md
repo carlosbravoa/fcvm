@@ -52,6 +52,12 @@ New:
   memory view. `inspect` has `balloon_mib`; the API `GET`/`POST
   /vms/{vm}/balloon`; the console a row on the instance page. Jailed VMs
   need `fcvm jail-setup` re-run for the helper to configure the device.
+- **Export and push.** `fcvm export IMAGE FILE.tar` writes an image (its
+  whole chain flattened into one layer, with owners, links, devices and
+  capabilities) as an OCI image archive for `docker load`, `podman load`
+  or `fcvm import` on another host; `fcvm push IMAGE REGISTRY/REPO:TAG`
+  uploads it to a registry. The tree is read inside a helper VM (`fc-init`
+  export mode), no root needed.
 - **`fcvm ssh-config`.** An ssh client entry per system VM (`Host
   fcvm-NAME`) with a `ProxyCommand` that finds the VM's current address,
   so `ssh fcvm-dev`, `scp`, `rsync` and VS Code Remote-SSH work with strict

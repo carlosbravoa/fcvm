@@ -81,6 +81,9 @@ VMs:
   cp SRC DST                 copy files in/out of a running VM (VM:PATH on one side)
   commit VM IMAGE            save a stopped VM's changes as a new image (a layer)
   squash IMAGE NEW           merge IMAGE's layers into one (same base image)
+  export IMAGE FILE.tar      the image as an OCI archive (docker/podman load, fcvm import elsewhere)
+  push IMAGE REGISTRY/REPO[:TAG]
+                             the image to a registry (REGISTRY_USER/REGISTRY_PASSWORD to log in)
   prune                      delete the build cache and leftover build VMs
   mount VM HOST/DIR[:GUEST/PATH][:ro]  add a live host directory (at once if running)
   umount VM PATH             remove it (by its guest path or host directory)
@@ -132,7 +135,7 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|ssh-config|_ssh-proxy|exec|shell|ls|rm|inspect|commit|rmi|squash|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|balloon|update|template|_reap|_shutdown)
+    images|create|start|run|stop|console|logs|ssh|ssh-config|_ssh-proxy|exec|shell|ls|rm|inspect|commit|rmi|squash|export|push|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|balloon|update|template|_reap|_shutdown)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     serve)              exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;

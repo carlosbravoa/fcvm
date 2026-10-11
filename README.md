@@ -175,6 +175,7 @@ The [documentation index](docs/README.md) describes each page.
 **Workloads**
 - ✅ OCI images from Docker Hub, ghcr.io, quay.io or any registry, digest-verified, `@sha256:` pinning
 - ✅ Local images: `docker save` / `podman save` tarballs, OCI layouts and archives
+- ✅ Out again: `fcvm export` (an OCI archive for `docker load` or another host) and `fcvm push` to a registry
 - ✅ Dockerfile builds (common subset), cached per step, network-restricted if you like
 - ✅ Full-OS system images with systemd and ssh (Ubuntu 26.04 base, built rootless)
 - ✅ Docker semantics: ENTRYPOINT/CMD, env, workdir, user, exit codes passed through

@@ -1374,6 +1374,65 @@ squash_layers() {
     rm -rf "$tmp"
 }
 
+# An OCI image layout of IMAGE (every level flattened into one layer) in
+# directory $2, made in a helper VM that boots only the initramfs (fc-init
+# export mode) and writes a tar of the merged tree with owners and all.
+export_layout() {   # image out-dir
+    local image=$1 out=$2 chain=() drives='[]' devs=() n=0 letters=abcdefghijklmnopqrstuvwxyz img bytes=0 tmp rc=0
+    mapfile -t chain < <(image_chain "$image")
+    for img in "${chain[@]}"; do
+        [ -f "$IMAGES_DIR/$img.ext4" ] || die "image '$img' is gone"
+        drives=$(jq --arg id "l$n" --arg p "$IMAGES_DIR/$img.ext4" \
+            '. + [{drive_id: $id, path_on_host: $p, is_root_device: false, is_read_only: true}]' <<<"$drives")
+        devs+=("/dev/vd${letters:n:1}"); n=$((n + 1))
+        bytes=$((bytes + $(stat -c %b "$IMAGES_DIR/$img.ext4") * 512))
+    done
+    tmp=$(mktemp -d -p "$BUILD_DIR" export.XXXXXX)
+    truncate -s "$(( bytes * 12 / 10 / 1048576 + 128 ))M" "$tmp/out.ext4"
+    mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$tmp/out.ext4"
+    drives=$(jq --arg p "$tmp/out.ext4" '. + [{drive_id: "out", path_on_host: $p, is_root_device: false, is_read_only: false}]' <<<"$drives")
+    initramfs_current || "$FCVM_ROOT/lib/build-init.sh"
+    jq -n --arg kernel "$(default_kernel)" --arg initrd "$BUILD_DIR/initramfs.cpio" --argjson drives "$drives" \
+        --arg args "console=ttyS0 reboot=k panic=1 quiet fcvm.export=$(IFS=,; echo "${devs[*]}") fcvm.export_out=/dev/vd${letters:n:1}" '{
+        "boot-source": {kernel_image_path: $kernel, initrd_path: $initrd, boot_args: $args},
+        "drives": $drives, "machine-config": {vcpu_count: 2, mem_size_mib: 512}}' > "$tmp/fc.json"
+    log "exporting '$image' (${#chain[@]} level(s)) from a helper VM"
+    timeout 1800 "$FIRECRACKER" --no-api --config-file "$tmp/fc.json" --log-path "$tmp/fc.log" \
+        </dev/null >"$tmp/console.log" 2>&1 || rc=$?
+    if [ "$(debugfs -R "cat /export-ok" "$tmp/out.ext4" 2>/dev/null)" != ok ]; then
+        grep -a 'fc-init' "$tmp/console.log" >&2 || tail -20 "$tmp/console.log" >&2
+        rm -rf "$tmp"; die "export failed (firecracker status $rc)"
+    fi
+    debugfs -R "dump /rootfs.tar $tmp/rootfs.tar" "$tmp/out.ext4" >/dev/null 2>&1
+    rm -f "$tmp/out.ext4"
+    python3 "$FCVM_ROOT/lib/oci_export.py" build --rootfs "$tmp/rootfs.tar" --meta "$IMAGES_DIR/$image.json" \
+        --name "$image" --out "$out" --arch "$ARCH" || { rm -rf "$tmp"; exit 1; }
+    rm -rf "$tmp"
+}
+
+# fcvm export IMAGE FILE.tar: the image as an OCI image archive (one layer):
+# `docker load`, `podman load`, `fcvm import oci-archive:FILE` read it.
+export_cmd() {
+    local usage="usage: fcvm export IMAGE FILE.tar" image=${1:?$usage} file=${2:?$usage} dir
+    image_json "$image" >/dev/null
+    [ ! -e "$file" ] || die "$file exists"
+    dir=$(mktemp -d -p "$BUILD_DIR" oci.XXXXXX)
+    export_layout "$image" "$dir"
+    tar -C "$dir" -cf "$file" . || { rm -rf "$dir" "$file"; die "cannot write $file"; }
+    rm -rf "$dir"
+    log "exported '$image' to $file ($(du -h "$file" | cut -f1)). Load it: docker load < $file, or fcvm import oci-archive:$file"
+}
+
+# fcvm push IMAGE REF: the image to a registry (REF as for import: ghcr.io/org/app:tag).
+push_cmd() {
+    local usage="usage: fcvm push IMAGE REGISTRY/REPO[:TAG]" image=${1:?$usage} ref=${2:?$usage} dir
+    image_json "$image" >/dev/null
+    dir=$(mktemp -d -p "$BUILD_DIR" oci.XXXXXX)
+    export_layout "$image" "$dir"
+    python3 "$FCVM_ROOT/lib/oci_export.py" push "$dir" "$ref" || { rm -rf "$dir"; exit 1; }
+    rm -rf "$dir"
+}
+
 # fcvm squash IMAGE NEW: IMAGE's committed layers merged into one layer on the
 # same base image (keeps layer chains, and so drive counts, small).
 squash() {
@@ -2131,6 +2190,8 @@ case $cmd in
     commit)  commit "$@" ;;
     rmi)     rmi "$@" ;;
     squash)  squash "$@" ;;
+    export)  export_cmd "$@" ;;
+    push)    push_cmd "$@" ;;
     prune)   prune ;;
     cp)      cp_cmd "$@" ;;
     volume)  volume_cmd "$@" ;;

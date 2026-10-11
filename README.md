@@ -65,8 +65,8 @@ Linux with KVM), or a way to run desktop GUIs.
   - snapshots and forks.
 
   Anything you can do from the CLI, you can do from the browser.
-- **Other ways in.** The CLI, an HTTP API for scripts, an MCP server for
-  agents, and a Prometheus endpoint.
+- **Other ways in.** The CLI, an HTTP API for scripts with Python and Node
+  clients, an MCP server for agents, and a Prometheus endpoint.
 - **Stays up.** A boot-time service brings VMs back after crashes and
   reboots.
 - **Small and auditable.** Bash and standard-library Python, a small static
@@ -195,6 +195,7 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ `fcvm ssh-config --install`: `ssh fcvm-dev`, scp, rsync and VS Code Remote-SSH into system VMs
 - ✅ Templates: saved launch recipes, built-in sandboxes for Python, Node and offline work, shared by the CLI, console and MCP
 - ✅ Project files: `fcvm.toml` in a repository, `fcvm up` / `fcvm down`
+- ✅ Warm pools: VMs booted ahead of time, claimed in milliseconds (agents get instant sandboxes)
 - ✅ JSON output everywhere (`--json`, `inspect`)
 - ✅ One-line install (per user, or `--system`), `fcvm upgrade` with rollback, versioned releases
 - ✅ Guided setup (`fcvm setup`) and a health check (`fcvm status`) that says what to update and how
@@ -212,7 +213,7 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ CLI
 - ✅ Web console (GUI): dashboard, live charts, launch forms, browser terminals, file browser and editor, image builds, snapshots
 - ✅ Metrics from inside each VM (CPU, memory, disk, processes), 24 h of history, and a Prometheus endpoint
-- ✅ HTTP API with token auth
+- ✅ HTTP API with token auth, and client libraries for Python and Node ([sdk/](sdk/README.md))
 - ✅ MCP server for agents, jailed by default, with an optional pinned network policy
 - ✅ Boot-time systemd service
 

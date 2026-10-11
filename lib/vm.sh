@@ -660,7 +660,7 @@ start() {
     lock_vm "$vm"
     vm_exists "$vm" || die "no VM '$vm'"
     vm_running "$vm" && die "VM '$vm' is already running (pid $(vm_pid "$vm"))"
-    rm -f "$VMS_DIR/$vm/stopped" "$VMS_DIR/$vm/resume" "$VMS_DIR/$vm/expired"
+    rm -f "$VMS_DIR/$vm/stopped" "$VMS_DIR/$vm/resume" "$VMS_DIR/$vm/expired" "$VMS_DIR/$vm/claimed"
     touch_activity "$vm"   # --idle-stop counts from the boot until the first exec
     [ -x "$FIRECRACKER" ] || die "firecracker not installed (run: fcvm firecracker)"
     sock_room "$vm"
@@ -1943,6 +1943,111 @@ unpublish_cmd() {
     log "unpublished $spec from '$vm'"
 }
 
+# --- warm pools: fcvm pool ----------------------------------------------------------------
+# A pool (vms/.pools/NAME.json: template or snapshot, size, jail) is a set of
+# VMs booted ahead of time, each marked with vms/VM/pooled = NAME, that the
+# supervisor in fcvm serve keeps at size. `pool claim` hands one out: the
+# marker goes, the VM keeps its name, and a sandbox is ready in milliseconds
+# instead of a boot. The MCP server claims from a template's pool on its own.
+
+pool_file() { echo "$VMS_DIR/.pools/$1.json"; }
+pool_members() {   # name [running]: pooled VMs, unclaimed
+    local d vm
+    for d in "$VMS_DIR"/*/; do
+        vm=$(basename "$d")
+        [ "$(cat "$d/pooled" 2>/dev/null)" = "$1" ] || continue
+        [ -z "${2:-}" ] || vm_running "$vm" || continue
+        echo "$vm"
+    done
+}
+
+pool_cmd() {
+    local usage="usage: fcvm pool set NAME (--template T | --snapshot S) --size N [--jail] | fcvm pool ls [--json] | fcvm pool rm NAME | fcvm pool claim NAME [--ttl D] [--idle-stop D]"
+    local sub=${1:-ls}; [ $# -eq 0 ] || shift
+    case $sub in
+        set)
+            local name=${1:?$usage} tpl="" snap="" size="" jail=false f; shift
+            [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid pool name '$name'"
+            while [ $# -gt 0 ]; do
+                case $1 in
+                    --template) tpl=${2:?$usage}; shift 2 ;;
+                    --snapshot) snap=${2:?$usage}; shift 2 ;;
+                    --size)     [[ ${2:-} =~ ^[0-9]+$ ]] || die "--size wants a number"; size=$2; shift 2 ;;
+                    --jail)     jail=true; shift ;;
+                    *)          die "unknown option $1 ($usage)" ;;
+                esac
+            done
+            f=$(pool_file "$name")
+            [ -n "$tpl$snap" ] || tpl=$(jq -r '.template // empty' "$f" 2>/dev/null) snap=$(jq -r '.snapshot // empty' "$f" 2>/dev/null)
+            [ -n "$size" ] || size=$(jq -r '.size // empty' "$f" 2>/dev/null)
+            [ -n "$tpl$snap" ] && [ -n "$size" ] || die "$usage"
+            [ -z "$tpl" ] || [ -z "$snap" ] || die "a pool is from a template or a snapshot, not both"
+            [ -z "$tpl" ] || python3 "$FCVM_ROOT/lib/templates.py" show "$tpl" >/dev/null || exit 1
+            [ -z "$snap" ] || [ -f "$SNAPSHOTS_DIR/$snap/meta.json" ] || die "no snapshot '$snap'"
+            mkdir -p "$VMS_DIR/.pools"
+            jq -n --arg name "$name" --arg tpl "$tpl" --arg snap "$snap" --argjson size "$size" --argjson jail "$jail" \
+                '{name: $name, template: (if $tpl == "" then null else $tpl end), snapshot: (if $snap == "" then null else $snap end),
+                  size: $size, jail: $jail, created: (now | todate)}' > "$f.tmp" && mv "$f.tmp" "$f"
+            log "pool '$name': $size VM(s) from ${tpl:+template $tpl}${snap:+snapshot $snap}$([ "$jail" = true ] && echo ", jailed") (filled by fcvm serve / the fcvm service)" ;;
+        ls)
+            local f json=0; [ "${1:-}" = --json ] && json=1
+            for f in "$VMS_DIR"/.pools/*.json; do
+                [ -f "$f" ] || continue
+                jq --argjson ready "$(json_list $(pool_members "$(basename "$f" .json)" running))" \
+                   --argjson all "$(json_list $(pool_members "$(basename "$f" .json)"))" \
+                   '. + {ready: ($ready | length), vms: $all}' "$f"
+            done | if [ $json = 1 ]; then jq -s .; else
+                jq -rs '(["NAME","SOURCE","SIZE","READY","JAIL"] | @tsv),
+                    (.[] | [.name, (if .template then "template \(.template)" else "snapshot \(.snapshot)" end), .size, .ready, .jail] | @tsv)' |
+                column -t -s $'\t'; fi ;;
+        rm)
+            local name=${1:?$usage} vm
+            [ -f "$(pool_file "$name")" ] || die "no pool '$name'"
+            rm -f "$(pool_file "$name")"
+            for vm in $(pool_members "$name"); do
+                QUIET_STOP=1 "$FCVM_ROOT/fcvm" stop "$vm" >/dev/null 2>&1 || true
+                rm -rf "$(vm_dir "$vm")" "$VMS_DIR/.locks/vm-$vm"
+            done
+            log "removed pool '$name' and its unclaimed VMs (claimed ones are ordinary VMs now)" ;;
+        claim)
+            local name=${1:?$usage} ttl="" idle="" vm="" d plock; shift
+            while [ $# -gt 0 ]; do
+                case $1 in
+                    --ttl)       ttl=${2:?$usage}; shift 2 ;;
+                    --idle-stop) idle=${2:?$usage}; shift 2 ;;
+                    *)           die "unknown option $1 ($usage)" ;;
+                esac
+            done
+            [ -f "$(pool_file "$name")" ] || die "no pool '$name' (see: fcvm pool ls)"
+            mkdir -p "$VMS_DIR/.locks"
+            exec {plock}>"$VMS_DIR/.locks/pool-$name"; flock "$plock"
+            for d in $(pool_members "$name" running); do vm=$d; break; done
+            [ -n "$vm" ] || die "pool '$name' has no VM ready right now (fcvm serve fills it to $(jq .size "$(pool_file "$name")")); create one the usual way meanwhile"
+            d=$(vm_dir "$vm")
+            rm -f "$d/pooled"; date +%s > "$d/claimed"; touch_activity "$vm"
+            exec {plock}>&-
+            [ -z "$ttl$idle" ] || update "$vm" ${ttl:+--ttl "$ttl"} ${idle:+--idle-stop "$idle"} >/dev/null
+            log "claimed '$vm' from pool '$name'"
+            echo "$vm" ;;
+        _fill)   # one more VM for the pool (the supervisor's job)
+            local name=${1:?$usage} f tpl snap jail vm opts=()
+            f=$(pool_file "$name"); [ -f "$f" ] || die "no pool '$name'"
+            tpl=$(jq -r '.template // empty' "$f"); snap=$(jq -r '.snapshot // empty' "$f"); jail=$(jq -r '.jail // false' "$f")
+            vm="$name-$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            [ "$jail" != true ] || opts+=(--jail)
+            if [ -n "$snap" ]; then
+                "$FCVM_ROOT/fcvm" fork "$snap" "$vm" >/dev/null
+                echo "$name" > "$(vm_dir "$vm")/pooled"
+            else
+                create "$vm" --template "$tpl" "${opts[@]}" >/dev/null
+                echo "$name" > "$(vm_dir "$vm")/pooled"
+                QUIET_START=1 start "$vm" >/dev/null
+            fi
+            echo "$vm" ;;
+        *) die "$usage" ;;
+    esac
+}
+
 # --- memory balloon: fcvm balloon ----------------------------------------------------
 
 # fcvm balloon VM [MiB]: take memory back from a running VM (the guest gives
@@ -2006,12 +2111,14 @@ inspect_json() {
         --argjson chain "$(jq -n '$ARGS.positional' --args $(image_chain "$(jq -r .image "$d/vm.json")"))" \
         --arg booted "$booted" --arg active "$active" --arg expired "$(cat "$d/expired" 2>/dev/null || true)" \
         --argjson secrets "$(jq -c 'keys' "$d/secrets.json" 2>/dev/null || echo '[]')" --argjson balloon "${balloon:-null}" \
+        --arg pooled "$(cat "$d/pooled" 2>/dev/null || true)" --arg claimed "$(cat "$d/claimed" 2>/dev/null || true)" \
         '{name: $name, state: $state, pid: ($pid | tonumber? // null), ip: ($ip | select(. != "") // null), secrets: $secrets,
-          balloon_mib: $balloon,
+          balloon_mib: $balloon, pooled: (if $pooled == "" then null else $pooled end),
+          claimed_at: ($claimed | tonumber? // null),
           mem_used_bytes: ($rss | tonumber? // null),
           exit_code: ($code | tonumber? // null), image_chain: $chain, disk_mode: $mode, disk_used_bytes: $disk,
           stopped_by_user: $stopped, last_exit: $last,
-          expires_at: (if .ttl_s and $booted != "" then ($booted | tonumber) + .ttl_s else null end),
+          expires_at: (if .ttl_s and $booted != "" then ([($booted | tonumber), ($claimed | tonumber? // 0)] | max) + .ttl_s else null end),
           idle_expires_at: (if .idle_stop_s and $active != "" then ($active | tonumber) + .idle_stop_s else null end),
           expired: (if $expired == "" then null else $expired end)} + {restart: "no"} + .' \
         --argjson stopped "$([ -f "$d/stopped" ] && echo true || echo false)" \
@@ -2095,8 +2202,9 @@ list_vms() {
         used=$(du -h "$d"/*.ext4 2>/dev/null | awk '{print $1; exit}')
         [ -f "$d/disk.ext4" ] && used+=" copy"
         printf "$fmt" "$vm" "$state" "$ip" "$(jq -r .image "$d/vm.json")" "$mem" "$used" \
-            "$(jq -r 'def dur: if . % 86400 == 0 then "\(. / 86400 | floor)d" elif . % 3600 == 0 then "\(. / 3600 | floor)h" elif . % 60 == 0 then "\(. / 60 | floor)m" else "\(.)s" end;
-                [(if .jail then "jail" else empty end), (if .agent == false then "no-agent" else empty end), (if (.restart // "no") != "no" then "restart:\(.restart)" else empty end),
+            "$(jq -r --arg pooled "$(cat "$d/pooled" 2>/dev/null || true)" 'def dur: if . % 86400 == 0 then "\(. / 86400 | floor)d" elif . % 3600 == 0 then "\(. / 3600 | floor)h" elif . % 60 == 0 then "\(. / 60 | floor)m" else "\(.)s" end;
+                [(if $pooled != "" then "pool:\($pooled)" else empty end),
+                 (if .jail then "jail" else empty end), (if .agent == false then "no-agent" else empty end), (if (.restart // "no") != "no" then "restart:\(.restart)" else empty end),
                  (if .ttl_s then "ttl:\(.ttl_s | dur)" else empty end), (if .idle_stop_s then "idle-stop:\(.idle_stop_s | dur)" else empty end),
                  (if (.forward // []) != [] then "forward:\(.forward | join(","))" else empty end),
                  (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))\(if .net.cache then " cache" else "" end)" else empty end)]
@@ -2273,6 +2381,7 @@ case $cmd in
     unpublish) unpublish_cmd "$@" ;;
     jobs)    jobs_cmd "$@" ;;
     balloon) balloon_cmd "$@" ;;
+    pool)    pool_cmd "$@" ;;
     rm)      rm_vm "$@" ;;
     update)  update "$@" ;;
     template) template_cmd "$@" ;;

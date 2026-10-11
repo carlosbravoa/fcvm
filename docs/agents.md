@@ -39,6 +39,7 @@ The agent needs the images it will use. It can import them itself
 | `images`, `pull_image` | list images; import from Docker Hub or any registry, or a local archive |
 | `create_sandbox` | create and boot a VM from an `image` or a `template`. App images stay idle for `exec` unless given a command (or the template says otherwise). `ttl` and `idle_stop` (`"2h"`, `"30m"`) make it stop on its own |
 | `templates` | list [templates](templates.md): saved recipes with an image, resources, network and process |
+| `pools` | list [warm pools](templates.md#warm-pools); `create_sandbox` takes from one by `template` or `pool` |
 | `exec` | run a shell command (`command`) or exact `argv`, with `workdir`, `env`, `user`, `stdin` and `timeout` (default 300 s). Returns `exit_code`, `stdout`, `stderr`. With `background`, starts it as a job and returns its id at once |
 | `jobs`, `job`, `kill_job` | background commands: list them, get one's status and output tail, end one. The way to run a dev server and then `publish_port` it |
 | `write_file`, `read_file` | text files in the VM |
@@ -79,6 +80,12 @@ claude mcp add fcvm -e FCVM_MCP_TEMPLATE=python-sandbox -- "$(command -v fcvm)" 
 A pinned network (`FCVM_MCP_NETWORK`) still wins over a template's network,
 except that a template with no network stays without one. A template that
 asks for the jailer gets it.
+
+**Instant sandboxes.** With a [warm pool](templates.md#warm-pools) for the
+template (`fcvm pool set py --template python-sandbox --size 3 --jail`),
+`create_sandbox` with just that template takes a VM that's already running
+instead of booting one, and the pool refills behind it. The `pools` tool
+lists them.
 
 ## Jailing
 

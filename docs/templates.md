@@ -96,6 +96,36 @@ User templates are JSON files in `~/.local/share/fcvm/templates/` (or
 | `secrets` | names of [secrets](vms.md#secrets) to pass, taken from the environment of whoever creates the VM (`--secret NAME`); a template never holds a value |
 | `forward` | `["ssh-agent", "git"]`: [credentials to forward](vms.md#forwarding-your-credentials) |
 
+## Warm pools
+
+A template boots in about a second; a pool makes it instant. A pool is a
+set of VMs booted ahead of time from a template (or forked from a
+snapshot, with their warm state), kept at its size by the supervisor in
+`fcvm serve`:
+
+```sh
+fcvm pool set py --template python-sandbox --size 3 --jail   # three jailed sandboxes, ready
+fcvm pool set warm --snapshot ready --size 2                 # forks of a prepared, running state
+fcvm pool ls                                                 # NAME, SOURCE, SIZE, READY
+vm=$(fcvm pool claim py --ttl 2h)                            # a ready VM, now yours; the pool refills
+fcvm pool rm py                                              # the pool and its unclaimed VMs
+```
+
+- **Claiming** takes a running pooled VM out of the pool as it is, name
+  included (`py-3fa2b1`), so nothing restarts; `--ttl` and `--idle-stop`
+  can be set at that moment, and they count from the claim. A VM waiting
+  in a pool doesn't age.
+- **Refilling** is one VM per supervisor tick (about every 2 s): claim
+  three in a row and the third may still be booting; `claim` then says so,
+  and `create --template` works meanwhile. Pooled VMs that died are
+  replaced.
+- **`fcvm ls`** shows unclaimed ones as `pool:NAME`.
+- **The MCP server** claims from a template's pool whenever the agent
+  asks for a sandbox from that template with no other arguments (and the
+  pool is jailed if sandboxes must be); `create_sandbox` also takes
+  `pool`. The API has `GET`/`POST /pools`, `DELETE /pools/{name}` and
+  `POST /pools/{name}/claim`.
+
 ## With agents
 
 The MCP server has a `templates` tool, and `create_sandbox` takes

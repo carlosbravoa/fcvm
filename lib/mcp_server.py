@@ -151,12 +151,35 @@ def t_templates():
     return list(templates.all_templates().values())
 
 
+def pool_for(template):
+    """A warm pool fed by this template, if one is set up (and jailed when sandboxes must be)."""
+    try:
+        pools = json.loads(fcvm("pool", "ls", "--json")[1] or "[]")
+    except (ToolError, ValueError):
+        return None
+    return next((p for p in pools if p.get("template") == template and (p.get("jail") or not JAIL)), None)
+
+
 def t_create_sandbox(image=None, template=None, name=None, command=None, vcpus=None, mem_mib=None, ports=None,
-                     volumes=None, network=None, ttl=None, idle_stop=None):
-    if not image and not template:
+                     volumes=None, network=None, ttl=None, idle_stop=None, pool=None):
+    if not image and not template and not pool:
         template = DEFAULT_TEMPLATE
         if not template:
             raise ToolError("give an image (see images) or a template (see templates)")
+    plain = not any((image, name, command, vcpus, mem_mib, ports, volumes, network))
+    if pool or (template and plain and pool_for(template)):
+        # a VM already booted from that recipe: claimed in milliseconds instead of a boot
+        pname = pool or pool_for(template)["name"]
+        args = ["pool", "claim", pname]
+        for opt, val in (("ttl", ttl or DEFAULT_TTL), ("idle_stop", idle_stop or DEFAULT_IDLE_STOP)):
+            if val:
+                args += [f"--{opt.replace('_', '-')}", str(val)]
+        code, out, err = fcvm(*args, check=False)
+        if code == 0:
+            return inspect(out.strip())
+        if pool:
+            raise ToolError(err.strip())
+        # the pool is empty right now: boot one the usual way
     if template:
         # the template's recipe, with the agent's arguments over it; the network
         # stays within a pinned policy, and a template that asks for the jail gets it
@@ -396,8 +419,12 @@ TOOLS = {
          "ttl": {**S, "description": "stop the sandbox this long after boot, e.g. 2h, 30m, 90s"
                  + (f" (default {DEFAULT_TTL})" if DEFAULT_TTL else "")},
          "idle_stop": {**S, "description": "stop it after this long without exec or file operations, e.g. 30m"
-                       + (f" (default {DEFAULT_IDLE_STOP})" if DEFAULT_IDLE_STOP else "")}},
+                       + (f" (default {DEFAULT_IDLE_STOP})" if DEFAULT_IDLE_STOP else "")},
+         "pool": {**S, "description": "take a VM from this warm pool (see pools) instead of booting one"}},
         []),
+    "pools": (lambda: json.loads(fcvm("pool", "ls", "--json")[1] or "[]"),
+              "List warm pools: VMs booted ahead of time from a template or snapshot. create_sandbox with just a template that has a pool takes one from it in milliseconds.",
+              {}, []),
     "exec": (t_exec, "Run a command in a running VM. Returns exit_code, stdout and stderr (capped).",
              {"vm": S, "command": {**S, "description": "shell command, run with sh -c"},
               "argv": {"type": "array", "items": S, "description": "exact argv, for images without a shell"},

@@ -1,6 +1,7 @@
 """The server (fcvm serve / the fcvm service): the HTTP API with bearer tokens,
 and the supervisor's restart policies. Uses the running service when there is
 one for this state directory, otherwise starts fcvm serve for these tests."""
+import json
 import unittest
 
 from fcvmtest import VMTestCase, Server, fcvm, IMAGE, wait_for, unique
@@ -167,6 +168,101 @@ class Service(VMTestCase):
         self.assertEqual(self.server.api("POST", f"vms/{vm}/ports", {"port": "nope"})[0], 400)
         code, body = self.server.api("DELETE", f"vms/{vm}/ports?port={spec.split(':')[0]}")
         self.assertEqual((code, body["ports"]), (200, []), body)
+
+    def test_warm_pool(self):
+        self.new_api("pools")
+        tpl, pool = unique("tpl"), unique("pool")
+        self.addCleanup(fcvm, "template", "rm", tpl, check=False)
+        self.addCleanup(fcvm, "pool", "rm", pool, check=False)
+        fcvm("template", "save", tpl, IMAGE, "--mem", "256", "--idle")
+        code, body = self.server.api("POST", "pools", {"name": pool, "template": tpl, "size": 2})
+        self.assertEqual((code, body["size"], body["template"]), (200, 2, tpl), body)
+        r = fcvm("pool", "claim", pool, check=False)                           # nothing ready yet
+        self.assertIn("no VM ready", r.stderr)
+
+        def ready():
+            p = next((p for p in json.loads(fcvm("pool", "ls", "--json").stdout) if p["name"] == pool), None)
+            return p and p["ready"] == 2
+        wait_for(ready, 60, what="the pool to fill")
+        self.assertIn(f"pool:{pool}", fcvm("ls").stdout)
+        vm = fcvm("pool", "claim", pool, "--ttl", "1h").stdout.strip()
+        self.addCleanup(self.remove_vm, vm)
+        info = self.inspect(vm)
+        self.assertEqual((info["state"], info["pooled"], info["ttl_s"]), ("running", None, 3600))
+        self.assertGreater(info["claimed_at"], 0)
+        self.assertEqual(self.sh(vm, "echo ok").stdout.strip(), "ok")
+        wait_for(ready, 60, what="the pool to refill")
+        code, body = self.server.api("POST", f"pools/{pool}/claim", {})      # the API claims too
+        self.assertEqual((code, body["state"]), (200, "running"), body)
+        self.addCleanup(self.remove_vm, body["name"])
+        self.assertNotEqual(body["name"], vm)
+        fcvm("pool", "rm", pool)
+        left = [v["name"] for v in json.loads(fcvm("ls", "--json").stdout) if v.get("pooled") == pool]
+        self.assertEqual(left, [])
+        self.assertEqual(self.inspect(vm)["state"], "running")               # claimed ones stay
+
+    def test_python_sdk(self):
+        import os
+        import sys
+        self.new_api("pools")
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "sdk", "python"))
+        import fcvm as sdk
+        c = sdk.Client(self.server.url, self.server.token)
+        self.assertIn("hostname", c.host())
+        name = unique("sdk")
+        self.addCleanup(self.remove_vm, name)
+        with c.create(name, image=IMAGE, idle=True, mem_mib=256, ttl="1h") as sb:
+            self.assertEqual(sb.state, "running")
+            self.assertEqual(sb.run("echo hi").strip(), "hi")
+            r = sb.exec(argv=["sh", "-c", "echo e >&2; exit 2"])
+            self.assertEqual((r.exit_code, r.stderr.strip()), (2, "e"))
+            sb.write_file("/tmp/f.txt", "payload")
+            self.assertEqual(sb.read_text("/tmp/f.txt"), "payload")
+            self.assertIn("f.txt", [e["name"] for e in sb.ls("/tmp")])
+            job = sb.exec("echo bg; sleep 60", background=True)
+            wait_for(lambda: "bg" in job.status()["stdout"], 15, what="the job's output")
+            job.kill()
+            self.assertEqual(job.wait(timeout=15)["status"], "lost")
+            sb.exec('setsid sh -c "echo sdk-port | nc -l -p 8000" >/dev/null 2>&1 </dev/null &')
+            port = sb.publish(8000)
+            import socket
+            import time
+            time.sleep(0.5)
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                self.assertEqual(s.recv(100).strip(), b"sdk-port")
+            self.assertEqual(sb.info()["ttl_s"], 3600)
+            sb.update(ttl=None)
+            self.assertIsNone(sb.info().get("ttl_s"))
+        self.assertNotIn(name, [v.name for v in c.vms()])                 # removed by the context manager
+
+    def test_node_sdk(self):
+        import os
+        import shutil
+        import subprocess
+        if not shutil.which("node"):
+            self.skipTest("node isn't installed")
+        self.new_api("pools")
+        sdk_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "sdk", "typescript")
+        name = unique("sdk")
+        self.addCleanup(self.remove_vm, name)
+        script = f'''
+import {{ Client }} from "{sdk_dir}/fcvm.mjs";
+const c = new Client({{ url: process.env.U, token: process.env.T }});
+const sb = await c.create("{name}", {{ image: "{IMAGE}", idle: true, mem_mib: 256 }});
+const r = await sb.exec("echo node-hi");
+await sb.writeFile("/tmp/n.txt", "from-node");
+const t = await sb.readText("/tmp/n.txt");
+const job = await sb.execBackground("sleep 60");
+await job.kill();
+const st = await job.wait({{ timeout: 15000 }});
+await sb.remove();
+console.log(JSON.stringify({{ out: r.stdout.trim(), code: r.exit_code, t, st: st.status, left: (await c.vms()).some((v) => v.name === "{name}") }}));
+'''
+        r = subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True, timeout=120,
+                           env={**os.environ, "U": self.server.url, "T": self.server.token})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
+                         {"out": "node-hi", "code": 0, "t": "from-node", "st": "lost", "left": False})
 
     def test_throwaway_vms_take_no_policy(self):
         r = fcvm("run", IMAGE, "--restart", "always", "--", "true", check=False)

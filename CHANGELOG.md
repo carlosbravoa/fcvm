@@ -63,6 +63,16 @@ New:
   `fcvm snapshot import FILE.tar [NAME]` brings it to another host that has
   the same images and a compatible Firecracker, ready to fork: a prepared,
   already-running state can be shipped.
+- **Client libraries.** `sdk/python/fcvm.py` (standard library, `pip
+  install` from the repository or copy the file) and
+  `sdk/typescript/fcvm.mjs` (Node 18+, no dependencies, typed) wrap the
+  HTTP API: `Client().create("box", template="python-sandbox")`, then
+  `exec`, files, ports, jobs, snapshots, pools.
+- **Warm pools.** `fcvm pool set NAME --template T --size N` (or
+  `--snapshot S`) keeps N VMs booted ahead of time; `fcvm pool claim NAME`
+  hands one out in milliseconds, name and all, and the supervisor refills
+  the pool. The MCP server claims from a template's pool on its own, so
+  `create_sandbox` is instant; the API has `/pools`.
 - **The package mirror.** `--cache` on a restricted VM (`--allow`) points
   its pip and npm at a mirror on the egress proxy
   (`http://172.30.1.1:3128/cache/HOST/PATH`), which fetches over TLS with

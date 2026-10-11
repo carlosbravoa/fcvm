@@ -709,6 +709,33 @@ class App:
             case ("DELETE", "volumes", 2):
                 await fcvm_ok("volume", "rm", name)
                 return {"removed": name}
+            case ("GET", "pools", 1):
+                return await fcvm_json("pool", "ls", "--json")
+            case ("POST", "pools", 1):
+                pname = d.get("name", "")
+                if not NAME.match(pname or "-"):
+                    raise HTTPError(400, "a pool name is required")
+                args = ["pool", "set", pname, "--size", int(d.get("size") or 1)]
+                if d.get("template"):
+                    args += ["--template", d["template"]]
+                elif d.get("snapshot"):
+                    args += ["--snapshot", d["snapshot"]]
+                else:
+                    raise HTTPError(400, "a pool needs a template or a snapshot")
+                if d.get("jail"):
+                    args.append("--jail")
+                await fcvm_ok(*args)
+                return next((p for p in await fcvm_json("pool", "ls", "--json") if p["name"] == pname), {})
+            case ("DELETE", "pools", 2):
+                await fcvm_ok("pool", "rm", name)
+                return {"removed": name}
+            case ("POST", "pools", 3) if parts[2] == "claim":
+                args = ["pool", "claim", name]
+                for opt in ("ttl", "idle_stop"):
+                    if d.get(opt):
+                        args += [f"--{opt.replace('_', '-')}", str(d[opt]).strip()]
+                out, _ = await fcvm_ok(*args)
+                return await fcvm_json("inspect", out.strip())
             case ("GET", "jobs", 1):
                 return self.jobs.list()
             case ("GET", "jobs", 2):

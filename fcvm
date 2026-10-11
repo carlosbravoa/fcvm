@@ -102,6 +102,10 @@ VMs:
   up [-f FILE] [VM...]       the VMs of a project file (fcvm.toml here or above): create what's
                              missing, start what's stopped. down: stop and remove them
   project show [-f FILE]     what the project file means
+  pool set NAME (--template T | --snapshot S) --size N [--jail]
+                             a warm pool: N VMs booted ahead of time (kept full by fcvm serve)
+  pool ls | rm NAME | claim NAME [--ttl D] [--idle-stop D]
+                             list pools; remove one; take a ready VM out of one (prints its name)
   template ls|show NAME|rm NAME   launch templates (* = built in)
   template save NAME --from VM | IMAGE [create opts] [-- CMD]  [-d DESCRIPTION]
                              save a recipe: create/run --template NAME use it
@@ -142,7 +146,7 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|ssh-config|_ssh-proxy|exec|shell|ls|rm|inspect|commit|rmi|squash|export|push|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|balloon|update|template|_reap|_shutdown)
+    images|create|start|run|stop|console|logs|ssh|ssh-config|_ssh-proxy|exec|shell|ls|rm|inspect|commit|rmi|squash|export|push|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|balloon|pool|update|template|_reap|_shutdown)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     up|down)            exec python3 "$FCVM_ROOT/lib/project.py" "$cmd" "$@" ;;
     project)            exec python3 "$FCVM_ROOT/lib/project.py" "$@" ;;

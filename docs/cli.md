@@ -10,6 +10,7 @@ list in short form. Pages under "Using fcvm" in the
 - [VMs](#vms)
 - [Projects](#projects)
 - [Templates](#templates)
+- [Warm pools](#warm-pools)
 - [Inside a VM](#inside-a-vm)
 - [Storage](#storage)
 - [Snapshots](#snapshots)
@@ -110,6 +111,14 @@ These use sudo.
 | `template save NAME IMAGE [create opts] [-- CMD...] [-d DESC]` | saves a recipe, checked as `create` would check it; nothing is created. `-d` goes before IMAGE |
 | `template save NAME --from VM [-d DESC]` | saves an existing VM's configuration |
 | `template rm NAME` | deletes one of yours |
+
+## Warm pools
+
+| command | what it does |
+|---|---|
+| `pool set NAME (--template T \| --snapshot S) --size N [--jail]` | a [warm pool](templates.md#warm-pools): N VMs booted (or forked) ahead of time, kept full by `fcvm serve` |
+| `pool ls [--json]`, `pool rm NAME` | lists pools (with how many are ready); removes one and its unclaimed VMs |
+| `pool claim NAME [--ttl D] [--idle-stop D]` | takes a ready VM out of the pool and prints its name |
 
 ## Inside a VM
 

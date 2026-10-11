@@ -15,6 +15,10 @@ removes). Exits are recorded in `last-exit` by the reaper. Restarts back off
 from 1 s, doubling up to 60 s, and the count resets once a VM has run for a
 minute.
 
+Warm pools (vms/.pools/NAME.json, from `fcvm pool set`) are kept at their
+size here: a VM is booted (or forked) per tick while one is missing, and
+pooled VMs that died are removed.
+
 Lifetimes (vm.json "ttl_s" and "idle_stop_s", from `--ttl` / `--idle-stop`)
 are applied here too: a running VM is stopped once its TTL since boot, or its
 time since the last exec/shell/cp/console operation, runs out.
@@ -117,6 +121,7 @@ class Supervisor:
         self.started = {}     # vm -> when we last started it
         self.handled = {}     # vm -> "at" of the last exit we acted on
         self.errors = {}      # vm -> the last failed start's message
+        self.pool_retry = {}  # pool -> when to try filling it again after a failure
 
     def log(self, msg):
         print(f"supervisor: {msg}", file=sys.stderr, flush=True)
@@ -218,8 +223,12 @@ class Supervisor:
     async def expire(self, name, d, cfg, now):
         """Stop a running VM whose --ttl or --idle-stop ran out. The stop
         counts as the user's (restart policies then leave it alone) and says
-        why in `expired`; a throwaway VM is deleted by its reap."""
-        why = expiry(cfg, mtime(os.path.join(d, "pid")), mtime(os.path.join(d, "activity")), now)
+        why in `expired`; a throwaway VM is deleted by its reap. A VM waiting
+        in a pool doesn't age; a claimed one counts from its claim."""
+        if os.path.exists(os.path.join(d, "pooled")):
+            return False
+        booted = max(filter(None, (mtime(os.path.join(d, "pid")), mtime(os.path.join(d, "claimed")))), default=None)
+        why = expiry(cfg, booted, mtime(os.path.join(d, "activity")), now)
         if not why:
             return False
         self.log(f"{name}: stopping ({'ttl' if why == 'ttl' else 'idle time'} ran out)")
@@ -228,8 +237,40 @@ class Supervisor:
             self.log(f"{name}: stop failed: {out.strip()[-300:]}")
         return True
 
+    # --- warm pools ---------------------------------------------------------------------
+    async def pools(self, now):
+        """Keep every pool (vms/.pools/NAME.json) at its size: one new VM per
+        tick, dead ones removed; a failing fill is retried after a while."""
+        pools_dir = os.path.join(self.vms, ".pools")
+        for f in sorted(os.listdir(pools_dir)) if os.path.isdir(pools_dir) else []:
+            if not f.endswith(".json"):
+                continue
+            pool = f[:-5]
+            try:
+                with open(os.path.join(pools_dir, f)) as fh:
+                    size = int(json.load(fh).get("size", 0))
+            except (OSError, ValueError):
+                continue
+            members = [(n, d) for n, d in self.vm_dirs() if read(os.path.join(d, "pooled")).strip() == pool]
+            ready = 0
+            for n, d in members:
+                state = vm_state(d)
+                if state == "running":
+                    ready += 1
+                elif state == "stopped" or state == "stale":
+                    self.log(f"pool {pool}: {n} is not running any more; removing it")
+                    await self.cli("rm", n)
+            if ready < size and now >= self.pool_retry.get(pool, 0):
+                code, out = await self.cli("pool", "_fill", pool)
+                if code == 0:
+                    self.log(f"pool {pool}: {out.strip().splitlines()[-1] if out.strip() else 'filled'} ready ({ready + 1}/{size})")
+                else:
+                    self.log(f"pool {pool}: fill failed: {out.strip()[-300:]}; retrying in 30 s")
+                    self.pool_retry[pool] = now + 30
+
     async def tick(self):
         now = time.time()
+        await self.pools(now)
         for name, d in list(self.vm_dirs()):
             cfg = self.config(d)
             policy = cfg.get("restart", "no")

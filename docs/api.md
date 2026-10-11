@@ -7,6 +7,7 @@ fcvm CLI, so the API behaves exactly like the command line: the same
 validation, the same errors, the same locks.
 
 - [Connecting](#connecting)
+- [Client libraries](#client-libraries)
 - [Conventions](#conventions)
 - [Host](#host)
 - [VMs](#vms)
@@ -44,6 +45,14 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8686/api/vms | jq '.[
 **Anyone with the token has your fcvm**: they can run commands as root in
 your VMs, and create VMs with your host directories mounted. Treat it like
 an SSH key.
+
+## Client libraries
+
+[`sdk/python/fcvm.py`](../sdk/README.md) (standard library) and
+[`sdk/typescript/fcvm.mjs`](../sdk/README.md) (Node 18+, no dependencies)
+wrap this API: `Client().create("box", template="python-sandbox")`, then
+`exec`, `write_file`, `publish`, `snapshot`, and so on. See
+[sdk/README.md](../sdk/README.md).
 
 ## Conventions
 
@@ -120,6 +129,7 @@ Fields worth knowing in a VM object (as `fcvm inspect`, plus `vm.json`):
 | `secrets` | the names of the VM's [secrets](vms.md#secrets) (never their values) |
 | `forward` | what the host [forwards](vms.md#forwarding-your-credentials) into it: `"ssh-agent"`, `"git"` |
 | `balloon_mib` | memory taken back through the [balloon](vms.md#resources) (running VMs; `null` for one without the device) |
+| `pooled`, `claimed_at` | the [pool](templates.md#warm-pools) a VM waits in, and when it was claimed (Unix time) |
 | `jail`, `net`, `ports`, `volumes`, `shares`, `ip`, `pid`, `mem_used_bytes`, `disk_used_bytes` | as the names say |
 
 ## Files and host directories in a VM
@@ -162,6 +172,15 @@ even one without a shell.
 To launch from a template, send its fields to `POST /vms` (the launch
 dialog does that). A template's `ref` in that body imports a missing image
 first.
+
+## Warm pools
+
+| method, path | body | does |
+|---|---|---|
+| `GET /pools` | | the [pools](templates.md#warm-pools), each with `ready` and its unclaimed `vms` |
+| `POST /pools` | `{"name": "py", "template": "python-sandbox", "size": 3, "jail": true}` (or `"snapshot"`) | `fcvm pool set` |
+| `DELETE /pools/{name}` | | `fcvm pool rm` |
+| `POST /pools/{name}/claim` | `{"ttl": "2h", "idle_stop": "30m"}` (optional) | takes a ready VM; returns it as `GET /vms/{vm}`; 400 when none is ready |
 
 ## Prometheus
 

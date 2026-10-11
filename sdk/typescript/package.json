@@ -1,0 +1,13 @@
+{
+  "name": "fcvm",
+  "version": "0.7.0",
+  "description": "A client for the fcvm HTTP API: Firecracker microVM sandboxes from Node",
+  "type": "module",
+  "main": "fcvm.mjs",
+  "exports": "./fcvm.mjs",
+  "types": "fcvm.d.ts",
+  "files": ["fcvm.mjs", "fcvm.d.ts"],
+  "engines": {"node": ">=18"},
+  "license": "Apache-2.0",
+  "repository": {"type": "git", "url": "https://github.com/carlosbravoa/fcvm", "directory": "sdk/typescript"}
+}

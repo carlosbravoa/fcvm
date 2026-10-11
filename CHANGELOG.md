@@ -63,6 +63,11 @@ New:
   `fcvm snapshot import FILE.tar [NAME]` brings it to another host that has
   the same images and a compatible Firecracker, ready to fork: a prepared,
   already-running state can be shipped.
+- **Project files.** `fcvm.toml` in a repository describes its VMs
+  (`[vms.NAME]` tables with the template fields, a `template` to start
+  from, host paths relative to the file); `fcvm up` imports, creates and
+  starts them, `fcvm down` stops and removes them, `fcvm project show`
+  explains the file. See [Project files](docs/projects.md).
 - **`fcvm ssh-config`.** An ssh client entry per system VM (`Host
   fcvm-NAME`) with a `ProxyCommand` that finds the VM's current address,
   so `ssh fcvm-dev`, `scp`, `rsync` and VS Code Remote-SSH work with strict

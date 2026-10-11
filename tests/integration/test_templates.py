@@ -3,7 +3,35 @@ overrides, and capture a VM's configuration as a template."""
 import json
 import unittest
 
+import os
+import tempfile
+
 from fcvmtest import VMTestCase, fcvm, unique, IMAGE
+
+
+class Projects(VMTestCase):
+    def test_up_and_down(self):
+        d = tempfile.mkdtemp(prefix="fcvmtest-proj-")
+        name = unique("proj")
+        for vm in (f"{name}-a", f"{name}-b"):
+            self.addCleanup(self.remove_vm, vm)
+        with open(os.path.join(d, "fcvm.toml"), "w") as f:
+            f.write(f'name = "{name}"\n[vms.a]\nimage = "{IMAGE}"\nidle = true\nttl = "1h"\nvolumes = ["./:/work:ro"]\n'
+                    f'[vms.b]\nimage = "{IMAGE}"\ncommand = ["sleep", "300"]\nmem_mib = 256\n')
+        show = json.loads(fcvm("project", "show", "-f", os.path.join(d, "fcvm.toml")).stdout)
+        self.assertEqual(sorted(show["vms"]), [f"{name}-a", f"{name}-b"])
+        self.assertEqual(show["vms"][f"{name}-a"]["volumes"], [f"{d}:/work:ro"])
+        fcvm("up", "-f", os.path.join(d, "fcvm.toml"))
+        a, b = self.inspect(f"{name}-a"), self.inspect(f"{name}-b")
+        self.assertEqual((a["state"], a["ttl_s"], b["state"], b["mem_mib"]), ("running", 3600, "running", 256))
+        self.assertEqual(self.sh(f"{name}-a", "ls /work").stdout.strip(), "fcvm.toml")
+        r = fcvm("up", "-f", os.path.join(d, "fcvm.toml"))              # idempotent
+        self.assertIn("already running", r.stderr)
+        fcvm("down", "-f", os.path.join(d, "fcvm.toml"))
+        names = {v["name"] for v in json.loads(fcvm("ls", "--json").stdout)}
+        self.assertFalse({f"{name}-a", f"{name}-b"} & names)
+        r = fcvm("up", "-f", os.path.join(d, "nope.toml"), check=False)
+        self.assertNotEqual(r.returncode, 0)
 
 
 class Templates(VMTestCase):

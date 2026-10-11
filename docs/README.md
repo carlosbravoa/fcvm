@@ -29,6 +29,8 @@ stop wherever you have what you need.
   egress allowlists and presets, isolation defaults, addresses.
 - **[Templates](templates.md).** Saved launch recipes (a Python sandbox
   that reaches only PyPI, say) for the CLI, the web console and agents.
+- **[Project files](projects.md).** `fcvm.toml` in a repository: the VMs
+  it needs, brought up and down with `fcvm up` and `fcvm down`.
 - **[Snapshots and fork](snapshots.md).** Capturing running VMs and forking
   them; when to snapshot and when to commit.
 - **[The fcvm service](service.md).** Running at boot, restart policies,

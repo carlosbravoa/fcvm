@@ -163,7 +163,7 @@ Start with **[Getting started](docs/getting-started.md)** and
 
 | | |
 |---|---|
-| **Using fcvm** | [Images](docs/images.md) · [Running VMs](docs/vms.md) · [Networking and egress](docs/networking.md) · [Templates](docs/templates.md) · [Snapshots and fork](docs/snapshots.md) · [The fcvm service](docs/service.md) · [Web console](docs/web-console.md) · [Agents (MCP)](docs/agents.md) |
+| **Using fcvm** | [Images](docs/images.md) · [Running VMs](docs/vms.md) · [Networking and egress](docs/networking.md) · [Templates](docs/templates.md) · [Project files](docs/projects.md) · [Snapshots and fork](docs/snapshots.md) · [The fcvm service](docs/service.md) · [Web console](docs/web-console.md) · [Agents (MCP)](docs/agents.md) |
 | **Reference** | [Commands](docs/cli.md) · [Configuration](docs/configuration.md) · [HTTP API](docs/api.md) · [Changelog](CHANGELOG.md) |
 | **In depth** | [How it works](docs/internals.md) · [Security and isolation](docs/security.md) · [Roadmap](docs/roadmap.md) |
 
@@ -194,6 +194,7 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ Memory balloon (`fcvm balloon VM 512`): take memory back from idle VMs without a restart
 - ✅ `fcvm ssh-config --install`: `ssh fcvm-dev`, scp, rsync and VS Code Remote-SSH into system VMs
 - ✅ Templates: saved launch recipes, built-in sandboxes for Python, Node and offline work, shared by the CLI, console and MCP
+- ✅ Project files: `fcvm.toml` in a repository, `fcvm up` / `fcvm down`
 - ✅ JSON output everywhere (`--json`, `inspect`)
 - ✅ One-line install (per user, or `--system`), `fcvm upgrade` with rollback, versioned releases
 - ✅ Guided setup (`fcvm setup`) and a health check (`fcvm status`) that says what to update and how

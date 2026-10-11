@@ -8,6 +8,8 @@ list in short form. Pages under "Using fcvm" in the
 - [Building blocks](#building-blocks)
 - [Images](#images)
 - [VMs](#vms)
+- [Projects](#projects)
+- [Templates](#templates)
 - [Inside a VM](#inside-a-vm)
 - [Storage](#storage)
 - [Snapshots](#snapshots)
@@ -90,6 +92,14 @@ These use sudo.
 | `--idle-stop DURATION` | stop it after that long without `exec`, `shell`, `cp` or file operations |
 | `--secret NAME=VALUE`, `NAME=@FILE`, `NAME` | a [secret](vms.md#secrets): a file in `/run/secrets` (a tmpfs, never on the VM's disk) and an environment variable. `NAME` alone takes it from your environment. Repeatable |
 | `--forward ssh-agent,git` | [forward your credentials](vms.md#forwarding-your-credentials): the host's ssh-agent, and `git credential fill` for the VM's git |
+
+## Projects
+
+| command | what it does |
+|---|---|
+| `up [-f FILE] [VM...]` | the VMs of a [project file](projects.md) (`fcvm.toml` here or above): imports missing images with a `ref`, creates what's missing, starts what's stopped |
+| `down [-f FILE] [VM...]` | stops and removes them (volumes are kept) |
+| `project show [-f FILE]` | what the file means, as JSON, with each VM's `create` command |
 
 ## Templates
 

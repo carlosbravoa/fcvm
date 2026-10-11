@@ -97,6 +97,9 @@ VMs:
                              disk, IP, MAC and hostname (processes keep running)
   update VM [--restart POLICY] [--ttl D|none] [--idle-stop D|none] [--secret SPEC] [--unset-secret NAME] [--forward LIST|none]
                              change a VM's restart policy, lifetime, secrets or forwarding
+  up [-f FILE] [VM...]       the VMs of a project file (fcvm.toml here or above): create what's
+                             missing, start what's stopped. down: stop and remove them
+  project show [-f FILE]     what the project file means
   template ls|show NAME|rm NAME   launch templates (* = built in)
   template save NAME --from VM | IMAGE [create opts] [-- CMD]  [-d DESCRIPTION]
                              save a recipe: create/run --template NAME use it
@@ -139,6 +142,8 @@ case $cmd in
         "$FCVM_ROOT/lib/build-base.sh" ;;
     images|create|start|run|stop|console|logs|ssh|ssh-config|_ssh-proxy|exec|shell|ls|rm|inspect|commit|rmi|squash|export|push|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|balloon|update|template|_reap|_shutdown)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
+    up|down)            exec python3 "$FCVM_ROOT/lib/project.py" "$cmd" "$@" ;;
+    project)            exec python3 "$FCVM_ROOT/lib/project.py" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     serve)              exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;
     help|-h|--help)     usage ;;

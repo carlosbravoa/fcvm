@@ -61,6 +61,10 @@ registering the server, for example `@pypi,@github`. Every sandbox then
 gets that allowlist. The agent may only narrow it to `"none"`, and no tool
 widens it.
 
+**The mirror.** `FCVM_MCP_CACHE=1` gives every restricted sandbox the
+proxy's [package mirror](networking.md#the-package-mirror): the first
+sandbox downloads a package, the next ones get it from the host.
+
 ## Templates
 
 `create_sandbox` takes `template` (see the `templates` tool), and the

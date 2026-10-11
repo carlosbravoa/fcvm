@@ -47,6 +47,8 @@ VMs:
                              home goes to the guest user's home, any other to the same path) --idle (app images: no
                              command, stays up for exec) --net none (no network)
                              --allow HOST,*.DOMAIN,@PRESET (egress allowlist via proxy)
+                             --cache (with --allow: pip and npm fetch through a mirror on the
+                             host that keeps packages, so repeated installs are fast)
                              --jail (run under the Firecracker jailer; see jail-setup)
                              --restart no|on-failure|unless-stopped|always (applied by
                              fcvm serve / the fcvm service, like docker's)
@@ -84,7 +86,7 @@ VMs:
   export IMAGE FILE.tar      the image as an OCI archive (docker/podman load, fcvm import elsewhere)
   push IMAGE REGISTRY/REPO[:TAG]
                              the image to a registry (REGISTRY_USER/REGISTRY_PASSWORD to log in)
-  prune                      delete the build cache and leftover build VMs
+  prune                      delete the build cache, leftover build VMs and the egress mirror's files
   mount VM HOST/DIR[:GUEST/PATH][:ro]  add a live host directory (at once if running)
   umount VM PATH             remove it (by its guest path or host directory)
   publish VM [BIND:][HOST]:GUEST  publish a TCP port (at once if running; no HOST: a free one)

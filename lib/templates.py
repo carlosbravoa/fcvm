@@ -12,7 +12,7 @@ lib/builtin-templates/, which a user template of the same name replaces):
    "process": "image" | "idle" | "command", "command": ["python", "app.py"],
    "entrypoint": null, "jail": true | false | null, "restart": "no",
    "ttl": "2h" | null, "idle_stop": "30m" | null, "secrets": ["GITHUB_TOKEN"],
-   "forward": ["ssh-agent", "git"]}
+   "forward": ["ssh-agent", "git"], "cache": true | false}
 
 `secrets` names environment variables of whoever creates the VM; their
 values go to the VM (fcvm create --secret NAME), never into the template.
@@ -39,7 +39,7 @@ POLICIES = ("no", "on-failure", "unless-stopped", "always")
 FIELDS = {"description": "", "image": None, "ref": None, "vcpus": None, "mem_mib": None, "disk": None,
           "copy": False, "network": "full", "allow": [], "ports": [], "volumes": [], "process": "image",
           "command": [], "entrypoint": None, "jail": None, "restart": "no", "ttl": None, "idle_stop": None,
-          "secrets": [], "forward": []}
+          "secrets": [], "forward": [], "cache": False}
 DURATION = re.compile(r"^[0-9]+[smhd]?$")   # as --ttl / --idle-stop take it: 90s, 30m, 2h, 1d
 SECRET = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")   # names only: values come from the environment at create
 
@@ -65,6 +65,8 @@ def validate(t):
         raise Invalid("network must be full, none or restricted")
     if out["network"] == "restricted" and not out["allow"]:
         raise Invalid("a restricted network needs an allowlist")
+    if out["cache"] and out["network"] != "restricted":
+        raise Invalid("cache (the egress mirror) needs a restricted network")
     for k in ("allow", "ports", "volumes", "command", "secrets", "forward"):
         if not isinstance(out[k], list) or not all(isinstance(x, str) for x in out[k]):
             raise Invalid(f"{k} must be a list of strings")
@@ -156,6 +158,8 @@ def options(t):
         a += ["--net", "none"]
     elif t["network"] == "restricted":
         a += ["--allow", ",".join(t["allow"])]
+        if t["cache"]:
+            a.append("--cache")
     if t["jail"] is not None:
         a.append("--jail" if t["jail"] else "--no-jail")
     if t["restart"] != "no":
@@ -198,6 +202,7 @@ def from_vm(vm, description=""):
          "volumes": (c.get("volumes") or []) + [f"{s['host']}:{s['path']}" + (":ro" if s.get("ro") else "")
                                                  for s in c.get("shares") or []],
          "network": (c.get("net") or {}).get("mode") or "full", "allow": (c.get("net") or {}).get("allow") or [],
+         "cache": bool((c.get("net") or {}).get("cache")),
          "jail": bool(c.get("jail")), "restart": c.get("restart") or "no",
          "ttl": f"{c['ttl_s']}s" if c.get("ttl_s") else None,
          "idle_stop": f"{c['idle_stop_s']}s" if c.get("idle_stop_s") else None,

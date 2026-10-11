@@ -63,6 +63,15 @@ New:
   `fcvm snapshot import FILE.tar [NAME]` brings it to another host that has
   the same images and a compatible Firecracker, ready to fork: a prepared,
   already-running state can be shipped.
+- **The package mirror.** `--cache` on a restricted VM (`--allow`) points
+  its pip and npm at a mirror on the egress proxy
+  (`http://172.30.1.1:3128/cache/HOST/PATH`), which fetches over TLS with
+  the allowlist applied, keeps wheels, tarballs and other immutable files
+  in `cache/egress/`, and rewrites index links so everything goes through
+  it. `fcvm egress` shows `CACHE-HIT`/`CACHE-MISS`; `fcvm prune` empties
+  it. Templates (`cache`), the API and the MCP server (`FCVM_MCP_CACHE=1`)
+  take it. A running proxy from an older fcvm is replaced at the next
+  restricted start.
 - **Project files.** `fcvm.toml` in a repository describes its VMs
   (`[vms.NAME]` tables with the template fields, a `template` to start
   from, host paths relative to the file); `fcvm up` imports, creates and

@@ -9,6 +9,7 @@ this page and how to verify them.
 - [Full network](#full-network)
 - [No network](#no-network)
 - [Restricted network: egress allowlists](#restricted-network-egress-allowlists)
+- [The package mirror](#the-package-mirror)
 - [Isolation defaults](#isolation-defaults)
 - [Addresses and reaching VMs](#addresses-and-reaching-vms)
 - [Published ports](#published-ports)
@@ -94,6 +95,33 @@ request's 403 names the command that would allow it.
 - **Content.** The proxy checks host names, not content. An allowed host
   that accepts uploads can still receive data.
 - **Logs.** Every decision is logged in `vms/VM/egress.log`.
+
+## The package mirror
+
+```sh
+fcvm run python-3.13-slim --allow @pypi --cache -- pip install requests   # the second VM to do this fetches nothing
+fcvm create box node-22-slim --idle --allow @npm --cache
+```
+
+Restricted VMs talk HTTPS to PyPI and npm, which the proxy can only pass
+through, so every new sandbox downloads the same packages again. `--cache`
+adds a mirror on the proxy, `http://172.30.1.1:3128/cache/HOST/PATH`:
+- the VM's `pip` and `npm` are pointed at it (`PIP_INDEX_URL`,
+  `PIP_TRUSTED_HOST`, `npm_config_registry`), and `FCVM_CACHE` names it for
+  other tools: `curl $FCVM_CACHE/github.com/org/repo/archive/v1.tar.gz`;
+- the proxy fetches `https://HOST/PATH` itself, with the VM's allowlist
+  applied to HOST, and keeps artifacts (wheels, tarballs, anything the
+  server marks immutable or cacheable for a day) in `cache/egress/` on the
+  host; index pages and package metadata are fetched fresh, with their
+  links rewritten to the mirror, so the files behind them go through it too;
+- `fcvm egress VM` shows `CACHE-HIT` and `CACHE-MISS` decisions, and `fcvm
+  prune` empties the cache.
+
+The VM sees the mirror over plain HTTP, but only on the isolated bridge;
+the TLS to the real host is the proxy's, with certificate verification. pip
+and npm verify package hashes anyway. Templates take `"cache": true`, the
+API `cache`, and the MCP server `FCVM_MCP_CACHE=1` for every restricted
+sandbox.
 
 ## Isolation defaults
 

@@ -985,6 +985,8 @@ class App:
             if not allow:
                 raise HTTPError(400, "a restricted network needs at least one allowed host or preset")
             args += ["--allow", ",".join(allow)]
+            if d.get("cache"):
+                args.append("--cache")
         for p in d.get("ports", []):
             if p.strip():
                 args += ["-p", p.strip()]

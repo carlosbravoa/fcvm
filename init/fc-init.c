@@ -12,6 +12,7 @@
  *   fcvm.exec=PATH         then exec PATH as PID 1 (systemd images) ...
  *   fcvm.shares=PORT:PATH[:ro],...  live host directories over vsock + 9P
  *   fcvm.proxy=URL         restricted network: http(s)_proxy for the container
+ *   fcvm.cache=URL         the egress mirror: PIP_INDEX_URL, npm_config_registry, FCVM_CACHE
  *   fcvm.secrets=PORT      secrets from the host (vsock) into a tmpfs at /run/secrets
  *   fcvm.ssh_agent=PORT    relay the host's ssh-agent (fcvm create --forward ssh-agent)
  *   fcvm.git_cred=PORT     ask the host for git credentials (--forward git)
@@ -987,6 +988,34 @@ static int git_credential_main(int argc, char **argv)
 static void start_forwarding(const char *owner)
 {
     ssh_agent_relay(owner);
+}
+
+/*
+ * The egress mirror (fcvm.cache=URL, from `fcvm --cache` on a restricted VM):
+ * pip and npm are pointed at it, and FCVM_CACHE tells other tools where it is.
+ */
+static char **with_cache_env(char **env)
+{
+    char *url = karg("fcvm.cache");
+    if (!url)
+        return env;
+    int n = 0;
+    while (env && env[n])
+        n++;
+    char **out = calloc(n + 6, sizeof(*out));
+    for (int i = 0; i < n; i++)
+        out[i] = env[i];
+    char *host = strdup(strstr(url, "://") ? strstr(url, "://") + 3 : url), *colon = strchr(host, ':');
+    if (strchr(host, '/'))
+        *strchr(host, '/') = '\0';
+    if (colon)
+        *colon = '\0';
+    asprintf(&out[n++], "FCVM_CACHE=%s", url);
+    asprintf(&out[n++], "PIP_INDEX_URL=%s/pypi.org/simple/", url);
+    asprintf(&out[n++], "PIP_TRUSTED_HOST=%s", host);
+    asprintf(&out[n++], "npm_config_registry=%s/registry.npmjs.org/", url);
+    free(host);
+    return out;
 }
 
 /* env + what the app and exec sessions need to use the forwarded credentials. */
@@ -1989,7 +2018,7 @@ static void agent_session(int conn)
     int ni = 0;
     while (image_env && image_env[ni])
         ni++;
-    image_env = with_forward_env(with_secrets_env(with_proxy_env(image_env)));
+    image_env = with_forward_env(with_secrets_env(with_cache_env(with_proxy_env(image_env))));
     ni = 0;
     while (image_env && image_env[ni])
         ni++;
@@ -2205,7 +2234,7 @@ int main(int argc, char **argv_)
 
     static char *fallback[] = {"/bin/sh", NULL};
     char **argv = abuf && alen ? split0(abuf, alen) : fallback;
-    char **env = with_forward_env(with_secrets_env(with_proxy_env(ebuf && elen ? split0(ebuf, elen) : NULL)));
+    char **env = with_forward_env(with_secrets_env(with_cache_env(with_proxy_env(ebuf && elen ? split0(ebuf, elen) : NULL))));
 
     sigset_t all, old;
     sigfillset(&all);

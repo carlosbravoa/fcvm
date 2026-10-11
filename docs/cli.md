@@ -54,7 +54,7 @@ These use sudo.
 | `export IMAGE FILE.tar` | the image, flattened, as an OCI image archive for `docker load`, `podman load` or `fcvm import` elsewhere |
 | `push IMAGE REGISTRY/REPO[:TAG]` | the same, uploaded to a registry (`REGISTRY_USER`/`REGISTRY_PASSWORD` to log in) |
 | `rmi IMAGE` | deletes an image nothing depends on |
-| `prune` | deletes the build cache and leftover build VMs |
+| `prune` | deletes the build cache, leftover build VMs and the package mirror's files |
 
 ## VMs
 
@@ -82,6 +82,7 @@ These use sudo.
 | `-v HOST/DIR[:GUEST/PATH][:ro]` | a live host directory (any value starting with `/`, `./`, `../` or `~`). Without a guest path, a directory in your home goes to the same place in the image user's home, any other to the same path. A guest path is `/PATH` or `~/PATH`. Repeatable |
 | `--net none` | no network card |
 | `--allow HOST,*.DOMAIN,HOST:PORT,@PRESET` | restricted network: only these, through the egress proxy. Repeatable |
+| `--cache` | with `--allow`: pip and npm fetch through the proxy's [package mirror](networking.md#the-package-mirror), which keeps the files for the next VM |
 | `--idle` | app images: run nothing, stay up for `exec` |
 | `-- CMD...` | app images: replaces the image's CMD, keeps its ENTRYPOINT |
 | `--entrypoint CMD` | app images: replaces the ENTRYPOINT (`""` clears it) |

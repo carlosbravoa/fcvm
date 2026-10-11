@@ -87,7 +87,7 @@ User templates are JSON files in `~/.local/share/fcvm/templates/` (or
 |---|---|
 | `image`, `ref` | the fcvm image name, and optionally where to import it from when it's missing |
 | `vcpus`, `mem_mib`, `disk`, `copy` | as `create`'s options. `null`: fcvm's defaults |
-| `network`, `allow` | `full`, `none`, or `restricted` with an allowlist of hosts and `@presets` |
+| `network`, `allow`, `cache` | `full`, `none`, or `restricted` with an allowlist of hosts and `@presets`; `cache: true` adds the [package mirror](networking.md#the-package-mirror) |
 | `ports`, `volumes` | as `-p` and `-v` |
 | `process`, `command`, `entrypoint` | `image` (the image's command), `idle`, or `command` (the `command` list). `entrypoint`, when set, replaces the image's |
 | `jail` | `true`, `false`, or `null` for the default (`JAIL` for the CLI; the MCP server jails when it can) |

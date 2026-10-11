@@ -205,6 +205,7 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ VMs isolated from each other and from host services
 - ✅ Anti-spoofing (MAC and IP pinned per VM), no guest IPv6
 - ✅ Egress allowlists with presets (`@pypi`, `@npm`, `@github`, ...), changeable live, every request logged
+- ✅ A package mirror on the proxy (`--cache`): the first sandbox downloads, the next ones get it from the host
 - ✅ No network at all, per VM
 
 **Interfaces**

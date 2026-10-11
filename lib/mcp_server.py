@@ -43,6 +43,9 @@ SECRETS = [s.strip() for s in os.environ.get("FCVM_MCP_SECRETS", "").split(",") 
 # Credentials relayed into every sandbox (FCVM_MCP_FORWARD=ssh-agent,git): the
 # agent can push and clone with your keys and logins without holding them.
 FORWARD = [f.strip() for f in os.environ.get("FCVM_MCP_FORWARD", "").split(",") if f.strip()]
+# FCVM_MCP_CACHE=1: restricted sandboxes fetch pip and npm packages through the
+# host's mirror, so every sandbox's `pip install` after the first is local.
+CACHE = os.environ.get("FCVM_MCP_CACHE", "") == "1"
 
 INSTRUCTIONS = """fcvm runs Firecracker microVMs: real kernel isolation, ~1 s to boot a container
 image, ~2 s for Ubuntu. Typical loop: images (or pull_image) -> create_sandbox ->
@@ -194,6 +197,8 @@ def t_create_sandbox(image=None, template=None, name=None, command=None, vcpus=N
             t["network"] = "none"
         elif net:
             t["network"], t["allow"] = "restricted", net[1].split(",")
+    if CACHE and t["network"] == "restricted":
+        t["cache"] = True
     args = ["create", name, image, *templates.options(t)]
     for s in SECRETS:
         if s not in os.environ:

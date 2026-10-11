@@ -381,9 +381,10 @@ create() {
     shift 2
     local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full allow=()
     local entrypoint=() set_entrypoint=0 jail=${JAIL:-0} jail_set="" vcpus_set=null mem_set=null restart=no agent=1
-    local ttl="" idle_stop="" ttl_raw="" idle_raw="" secrets=() forward=()
+    local ttl="" idle_stop="" ttl_raw="" idle_raw="" secrets=() forward=() cache=0
     while [ $# -gt 0 ]; do
         case $1 in
+            --cache)        cache=1; shift ;;
             --secret)       parse_secret "${2:?--secret wants NAME=VALUE, NAME=@FILE or NAME}"; secrets+=("$2"); shift 2 ;;
             --forward)      mapfile -t forward < <(parse_forward "$(IFS=,; echo "${forward[*]:-},${2:?--forward wants ssh-agent and/or git}")"); shift 2 ;;
             --vcpus)        vcpus=$2 vcpus_set=$2; shift 2 ;;
@@ -437,6 +438,7 @@ create() {
         netmode=restricted
         expand_allow "${allow[@]}" >/dev/null   # validate now, expand at start
     fi
+    [ $cache = 0 ] || [ "$netmode" = restricted ] || die "--cache is the egress mirror of a restricted network: it needs --allow"
     [ "$netmode" != none ] || [ ${#ports[@]} -eq 0 ] || die "-p needs a network; the VM has --net none"
     local p
     for p in "${ports[@]}"; do
@@ -468,7 +470,7 @@ create() {
             --argjson mem "$mem_set" --arg disk "$disk" --argjson copy "$([ $copy = 1 ] && echo true || echo false)" \
             --argjson ports "$(json_list "${ports[@]}")" \
             --argjson volumes "$(json_list "${vols[@]}" "${shares[@]}")" \
-            --arg net "$netmode" --argjson allow "$(json_list "${allow[@]}")" \
+            --arg net "$netmode" --argjson allow "$(json_list "${allow[@]}")" --argjson cache "$([ $cache = 1 ] && echo true || echo false)" \
             --arg proc "$proc" --argjson command "$(json_list "${raw_cmd[@]}")" \
             --argjson ep_set "$set_entrypoint" --arg ep "${raw_ep[*]}" --arg jail "$jail_set" --arg restart "$restart" \
             --arg ttl "${ttl:+$ttl_raw}" --arg idle_stop "${idle_stop:+$idle_raw}" --argjson secrets "$(json_list "${secret_names[@]}")" \
@@ -479,7 +481,7 @@ create() {
               entrypoint: (if $ep_set == 1 then $ep else null end),
               jail: (if $jail == "" then null else ($jail == "1") end), restart: $restart,
               ttl: (if $ttl == "" then null else $ttl end), idle_stop: (if $idle_stop == "" then null else $idle_stop end),
-              secrets: $secrets, forward: $forward}' > "$FCVM_TEMPLATE_OUT"
+              secrets: $secrets, forward: $forward, cache: $cache}' > "$FCVM_TEMPLATE_OUT"
         unlock_vm; rm -f "$VMS_DIR/.locks/vm-$vm"
         return 0
     fi
@@ -507,7 +509,8 @@ create() {
         --argjson ports "$(jq -n '$ARGS.positional' --args "${ports[@]}")" \
         --argjson volumes "$(jq -n '$ARGS.positional' --args "${vols[@]}")" --argjson shares "$sharejson" \
         --argjson jail "$([ "$jail" = 1 ] && echo true || echo false)" --arg restart "$restart" \
-        --argjson net "$(jq -n --arg mode "$netmode" '{mode: $mode, allow: $ARGS.positional}' --args "${allow[@]}")" \
+        --argjson net "$(jq -n --arg mode "$netmode" --argjson cache "$([ $cache = 1 ] && echo true || echo false)" \
+            '{mode: $mode, allow: $ARGS.positional} + (if $cache then {cache: true} else {} end)' --args "${allow[@]}")" \
         '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
           shares: $shares, net: $net, jail: $jail, restart: $restart, ephemeral: $ephemeral, created: (now | todate)}
          + (if $agent then {} else {agent: false} end) + (if $hostkey == "" then {} else {ssh_host_key: $hostkey} end)
@@ -570,23 +573,29 @@ write_policy() {   # vm ip
 proxy_listening() { (exec 3<>"/dev/tcp/$NET_R_PREFIX.1/$EGRESS_PORT") 2>/dev/null; }
 ensure_proxy() {
     local pidf=$VMS_DIR/.egress/proxy.pid pid i
+    local want="$NET_R_PREFIX.1:$EGRESS_PORT $CACHE_DIR/egress"   # a proxy started with other settings is replaced
     pid=$(cat "$pidf" 2>/dev/null || true)
     # The recorded pid must still be our restart loop (after a reboot it may be
     # anything), and the proxy must answer: a loop whose python just crashed
     # is back within a second.
     if [ -n "$pid" ] && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -qF egress-proxy; then
-        for ((i = 0; i < 30; i++)); do proxy_listening && return 0; sleep 0.1; done
-        kill "$pid" 2>/dev/null || true   # alive but never answering: replace it
+        if [ "$(cat "$VMS_DIR/.egress/proxy.args" 2>/dev/null)" = "$want" ]; then
+            for ((i = 0; i < 30; i++)); do proxy_listening && return 0; sleep 0.1; done
+        fi
+        kill "$pid" 2>/dev/null || true   # never answering, or from an older fcvm: replace it
+        pkill -f "egress_proxy.py --listen $NET_R_PREFIX.1:$EGRESS_PORT" 2>/dev/null || true
+        sleep 0.3
     fi
-    mkdir -p "$VMS_DIR/.egress"
+    mkdir -p "$VMS_DIR/.egress" "$CACHE_DIR/egress"
     (   # don't let the long-lived proxy inherit this VM's tap lock
         if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
         exec {VM_LOCK}>&-
-        exec setsid bash -c 'while :; do python3 "$1" --listen "$2" --policy-dir "$3"; sleep 1; done' egress-proxy \
-            "$FCVM_ROOT/lib/egress_proxy.py" "$NET_R_PREFIX.1:$EGRESS_PORT" "$VMS_DIR/.egress" \
+        exec setsid bash -c 'while :; do python3 "$1" --listen "$2" --policy-dir "$3" --cache-dir "$4"; sleep 1; done' egress-proxy \
+            "$FCVM_ROOT/lib/egress_proxy.py" "$NET_R_PREFIX.1:$EGRESS_PORT" "$VMS_DIR/.egress" "$CACHE_DIR/egress" \
             </dev/null >>"$VMS_DIR/.egress/proxy.log" 2>&1
     ) &
     echo $! > "$pidf"
+    echo "$want" > "$VMS_DIR/.egress/proxy.args"
     for ((i = 0; i < 20; i++)); do
         proxy_listening && return 0
         sleep 0.1
@@ -679,6 +688,13 @@ start() {
             if [ "$type" = system ]; then
                 for v in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; do args+=" systemd.setenv=$v=$proxy"; done
                 args+=" systemd.setenv=no_proxy=localhost,127.0.0.1"
+            fi
+            if [ "$(jq -r '.net.cache // false' "$DIR/vm.json")" = true ]; then   # the mirror (--cache)
+                args+=" fcvm.cache=$proxy/cache"
+                if [ "$type" = system ]; then
+                    args+=" systemd.setenv=FCVM_CACHE=$proxy/cache systemd.setenv=PIP_INDEX_URL=$proxy/cache/pypi.org/simple/"
+                    args+=" systemd.setenv=PIP_TRUSTED_HOST=$NET_R_PREFIX.1 systemd.setenv=npm_config_registry=$proxy/cache/registry.npmjs.org/"
+                fi
             fi
             write_policy "$vm" "$IP"
             ensure_proxy
@@ -1476,7 +1492,9 @@ prune() {
         done
         [ $left = 1 ] || break
     done
-    log "removed $removed build cache image(s), $((freed / 1048576)) MiB freed"
+    local egress=0
+    if [ -d "$CACHE_DIR/egress" ]; then egress=$(du -sm "$CACHE_DIR/egress" | cut -f1); rm -rf "$CACHE_DIR/egress"; fi
+    log "removed $removed build cache image(s), $((freed / 1048576)) MiB freed; the egress mirror's $egress MiB too"
 }
 
 # Per-machine identity a booted systemd VM leaves on its disk. Removed from a
@@ -2034,7 +2052,7 @@ egress() {
             mv "$dir/vm.json.tmp" "$dir/vm.json"
         if vm_running "$vm" && [ -f "$dir/ip" ]; then write_policy "$vm" "$(cat "$dir/ip")"; fi
     fi
-    local fmt='"\(.ts)  \(.decision | ascii_upcase | .[0:5])  \(.method) \(.host):\(.port)"'
+    local fmt='"\(.ts)  \(.decision | ascii_upcase | .[0:10] | . + " " * (10 - length))  \(.method) \(.host):\(.port)\(.path // "")"'
     if [ $follow = 1 ]; then
         touch "$dir/egress.log"; tail -n "$lines" -f "$dir/egress.log" | jq --unbuffered -r "$fmt"
         return
@@ -2081,7 +2099,7 @@ list_vms() {
                 [(if .jail then "jail" else empty end), (if .agent == false then "no-agent" else empty end), (if (.restart // "no") != "no" then "restart:\(.restart)" else empty end),
                  (if .ttl_s then "ttl:\(.ttl_s | dur)" else empty end), (if .idle_stop_s then "idle-stop:\(.idle_stop_s | dur)" else empty end),
                  (if (.forward // []) != [] then "forward:\(.forward | join(","))" else empty end),
-                 (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))" else empty end)]
+                 (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))\(if .net.cache then " cache" else "" end)" else empty end)]
                 + (.ports // []) + ((.volumes // []) | map("-v " + .))
                 + ((.shares // []) | map("-v \(.host):\(.path)\(if .ro then ":ro" else "" end)")) | join(" ")' "$d/vm.json")"
     done

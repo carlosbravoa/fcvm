@@ -103,6 +103,26 @@ class Egress(VMTestCase):
         r = self.sh(vm, "wget -q -O /dev/null -T 10 https://www.iana.org && echo allowed", check=False)
         self.assertIn("allowed", r.stdout)
 
+    def test_mirror_caches_packages(self):
+        import json
+        if not any(i["name"] == "python-3.13-slim" for i in json.loads(fcvm("images", "--json").stdout)):
+            self.skipTest("needs the python-3.13-slim image (pip)")
+        r = fcvm("create", "fcvmtest-nocache", "alpine-latest", "--idle", "--cache", check=False)
+        self.assertIn("needs --allow", r.stderr)
+        vm = self.vm("--allow", "@pypi", "--cache", image="python-3.13-slim", start=True)
+        self.assertIn("cache", fcvm("ls").stdout)
+        env = self.sh(vm, 'echo "$PIP_INDEX_URL $PIP_TRUSTED_HOST $npm_config_registry"').stdout.split()
+        self.assertEqual(env[0], f"http://{setting('NET_R_PREFIX')}.1:{setting('EGRESS_PORT')}/cache/pypi.org/simple/")
+        self.assertEqual(env[2], f"http://{setting('NET_R_PREFIX')}.1:{setting('EGRESS_PORT')}/cache/registry.npmjs.org/")
+        self.sh(vm, "pip download -q --no-deps -d /tmp/dl six", timeout=300)
+        log = strip_ansi(fcvm("egress", vm, "-n", "50").stdout)
+        self.assertIn("CACHE-MISS", log)
+        self.assertIn("files.pythonhosted.org", log)
+        self.sh(vm, "rm -rf /tmp/dl && pip download -q --no-deps -d /tmp/dl six", timeout=300)
+        log = strip_ansi(fcvm("egress", vm, "-n", "50").stdout)
+        self.assertIn("CACHE-HIT", log)
+        self.assertIn("six", self.sh(vm, "ls /tmp/dl").stdout)
+
     def test_no_network(self):
         vm = self.vm("--net", "none")
         r = self.sh(vm, "ls /sys/class/net")

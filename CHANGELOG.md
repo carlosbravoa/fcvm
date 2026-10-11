@@ -147,6 +147,8 @@ And from a second review of this release's own changes, before it shipped:
   and a truncated upstream body crashed the request.
 - The client libraries now find the server of an fcvm run from a checkout
   (`fcvm _home` tells them where its state is).
+- `fcvm update --ttl` printed the value twice ("7200s7200"); `fcvm fork`
+  through the service warned about published ports twice.
 
 ## 0.6.2 (2026-10-02)
 

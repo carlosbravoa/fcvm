@@ -29,7 +29,7 @@ state directory per user.
 
 ```sh
 tests/run                      # lint + unit tests: seconds, no KVM, no root
-tests/run integration          # real VMs: about 2 minutes on a set-up host
+tests/run integration          # real VMs: about 5 minutes on a set-up host
 tests/run lint unit integration -k Snapshots   # a subset, by name
 tests/fresh-machine.sh         # everything on a fresh Ubuntu in Multipass, with a reboot (~15 min)
 ```
@@ -37,8 +37,8 @@ tests/fresh-machine.sh         # everything on a fresh Ubuntu in Multipass, with
 | level | what | needs |
 |---|---|---|
 | **lint** | the syntax of every shell and Python file, `shellcheck -S error` (when installed), and every link and anchor in the docs | nothing |
-| **unit** (`tests/unit`) | pure logic: egress allowlist matching, the 9P server's path confinement, Dockerfile parsing, image references, layer flattening with whiteouts, USER resolution, port specs, the supervisor's decisions and pid identity, code/state locations, the installer and upgrades | nothing |
-| **integration** (`tests/integration`) | the real CLI and real VMs: lifecycle and exec, cp, volumes and host directories, published ports, isolation (VMs vs host services, vs each other, anti-spoofing), egress allowlists, snapshots and forks (also jailed), the jailer, the API, restart policies, builds, commit, the MCP server, `status` | a set-up host (`fcvm setup`); internet access for the egress tests |
+| **unit** (`tests/unit`) | pure logic: egress allowlist matching and the mirror, the 9P server's path confinement, Dockerfile parsing, image references, layer flattening with whiteouts, USER resolution, port specs, the supervisor's decisions (restart policies, lifetimes, pools) and pid identity, templates and project files, the secrets and forwarding servers, OCI export and push, the Python client, code/state locations, the installer and upgrades | nothing |
+| **integration** (`tests/integration`) | the real CLI and real VMs: lifecycle and exec, background jobs, cp, volumes and host directories, published and live ports, isolation (VMs vs host services, vs each other, anti-spoofing), egress allowlists and the mirror, secrets and credential forwarding, the balloon, snapshots and forks (also jailed) and their export/import, image export, the jailer (with secrets, ports, forwarding, the mirror and pools inside it), the API and both client libraries, lifetimes, warm pools, restart policies, builds, commit, templates and project files, `ssh-config`, the MCP server, `status` | a set-up host (`fcvm setup`); internet access for the egress tests; `ubuntu-26.04` and `python-3.13-slim` images for a few (skipped otherwise) |
 | **fresh machine** (`tests/fresh-machine.sh`) | install from this tree, `setup` twice (across the kvm-group re-login), all of the above from the installed copy, then a real reboot | Multipass, ~4 CPUs, 8 GB, 25 GB disk |
 
 **The integration tests are safe on your own machine.**
@@ -53,6 +53,20 @@ tests/fresh-machine.sh         # everything on a fresh Ubuntu in Multipass, with
   state directory, `NET_ISOLATE=1`, ...) are skipped, not failed. A host
   that isn't set up at all skips the integration tests with a message saying
   what's missing.
+
+**Changing the supervisor or the API while the service runs.** The tests use
+the running fcvm service, which executes the supervisor and server code it
+was started with, not your edited `lib/web/*.py` (the CLI it runs *is* the
+checkout's). Either `fcvm service install` (sudo; restarts it on the new
+code, VMs keep running), or run a second server from the tree and let the
+tests find it:
+
+```sh
+cp vms/.serve.json /tmp/serve.bak              # the service's state file: a test serve overwrites it
+./fcvm serve --port 9797 & pid=$!              # the tests then use this one
+tests/run integration -k Service
+kill $pid; cp /tmp/serve.bak vms/.serve.json   # back to the service
+```
 
 **Writing tests.**
 - **Unit tests** import modules from `lib/` directly (see

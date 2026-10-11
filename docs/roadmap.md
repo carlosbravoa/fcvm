@@ -303,8 +303,8 @@ Still open: a per-VM or per-user choice of keys (today: fcvm's key and your
 - ✅ `fc-init` boots from an initramfs instead of living in every image, so
   upgrading the init or agent no longer means rebuilding images.
 - ✅ A test suite and CI (see [CONTRIBUTING](../CONTRIBUTING.md)):
-  - `tests/run`: lint (with shellcheck and a docs link checker), 97 unit
-    tests, and 75 integration tests on real VMs, in about 5 minutes;
+  - `tests/run`: lint (with shellcheck and a docs link checker), 101 unit
+    tests, and 80 integration tests on real VMs, in about 5 minutes;
   - `tests/fresh-machine.sh`: install, setup, the suite and a real reboot on
     a fresh Ubuntu in Multipass;
   - GitHub Actions: lint and unit tests, and integration tests on a fresh

@@ -128,6 +128,7 @@ These use sudo.
 |---|---|
 | `snapshot VM NAME` | saves a running VM's memory, device state and disk. The VM keeps running (paused ~0.75 s per GB of RAM) |
 | `snapshot ls [--json]`, `snapshot rm NAME` | lists and deletes snapshots |
+| `snapshot export NAME FILE.tar`, `snapshot import FILE.tar [NAME]` | moves a snapshot to another fcvm host, which needs the same images (by name) and a compatible Firecracker ([details](snapshots.md#moving-snapshots-between-hosts)) |
 | `fork SNAPSHOT [NAME] [-n N]` | starts running VMs from a snapshot, ~150 ms each (~1 s jailed), each with its own disk, IP, MAC and hostname |
 
 ## Network

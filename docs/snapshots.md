@@ -11,6 +11,7 @@ and loaded dependencies stay warm.
 - [Snapshot or commit?](#snapshot-or-commit)
 - [Performance](#performance)
 - [Managing snapshots](#managing-snapshots)
+- [Moving snapshots between hosts](#moving-snapshots-between-hosts)
 - [Limits](#limits)
 
 ## Example
@@ -73,6 +74,29 @@ fcvm snapshot rm ready      # running forks are unaffected
 
 The web console lists snapshots, and forks or deletes them. The MCP server
 has `snapshot_vm`, `fork`, `snapshots` and `remove_snapshot`.
+
+## Moving snapshots between hosts
+
+```sh
+fcvm snapshot export ready ready.tar       # memory (sparse), device state, disk, settings
+scp ready.tar other:                       # the other host needs the same images, by name
+ssh other fcvm snapshot import ready.tar   # then: fcvm fork ready
+```
+
+That ships a prepared, already-running state: the fork on the other host
+starts where the snapshot was taken, warm caches included. What the other
+host needs:
+- **The same images**, under the same names (`fcvm export`/`import`, or
+  the same registry references). `import` checks and says which are
+  missing.
+- **A compatible Firecracker** and CPU: the same constraints as forking
+  locally after an upgrade. `import` warns when the versions differ.
+- **For snapshots of unjailed VMs**, the source VM's disk path is recorded
+  inside Firecracker's state and a fork stands in for it with a link, so
+  that path must be creatable on the other host (same user and state
+  directory layout, typically). Snapshots of `--jail` VMs use fixed paths
+  inside the jail and have no such constraint: prefer them for moving
+  between hosts.
 
 ## Limits
 

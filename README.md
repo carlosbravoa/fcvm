@@ -186,7 +186,7 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ Shared read-only images, a copy-on-write layer per VM, `commit` to new layers, `squash`
 - ✅ Named volumes and live host directories (at boot, or added to a running VM)
 - ✅ Published TCP ports, bound to localhost by default, added and removed live (`publish`/`unpublish`)
-- ✅ Snapshots of running VMs, and forks in ~150 ms with their own disk, IP, MAC and hostname
+- ✅ Snapshots of running VMs, and forks in ~150 ms with their own disk, IP, MAC and hostname; `snapshot export`/`import` move them between hosts
 - ✅ Restart policies (`no`, `on-failure`, `unless-stopped`, `always`), recovery after crashes and reboots
 - ✅ Lifetimes: `--ttl 2h` and `--idle-stop 30m` end forgotten sandboxes on their own
 - ✅ Secrets (`--secret API_KEY`): into a tmpfs and the environment at boot, never onto the VM's disk

@@ -1721,8 +1721,59 @@ fork_cmd() {
     fi
 }
 
+# fcvm snapshot export NAME FILE.tar: a snapshot (memory, device state, disk,
+# settings) as a sparse tar, to fork it on another fcvm host that has the same
+# images and a compatible Firecracker. fcvm snapshot import FILE.tar [NAME]
+# brings it back.
+snapshot_export() {
+    local usage="usage: fcvm snapshot export NAME FILE.tar" name=${1:?$usage} file=${2:?$usage} dir
+    dir=$SNAPSHOTS_DIR/$name
+    [ -f "$dir/meta.json" ] || die "no snapshot '$name' (see: fcvm snapshot ls)"
+    [ ! -e "$file" ] || die "$file exists"
+    local chain=() i
+    mapfile -t chain < <(image_chain "$(jq -r .image "$dir/vm.json")")
+    jq -n --arg fcvm "$(fcvm_version)" --arg kernel "$(basename "$(default_kernel)")" --argjson images "$(json_list "${chain[@]}")" \
+        --arg disk "$(jq -r .disk "$dir/meta.json")" \
+        '{fcvm: $fcvm, kernel: $kernel, images: $images, disk: $disk, exported: (now | todate)}' > "$dir/export.json"
+    # -S keeps the memory file sparse (untouched guest pages take no space)
+    tar -S -C "$dir" -cf "$file" vmstate mem "$(jq -r .disk "$dir/meta.json")" vm.json meta.json export.json ||
+        { rm -f "$file" "$dir/export.json"; die "cannot write $file"; }
+    rm -f "$dir/export.json"
+    log "exported snapshot '$name' to $file ($(du -h "$file" | cut -f1)); it needs image(s) $(IFS=,; echo "${chain[*]}") where it's imported"
+}
+
+snapshot_import() {
+    local usage="usage: fcvm snapshot import FILE.tar [NAME]" file=${1:?$usage} name=${2:-} dir tmp
+    [ -f "$file" ] || die "no such file: $file"
+    tmp=$(mktemp -d -p "$SNAPSHOTS_DIR" .import.XXXXXX) || { mkdir -p "$SNAPSHOTS_DIR"; tmp=$(mktemp -d -p "$SNAPSHOTS_DIR" .import.XXXXXX); }
+    tar -S -C "$tmp" -xf "$file" 2>/dev/null && [ -f "$tmp/export.json" ] && [ -f "$tmp/meta.json" ] ||
+        { rm -rf "$tmp"; die "$file isn't an fcvm snapshot export"; }
+    [ -n "$name" ] || name=$(basename "${file%.tar}")
+    [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || { rm -rf "$tmp"; die "invalid snapshot name '$name'"; }
+    [ ! -e "$SNAPSHOTS_DIR/$name" ] || { rm -rf "$tmp"; die "snapshot '$name' already exists"; }
+    local img missing=()
+    for img in $(jq -r '.images[]' "$tmp/export.json"); do [ -f "$IMAGES_DIR/$img.json" ] || missing+=("$img"); done
+    [ ${#missing[@]} -eq 0 ] || { rm -rf "$tmp"; die "the snapshot's VM boots from image(s) not present here: ${missing[*]} (fcvm import them under those names first)"; }
+    local fc theirs; fc=$("$FIRECRACKER" --version | head -1); theirs=$(jq -r .firecracker "$tmp/meta.json")
+    [ "$fc" = "$theirs" ] || warn "the snapshot was taken with $theirs; this host runs $fc. Forks may fail to restore"
+    # An unjailed snapshot's vmstate names the source VM's disk path; a fork
+    # stands in for it with a link, which must be possible here.
+    local srcdisk; srcdisk=$(jq -r '.source_disk // empty' "$tmp/meta.json")
+    if [ "$(jq -r '.jail // false' "$tmp/meta.json")" != true ] && [ -n "$srcdisk" ] && [ ! -e "$srcdisk" ]; then
+        if ! { mkdir -p "${srcdisk%/*}" && rmdir "${srcdisk%/*}" 2>/dev/null || [ -d "${srcdisk%/*}" ]; } 2>/dev/null; then
+            warn "forks of this snapshot need a stand-in for its source disk at $srcdisk, which can't be created here (snapshots of --jail VMs don't have this limitation)"
+        fi
+    fi
+    jq --arg file "$(basename "$file")" '. + {imported_from: $file}' "$tmp/meta.json" > "$tmp/meta.json.tmp" && mv "$tmp/meta.json.tmp" "$tmp/meta.json"
+    rm -f "$tmp/export.json"
+    mv "$tmp" "$SNAPSHOTS_DIR/$name"
+    log "imported snapshot '$name' ($(jq -r .image "$SNAPSHOTS_DIR/$name/vm.json")). Fork it: fcvm fork $name"
+}
+
 snapshot_cmd() {
     case ${1:-} in
+        export) shift; snapshot_export "$@" ;;
+        import) shift; snapshot_import "$@" ;;
         ls)
             local json=0 d
             [ "${2:-}" = --json ] && json=1
@@ -1740,7 +1791,7 @@ snapshot_cmd() {
             local name=${2:?usage: fcvm snapshot rm NAME}
             [ -d "$SNAPSHOTS_DIR/$name" ] || die "no snapshot '$name'"
             rm -rf "${SNAPSHOTS_DIR:?}/$name"; log "removed snapshot '$name'" ;;
-        ""|-h|--help) die "usage: fcvm snapshot VM NAME | fcvm snapshot ls [--json] | fcvm snapshot rm NAME" ;;
+        ""|-h|--help) die "usage: fcvm snapshot VM NAME | fcvm snapshot ls [--json] | fcvm snapshot rm NAME | fcvm snapshot export NAME FILE.tar | fcvm snapshot import FILE.tar [NAME]" ;;
         *) snapshot_create "$@" ;;
     esac
 }

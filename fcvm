@@ -91,6 +91,8 @@ VMs:
   unpublish VM HOSTPORT      stop publishing it
   snapshot VM NAME           save a running VM's memory + disk (it keeps running)
   snapshot ls [--json] | rm NAME
+  snapshot export NAME FILE.tar | import FILE.tar [NAME]
+                             move a snapshot to another host (same images and Firecracker needed)
   fork SNAPSHOT [NAME] [-n N]  new running VM(s) from a snapshot in ~150 ms, with their own
                              disk, IP, MAC and hostname (processes keep running)
   update VM [--restart POLICY] [--ttl D|none] [--idle-stop D|none] [--secret SPEC] [--unset-secret NAME] [--forward LIST|none]

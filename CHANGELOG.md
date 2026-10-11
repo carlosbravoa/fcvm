@@ -58,6 +58,11 @@ New:
   or `fcvm import` on another host; `fcvm push IMAGE REGISTRY/REPO:TAG`
   uploads it to a registry. The tree is read inside a helper VM (`fc-init`
   export mode), no root needed.
+- **Snapshot export and import.** `fcvm snapshot export NAME FILE.tar`
+  packs a snapshot (memory, kept sparse; device state; disk; settings) and
+  `fcvm snapshot import FILE.tar [NAME]` brings it to another host that has
+  the same images and a compatible Firecracker, ready to fork: a prepared,
+  already-running state can be shipped.
 - **`fcvm ssh-config`.** An ssh client entry per system VM (`Host
   fcvm-NAME`) with a `ProxyCommand` that finds the VM's current address,
   so `ssh fcvm-dev`, `scp`, `rsync` and VS Code Remote-SSH work with strict

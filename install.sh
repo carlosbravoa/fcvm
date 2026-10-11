@@ -29,7 +29,7 @@ while [ $# -gt 0 ]; do
         --system)  system=1; shift ;;
         --source)  [ $# -ge 2 ] || die "--source wants a path"; source=$2; shift 2 ;;
         --no-link) link=0; shift ;;   # (fcvm upgrade: the command's link already goes through current)
-        -h|--help) [ -f "$0" ] && sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ||
+        -h|--help) [ -f "$0" ] && sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ||
                        echo "options: --version X.Y.Z, --system, --source PATH (see install.sh)"; exit 0 ;;
         *)         die "unknown option $1 (see --help)" ;;
     esac
@@ -51,7 +51,14 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/src"
 
 if [ -n "$source" ]; then
-    if [ -d "$source" ]; then cp -a "$source/." "$tmp/src/"
+    if [ -d "$source" ]; then
+        # A checkout may also hold state (vms/, images/, ...) and .git: install
+        # the code only, or the copy would become a "git checkout" with its own
+        # stale state directory.
+        tar -C "$source" --exclude=./.git --exclude='./*/__pycache__' --exclude=./fcvm.conf \
+            --exclude=./vms --exclude=./images --exclude=./kernels --exclude=./build --exclude=./builds \
+            --exclude=./cache --exclude=./volumes --exclude=./snapshots --exclude=./bin --exclude=./ssh \
+            --exclude=./metrics --exclude=./templates -cf - . | tar -xf - -C "$tmp/src"
     else tar -xzf "$source" -C "$tmp/src" --strip-components=1; fi
     version=$(cat "$tmp/src/VERSION" 2>/dev/null) || die "$source isn't an fcvm release (no VERSION)"
 else

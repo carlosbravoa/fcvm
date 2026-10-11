@@ -148,6 +148,12 @@ publish on every interface. See [Running VMs](vms.md#published-ports).
 - **Other firewalls.** With another firewall that drops forwarded traffic,
   allow forwarding from `fcbr0` and replies to it, and input on `fcbr1` to
   the egress proxy port.
+- **NetworkManager.** It adopts bridges and taps it sees appear and can
+  later drop their addresses, which cuts every VM off from the host (and
+  the internet) until the next `net-up`. When NetworkManager is installed,
+  `net-up` writes `/etc/NetworkManager/conf.d/fcvm.conf` marking fcvm's
+  interfaces unmanaged, and always puts the bridge addresses back.
+  `net-down` removes that file.
 
 ## Changing subnets and limits
 

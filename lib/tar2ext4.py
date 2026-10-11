@@ -44,6 +44,7 @@ def unpack(tar, root):
     """Unpack as ourselves (owners ignored, permissions ordinary). Returns the
     members to fix up, in tar order, with their normalized paths."""
     entries = []
+    real_root = os.path.realpath(root)
     with tarfile.open(tar) as tf:
         for m in tf:
             path = safe(m.name)
@@ -51,6 +52,17 @@ def unpack(tar, root):
                 continue
             dest = os.path.join(root, path)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
+            # A layer may put a symlink where a later entry's parent should be
+            # (a -> /home/x, then a/file): never write through it, nor over an
+            # existing symlink at the destination. Untrusted images reach here.
+            if not os.path.realpath(os.path.dirname(dest)).startswith(real_root + os.sep) and \
+                    os.path.realpath(os.path.dirname(dest)) != real_root:
+                continue
+            if os.path.lexists(dest) and not (m.isdir() and os.path.isdir(dest) and not os.path.islink(dest)):
+                if os.path.isdir(dest) and not os.path.islink(dest):
+                    shutil.rmtree(dest)
+                else:
+                    os.unlink(dest)
             if m.isdir():
                 os.makedirs(dest, exist_ok=True)
                 os.chmod(dest, 0o755)

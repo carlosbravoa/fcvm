@@ -102,6 +102,25 @@ class MkfsTar(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.check(img)
 
+    def test_unpack_never_writes_through_symlinks(self):
+        """An untrusted layer may put a symlink where a later entry's parent
+        should be, or at the entry's own path: nothing may land outside."""
+        outside = tempfile.mkdtemp(prefix="fcvm-mkfs-outside-")
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        with tarfile.open(self.tar, "w", format=tarfile.PAX_FORMAT) as tf:
+            for name, target in (("escape", outside), ("plain", "/etc"), ("victim", f"{outside}/victim")):
+                ti = tarfile.TarInfo(name)
+                ti.type, ti.mode, ti.linkname = tarfile.SYMTYPE, 0o777, target
+                tf.addfile(ti)
+            for name in ("escape/pwned", "victim"):   # through a symlinked parent; over a symlink
+                ti = tarfile.TarInfo(name)
+                ti.type, ti.mode, ti.size = tarfile.REGTYPE, 0o644, 5
+                tf.addfile(ti, io.BytesIO(b"owned"))
+        r, img = self.build(unpack=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(os.listdir(outside), [])
+        self.assertEqual(stat(img, "victim")[2], 0o100644)        # the file replaced the symlink
+
 
 if __name__ == "__main__":
     unittest.main()

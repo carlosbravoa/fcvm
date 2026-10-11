@@ -117,13 +117,26 @@ class Jobs:
     async def _run(self, job, args):
         p = await asyncio.create_subprocess_exec(FCVM, *map(str, args), stdin=asyncio.subprocess.DEVNULL,
                                                  stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        async for line in p.stdout:
-            job["log"].append(ANSI.sub("", line.decode(errors="replace")).rstrip())
-            if len(job["log"]) > 2000:              # keep the tail; offsets stay absolute
-                job["base"] += len(job["log"]) - 2000
-                del job["log"][:-2000]
+        # Read in chunks and split lines here: a progress bar redrawn with \r
+        # for a long time is one "line" to a StreamReader, and over its limit
+        # it raises instead of delivering.
+        buf = b""
+        while chunk := await p.stdout.read(65536):
+            buf += chunk
+            *lines, buf = re.split(rb"\r\n|\n|\r", buf)
+            for line in lines:
+                self._add(job, line)
+        if buf:
+            self._add(job, buf)
         job["status"] = "done" if await p.wait() == 0 else "failed"
         job["ended"] = time.time()
+
+    @staticmethod
+    def _add(job, line):
+        job["log"].append(ANSI.sub("", line.decode(errors="replace")).rstrip())
+        if len(job["log"]) > 2000:                  # keep the tail; offsets stay absolute
+            job["base"] += len(job["log"]) - 2000
+            del job["log"][:-2000]
 
     def list(self):
         return [{**j, "log": j["log"][-3:]} for j in sorted(self.jobs.values(), key=lambda j: -j["id"])[:20]]

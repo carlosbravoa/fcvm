@@ -284,13 +284,16 @@ class Jaild:
         subprocess.run(["ip", "link", "del", veth], capture_output=True)
         run("ip", "netns", "add", ns)
         run("ip", "link", "add", veth, "type", "veth", "peer", "name", "veth0", "netns", ns)
-        with open(f"/proc/sys/net/ipv6/conf/{veth}/disable_ipv6", "w") as f:   # guests are IPv4-only
-            f.write("1")
+        try:
+            with open(f"/proc/sys/net/ipv6/conf/{veth}/disable_ipv6", "w") as f:   # guests are IPv4-only
+                f.write("1")
+        except FileNotFoundError:
+            pass                                    # the host booted with ipv6.disable=1
         run("ip", "link", "set", veth, "master", self.bridges[prefix], "up")
         run("bridge", "link", "set", "dev", veth, "isolated", "on" if self.isolate.get(prefix) else "off")
         inside = ["ip", "netns", "exec", ns]
         for conf in ("all", "default"):
-            run(*inside, "sysctl", "-q", "-w", f"net.ipv6.conf.{conf}.disable_ipv6=1")
+            run(*inside, "sysctl", "-q", "-e", "-w", f"net.ipv6.conf.{conf}.disable_ipv6=1")
         run(*inside, "ip", "link", "set", "lo", "up")
         run(*inside, "ip", "link", "add", "br0", "type", "bridge")
         run(*inside, "ip", "tuntap", "add", "tap0", "mode", "tap", "user", str(uid))

@@ -9,12 +9,13 @@ need mmdebstrap newuidmap mkfs.ext4 ssh-keygen
 
 name=${1:-ubuntu-26.04}
 img=$IMAGES_DIR/$name.ext4
+new=$IMAGES_DIR/.$name.ext4.new
 mkdir -p "$IMAGES_DIR" "$BUILD_DIR" "$SSH_DIR"
 users=$(image_users "$name" | tr "\n" " ")
 [ -z "$users" ] || die "image '$name' is the shared base of VMs: $users (remove them, or build under another name)"
 
 tar=$BUILD_DIR/$name.rootfs.tar
-trap 'rm -f "$tar"' EXIT
+trap 'rm -f "$tar" "$new"' EXIT
 log "bootstrapping Ubuntu $UBUNTU_SUITE from $UBUNTU_MIRROR"
 # mmdebstrap's rootless mode needs unprivileged user namespaces with full
 # capabilities, which Ubuntu 24.04's AppArmor default withholds.
@@ -24,7 +25,7 @@ userns_hint() {
     Allow them while building:  sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
     then: fcvm base;  and afterwards: sudo sysctl kernel.apparmor_restrict_unprivileged_userns=1"
 }
-trap 'rm -f "$tar"; [ $? = 0 ] || userns_hint' EXIT
+trap 'rc=$?; rm -f "$tar" "$new"; [ $rc = 0 ] || userns_hint' EXIT
 mmdebstrap \
     --mode=unshare --variant=minbase --format=tar \
     --components=main,universe \
@@ -71,9 +72,12 @@ ln -sf /etc/systemd/system/fcvm-agent.service "$1/etc/systemd/system/multi-user.
     "$UBUNTU_SUITE" "$tar" "$UBUNTU_MIRROR"
 
 log "creating $img ($BASE_SIZE)"
-rm -f "$img"
-"$FCVM_ROOT/lib/mkfs-tar.sh" "$tar" -q -F -L rootfs -- "$img" "$BASE_SIZE"
-chmod a-w "$img"   # shared read-only by every VM created from it
+# Built under a temporary name and moved into place when complete (like
+# import): a failed rebuild keeps the image that VMs and snapshots depend on.
+rm -f "$new"
+"$FCVM_ROOT/lib/mkfs-tar.sh" "$tar" -q -F -L rootfs -- "$new" "$BASE_SIZE"
+chmod a-w "$new"   # shared read-only by every VM created from it
+mv -f "$new" "$img"
 jq -n --arg suite "$UBUNTU_SUITE" --arg size "$BASE_SIZE" \
     '{type: "system", ref: ("ubuntu:" + $suite), disk_size: $size}' > "$IMAGES_DIR/$name.json"
 log "image ready: $img. Try: fcvm create dev $name && fcvm start dev"

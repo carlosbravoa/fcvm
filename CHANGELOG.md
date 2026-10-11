@@ -4,6 +4,33 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## Unreleased
+
+Fixes from a code review:
+
+- Live host directories stopped working after about 50 minutes: the 9P
+  server quit while the VM was still running.
+- On hosts where NetworkManager runs, it adopted fcvm's bridges and could
+  drop their addresses, cutting every VM off from the host and the internet.
+  `net-up` now marks fcvm's interfaces unmanaged
+  (`/etc/NetworkManager/conf.d/fcvm.conf`), always puts the bridge
+  addresses back, and `fcvm status` reports a bridge without its address.
+- Hosts booted with `ipv6.disable=1` failed `net-up` and every jailed launch.
+- `fcvm import` of an untrusted image could write outside the work directory
+  through a symlink in a layer (the fallback unpack path on e2fsprogs older
+  than 1.47.1).
+- A restricted VM could start without its egress proxy when the proxy's
+  recorded pid belonged to something else after a reboot.
+- A web console job whose output had a very long line (progress bars) stayed
+  "running" forever.
+- `fcvm base` deleted the existing Ubuntu image before building its
+  replacement; it now builds under a temporary name like `import`. Its
+  AppArmor hint on failure never showed.
+- The installer's `--source DIR` copied `.git` and state directories from a
+  checkout; `--help` printed two lines of code.
+- `host-setup`, `setup` and `status` broke under `su`, cron or `sudo -u`
+  (`$USER` unset).
+
 ## 0.6.2 (2026-10-02)
 
 Provenance for the vendored web console files. Nothing to run after

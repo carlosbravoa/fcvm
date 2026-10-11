@@ -437,9 +437,11 @@ class Session:
 
 
 async def watch(pidfile):
-    """Exit once the VM's Firecracker process is gone (after it has started)."""
-    seen = False
-    for _ in range(3000):
+    """Exit once the VM's Firecracker process is gone (after it has started).
+    A VM that never shows up within 10 minutes isn't coming; one that has is
+    watched for as long as it runs."""
+    seen, waited = False, 0
+    while True:
         try:
             pid = int(open(pidfile).read().strip())
             if not os.path.exists(f"/proc/{pid}"):     # works for jailed VMs (another uid)
@@ -448,9 +450,10 @@ async def watch(pidfile):
         except (OSError, ValueError):
             if seen:
                 return
+            waited += 1
+            if waited > 3000:
+                return
         await asyncio.sleep(0.2 if not seen else 1)
-    if not seen:
-        return
 
 
 async def main():

@@ -472,9 +472,17 @@ write_policy() {   # vm ip
 # One egress proxy per user, shared by all restricted VMs, kept alive by a
 # restart loop: a crash (or killing the python process to reload it) costs at
 # most a second of refused connections. proxy.pid is the loop; kill it to stop.
+proxy_listening() { (exec 3<>"/dev/tcp/$NET_R_PREFIX.1/$EGRESS_PORT") 2>/dev/null; }
 ensure_proxy() {
-    local pidf=$VMS_DIR/.egress/proxy.pid
-    if [ -f "$pidf" ] && kill -0 "$(cat "$pidf")" 2>/dev/null; then return 0; fi
+    local pidf=$VMS_DIR/.egress/proxy.pid pid i
+    pid=$(cat "$pidf" 2>/dev/null || true)
+    # The recorded pid must still be our restart loop (after a reboot it may be
+    # anything), and the proxy must answer: a loop whose python just crashed
+    # is back within a second.
+    if [ -n "$pid" ] && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -qF egress-proxy; then
+        for ((i = 0; i < 30; i++)); do proxy_listening && return 0; sleep 0.1; done
+        kill "$pid" 2>/dev/null || true   # alive but never answering: replace it
+    fi
     mkdir -p "$VMS_DIR/.egress"
     (   # don't let the long-lived proxy inherit this VM's tap lock
         if [ -n "${TAP_FD:-}" ]; then exec {TAP_FD}>&-; fi
@@ -484,9 +492,8 @@ ensure_proxy() {
             </dev/null >>"$VMS_DIR/.egress/proxy.log" 2>&1
     ) &
     echo $! > "$pidf"
-    local i
     for ((i = 0; i < 20; i++)); do
-        (exec 3<>"/dev/tcp/$NET_R_PREFIX.1/$EGRESS_PORT") 2>/dev/null && return 0
+        proxy_listening && return 0
         sleep 0.1
     done
     cat "$VMS_DIR/.egress/proxy.log" >&2; die "egress proxy failed to start"

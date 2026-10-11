@@ -65,6 +65,29 @@ class Install(unittest.TestCase):
         self.assertEqual(self.fcvm("-V"), "fcvm 0.9.1")
         self.assertEqual(os.readlink(os.path.join(self.bin, "fcvm")), os.path.join(self.lib, "current/fcvm"))
 
+    def test_source_directory_installs_the_code_only(self):
+        """--source on a checkout that also holds state and .git must not copy
+        them: the install would then look like a git checkout with its own
+        stale state directory."""
+        src = release(self.t, "0.9.5")
+        os.makedirs(os.path.join(src, ".git"))
+        os.makedirs(os.path.join(src, "vms", "old"))
+        os.makedirs(os.path.join(src, "images"))
+        with open(os.path.join(src, "images", "x.json"), "w") as f:
+            f.write("{}")
+        self.run_("sh", os.path.join(ROOT, "install.sh"), "--source", src)
+        installed = os.path.join(self.lib, "0.9.5")
+        for d in (".git", "vms", "images"):
+            self.assertFalse(os.path.exists(os.path.join(installed, d)), d)
+        self.assertTrue(os.path.exists(os.path.join(installed, "lib", "common.sh")))
+        self.assertIn(f"state  {self.t}/data/fcvm", self.fcvm("version"))
+
+    def test_help_shows_only_the_header(self):
+        r = self.run_("sh", os.path.join(ROOT, "install.sh"), "--help")
+        self.assertIn("--source PATH", r.stdout)
+        self.assertNotIn("set -eu", r.stdout)
+        self.assertNotIn("REPO=", r.stdout)
+
     def test_upgrade_refuses_in_a_checkout(self):
         r = subprocess.run([os.path.join(ROOT, "fcvm"), "upgrade"], capture_output=True, text=True,
                            env={**os.environ, "FCVM_HOME": os.path.join(self.t, "h")})

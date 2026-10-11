@@ -122,7 +122,12 @@ else info "ubuntu base" "not built (optional: fcvm base)"; fi
 # --- services -------------------------------------------------------------------------
 head_ "Services"
 boot=$(systemctl is-enabled -q fcvm-net.service 2>/dev/null && echo "set up at boot (fcvm-net)" || echo "until reboot (fcvm net-up)")
-if ip link show "$NET_BRIDGE" &>/dev/null && ip link show "$NET_R_BRIDGE" &>/dev/null; then
+bridges_up() { ip link show "$NET_BRIDGE" &>/dev/null && ip link show "$NET_R_BRIDGE" &>/dev/null; }
+has_addr() { ip -4 -o addr show dev "$1" 2>/dev/null | grep -q " inet $2.1/"; }
+if bridges_up && { ! has_addr "$NET_BRIDGE" "$NET_PREFIX" || ! has_addr "$NET_R_BRIDGE" "$NET_R_PREFIX"; }; then
+    # seen with NetworkManager adopting the bridges: VMs can't reach the host
+    bad network "a bridge has lost its address ($NET_BRIDGE $NET_PREFIX.1, $NET_R_BRIDGE $NET_R_PREFIX.1)" "fcvm net-up (puts the addresses back and keeps NetworkManager off these interfaces)"
+elif bridges_up; then
     taps=$(ip -br link | grep -cE '^fc(r)?tap[0-9]+')
     iso=$(bridge -d link show dev "${NET_R_BRIDGE/fcbr1/fcrtap}0" 2>/dev/null | grep -o 'isolated on' || true)
     [ -n "$iso" ] || iso=$(bridge -d link show 2>/dev/null | grep -A2 fcrtap0 | grep -o 'isolated on' || true)

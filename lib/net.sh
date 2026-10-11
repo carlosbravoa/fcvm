@@ -35,19 +35,37 @@ ufw_active() { command -v ufw >/dev/null && sudo ufw status | grep -q '^Status: 
 DOCKER_RULES=("-i $NET_BRIDGE -j ACCEPT" "-o $NET_BRIDGE -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT")
 docker_chain() { command -v iptables >/dev/null && sudo iptables -n -L DOCKER-USER >/dev/null 2>&1; }
 
+# NetworkManager adopts bridges and taps it sees appear ("connected
+# (externally)") and can later drop their addresses, which cuts every VM off
+# from the host. Its config marks fcvm's interfaces unmanaged instead.
+NM_CONF=/etc/NetworkManager/conf.d/fcvm.conf
+nm_unmanage() {
+    [ -d /etc/NetworkManager ] || return 0
+    local want
+    want="# written by fcvm net-up: NetworkManager must leave fcvm's bridges and taps alone
+[keyfile]
+unmanaged-devices=interface-name:$NET_BRIDGE;interface-name:$NET_R_BRIDGE;interface-name:fctap*;interface-name:fcrtap*;interface-name:fcv*;interface-name:fcrv*"
+    [ "$(cat "$NM_CONF" 2>/dev/null)" = "$want" ] && return 0
+    printf '%s\n' "$want" | sudo tee "$NM_CONF" >/dev/null
+    sudo chmod 644 "$NM_CONF"
+    sudo nmcli general reload conf 2>/dev/null || true   # not running yet at boot: it reads the file when it starts
+    log "NetworkManager: told to leave fcvm's interfaces alone ($NM_CONF)"
+}
+
 bridge_up() {   # bridge prefix tap-prefix isolate
     local br=$1 prefix=$2 tp=$3 isolate=$4 i tap
     if ! ip link show "$br" &>/dev/null; then
         log "creating bridge $br ($prefix.1/24)"
         sudo ip link add "$br" type bridge
-        sudo ip addr add "$prefix.1/24" dev "$br"
     fi
-    sudo sysctl -q -w "net.ipv6.conf.$br.disable_ipv6=1"
+    sudo ip addr replace "$prefix.1/24" dev "$br"   # also puts back an address something removed
+    # -e: a host booted with ipv6.disable=1 has no such keys, and needs none
+    sudo sysctl -q -e -w "net.ipv6.conf.$br.disable_ipv6=1"
     sudo ip link set "$br" up
     for ((i = 0; i < NET_TAPS; i++)); do
         tap=$tp$i
         ip link show "$tap" &>/dev/null || sudo ip tuntap add "$tap" mode tap user "$owner"
-        sudo sysctl -q -w "net.ipv6.conf.$tap.disable_ipv6=1"
+        sudo sysctl -q -e -w "net.ipv6.conf.$tap.disable_ipv6=1"
         sudo ip link set "$tap" master "$br" up
         sudo bridge link set dev "$tap" isolated "$([ "$isolate" = 1 ] && echo on || echo off)"
     done
@@ -55,6 +73,7 @@ bridge_up() {   # bridge prefix tap-prefix isolate
 }
 
 up() {
+    nm_unmanage
     bridge_up "$NET_BRIDGE" "$NET_PREFIX" fctap "$NET_ISOLATE"
     bridge_up "$NET_R_BRIDGE" "$NET_R_PREFIX" fcrtap 1
 
@@ -155,6 +174,10 @@ down() {
     done
     sudo nft delete table ip fcvm 2>/dev/null || true
     sudo nft delete table bridge fcvm 2>/dev/null || true
+    if [ -f "$NM_CONF" ]; then
+        sudo rm -f "$NM_CONF"
+        sudo nmcli general reload conf 2>/dev/null || true
+    fi
     if ufw_active; then
         sudo ufw route delete allow in on "$NET_BRIDGE" >/dev/null || true
         sudo ufw delete allow in on "$NET_BRIDGE" >/dev/null || true

@@ -33,7 +33,14 @@ A cloud-console-like UI for this host:
   - for app images: run the image's command, stay idle for the shell, or
     run a custom command;
   - a restart policy, and the jailer (checked by default when installed);
+  - a lifetime (stop after, stop when idle for), secrets (into
+    `/run/secrets` and the environment, never on the disk), credential
+    forwarding (ssh-agent, git), and the package mirror for restricted
+    networks;
   - a template picker that fills in the form, and **Save as template**.
+- **On the instance page:** published ports added and removed live
+  (× and **publish…**), the memory balloon (take memory back from a
+  running VM), and the lifetime, secrets and forwarding in the details.
 - **Templates:** saved launch recipes, built-in and yours: launch, delete
   ([Templates](templates.md)).
 - **Images:** import from a registry or a local archive (a background job

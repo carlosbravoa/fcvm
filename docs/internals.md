@@ -313,6 +313,29 @@ fcvm builds the mount from parts the kernel already has:
 - It doesn't cache, so changes on either side are visible at once.
 - It exits with the VM.
 
+## Other services over vsock
+
+Host directories set the pattern: a server on the host listens at
+`vms/VM/vsock.sock_PORT` (inside the jail's chroot for jailed VMs), the
+guest connects to that vsock port, and the server lives as long as the VM
+(`share9p.watch`). Three more follow it:
+
+- **Secrets** (`lib/secrets.py`, port 9000): at boot `fc-init` connects
+  once and receives `NAME\0VALUE\0` pairs, which it writes into a tmpfs at
+  `/run/secrets` (for system images, `/run` is mounted as a tmpfs first,
+  so systemd keeps it) and adds to the environment of the app and of exec
+  sessions. Nothing reaches the writable layer.
+- **Credential forwarding** (`lib/forward.py`, ports 9001 and 9002): a
+  relay in the guest listens on `/run/fcvm/ssh-agent.sock` and joins each
+  client to the host's `SSH_AUTH_SOCK` through port 9001; `fc-init
+  --git-credential`, set as git's credential helper through `GIT_CONFIG_*`,
+  sends `get` requests to port 9002, where the host answers with `git
+  credential fill` and never stores anything.
+- **Image export** (`fc-init` export mode, not vsock but the same shape as
+  a squash): a helper VM mounts the image chain as a read-only overlay and
+  writes a GNU tar of it to an output disk, which the host turns into an
+  OCI layout (`lib/oci_export.py`), to save or push.
+
 ## Networking
 
 **Taps.**

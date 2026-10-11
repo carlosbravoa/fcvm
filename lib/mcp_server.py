@@ -17,6 +17,11 @@ import sys
 import templates
 
 FCVM = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fcvm")
+try:
+    with open(os.path.join(os.path.dirname(FCVM), "VERSION")) as _f:
+        VERSION = _f.read().strip()
+except OSError:
+    VERSION = "unknown"
 PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 OUTPUT_CAP = 20000
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -496,7 +501,7 @@ def handle(msg):
         want = params.get("protocolVersion")
         return {"protocolVersion": want if want in PROTOCOLS else PROTOCOLS[0],
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "fcvm", "version": "0.4"},
+                "serverInfo": {"name": "fcvm", "version": VERSION},
                 "instructions": INSTRUCTIONS}
     if method == "ping":
         return {}

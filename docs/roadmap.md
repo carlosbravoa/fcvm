@@ -28,20 +28,29 @@ Windows. fcvm needs KVM and never will.
   rootless). ✅ `fcvm snapshot` / `fcvm fork`: Firecracker memory snapshots,
   forked into running VMs in ~150 ms (about 1 s for jailed VMs, which get a
   fresh jail), each with its own disk, IP, MAC and hostname, and RNG
-  reseeding through VMGenID. Still open: diff snapshots
-  (only dirty pages) to cut the ~0.75 s/GB pause, and snapshots of VMs with
-  read-write volumes.
+  reseeding through VMGenID. ✅ (0.7.0) `fcvm export`/`push` for images and
+  `snapshot export`/`import` for snapshots, so prepared states move between
+  hosts; ✅ warm pools (`fcvm pool`) of pre-booted or pre-forked VMs,
+  claimed in milliseconds. Still open: diff snapshots (only dirty pages) to
+  cut the ~0.75 s/GB pause, and snapshots of VMs with read-write volumes.
 - **A3. Machine interface.** ✅ `--json` for `ls`/`images`, `fcvm inspect`,
   and ✅ an MCP server (`fcvm mcp`) that exposes sandbox tools to agents.
 - **A4. Egress control.** ✅ `--net none`, ✅ `--allow` allowlists enforced by
   a host-side proxy with an audit log, ✅ DNS from the host's upstream
-  resolvers. Still open: non-HTTP protocols in allowlists (e.g. SSH to
-  github.com), and TLS inspection, which is deliberately not done.
-- **A5. exec for agents.** ✅ `--timeout`, `-e KEY=VAL`, `-w DIR`.
+  resolvers, ✅ (0.7.0) a package mirror on the proxy (`--cache`) so
+  repeated installs don't leave the host. Still open: non-HTTP protocols in
+  allowlists (e.g. SSH to github.com; `--forward ssh-agent` covers the
+  common case through the host), and TLS inspection, which is deliberately
+  not done.
+- **A5. exec for agents.** ✅ `--timeout`, `-e KEY=VAL`, `-w DIR`; ✅ (0.7.0)
+  background jobs (`exec -d`, `fcvm jobs`), live ports (`publish`), secrets
+  (`--secret`), credential forwarding (`--forward`), lifetimes (`--ttl`,
+  `--idle-stop`), and client libraries for Python and Node over the API.
 - **A6. Provisioning.** ✅ `fcvm build` (Dockerfile subset, per-step cache,
-  single-layer results), ✅ local `docker save`/OCI imports, ✅ `fcvm squash`.
-  Still open: multi-stage builds, and a cloud-init style first-boot hook for
-  Ubuntu VMs.
+  single-layer results), ✅ local `docker save`/OCI imports, ✅ `fcvm squash`,
+  ✅ (0.7.0) project files (`fcvm.toml`, `fcvm up`/`down`). Still open:
+  multi-stage builds, and a cloud-init style first-boot hook for Ubuntu
+  VMs.
 - **A7. Concurrency.** ✅ 64 taps per network pool, and `--net none` VMs
   need none. Beyond ~240 VMs per pool, taps would have to be created on
   demand, which needs root.
@@ -294,8 +303,8 @@ Still open: a per-VM or per-user choice of keys (today: fcvm's key and your
 - ✅ `fc-init` boots from an initramfs instead of living in every image, so
   upgrading the init or agent no longer means rebuilding images.
 - ✅ A test suite and CI (see [CONTRIBUTING](../CONTRIBUTING.md)):
-  - `tests/run`: lint (with shellcheck and a docs link checker), 67 unit
-    tests, and 52 integration tests on real VMs, in about 3 minutes;
+  - `tests/run`: lint (with shellcheck and a docs link checker), 97 unit
+    tests, and 75 integration tests on real VMs, in about 5 minutes;
   - `tests/fresh-machine.sh`: install, setup, the suite and a real reboot on
     a fresh Ubuntu in Multipass;
   - GitHub Actions: lint and unit tests, and integration tests on a fresh
@@ -332,7 +341,10 @@ Still open: a per-VM or per-user choice of keys (today: fcvm's key and your
 ### Smaller items
 
 - Published ports are TCP only and don't preserve the client address. An
-  nftables DNAT mode in `net.sh` (root) would fix both.
+  nftables DNAT mode in `net.sh` (root) would fix both. (Adding and
+  removing them live is done, 0.7.0.)
+- ✅ (0.7.0) A memory balloon per VM (`fcvm balloon`), the first piece of
+  E6; the rest of E6 is still open.
 - ✅ `create --no-agent` (0.6.0), CLI only: a VM without the exec agent,
   for the rare case where nothing inside may accept commands. It says what
   you lose and asks first.

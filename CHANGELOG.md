@@ -4,7 +4,16 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
-## Unreleased
+## 0.7.0 (2026-10-11)
+
+A release for agents and for moving things around: sandboxes that end on
+their own, background commands, live ports, secrets and forwarded
+credentials, a package mirror, warm pools, export and push of images and
+snapshots, project files, and client libraries. After `fcvm upgrade`:
+- `fcvm service install`, so the supervisor applies lifetimes and fills
+  pools; `fcvm jail-setup`, so jailed VMs get a balloon device;
+- running VMs keep working; secrets, forwarding and the mirror take effect
+  at their next start (the initramfs is rebuilt then).
 
 New:
 

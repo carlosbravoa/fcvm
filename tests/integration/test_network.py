@@ -2,12 +2,13 @@
 other, anti-spoofing, egress allowlists, --net none. Some tests reach
 example.com, so they need internet access."""
 import http.server
+import os
 import socket
 import threading
 import time
 import unittest
 
-from fcvmtest import VMTestCase, fcvm, setting, free_port, strip_ansi
+from fcvmtest import VMTestCase, fcvm, setting, free_port, strip_ansi, STATE
 
 
 class Ports(VMTestCase):
@@ -114,6 +115,9 @@ class Egress(VMTestCase):
         env = self.sh(vm, 'echo "$PIP_INDEX_URL $PIP_TRUSTED_HOST $npm_config_registry"').stdout.split()
         self.assertEqual(env[0], f"http://{setting('NET_R_PREFIX')}.1:{setting('EGRESS_PORT')}/cache/pypi.org/simple/")
         self.assertEqual(env[2], f"http://{setting('NET_R_PREFIX')}.1:{setting('EGRESS_PORT')}/cache/registry.npmjs.org/")
+        for dp, _, fns in os.walk(os.path.join(STATE, "cache", "egress")):   # an earlier run may have filled it
+            for fn in fns:
+                os.unlink(os.path.join(dp, fn))
         self.sh(vm, "pip download -q --no-deps -d /tmp/dl six", timeout=300)
         log = strip_ansi(fcvm("egress", vm, "-n", "50").stdout)
         self.assertIn("CACHE-MISS", log)

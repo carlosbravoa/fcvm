@@ -146,6 +146,7 @@ def cache_paths(host, port, path):
 def fetch(url, headers):
     """Upstream GET in a thread: (status, headers dict, path of the body) or raises."""
     req = urllib.request.Request(url, headers={k: v for k, v in headers.items() if k.lower() in PASS_HEADERS and k.lower() != "accept-encoding"})
+    os.makedirs(CACHE_DIR, exist_ok=True)       # `fcvm prune` may have removed it while we run
     tmp = tempfile.NamedTemporaryFile(dir=CACHE_DIR, prefix=".fetch-", delete=False)
     try:
         with urllib.request.urlopen(req, timeout=120) as r:

@@ -12,3 +12,7 @@ __pycache__/
 /builds/
 /metrics/
 /templates/
+/internal/
+sdk/*/*.egg-info/
+sdk/*/build/
+sdk/*/dist/

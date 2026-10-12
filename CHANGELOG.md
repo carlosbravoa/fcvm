@@ -4,6 +4,13 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## Unreleased
+
+- **Packages.** The clients are on PyPI and npm as `fcvm` (`pip install
+  fcvm`, `npm install fcvm`). `fcvm-mcp` on PyPI launches the installed
+  fcvm's MCP server (`uvx fcvm-mcp`), and lists fcvm in the MCP Registry.
+  `tests/run lint` checks that every package carries `VERSION`.
+
 ## 0.7.0 (2026-10-11)
 
 A release for agents and for moving things around: sandboxes that end on

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.carlosbravoa/fcvm",
+  "title": "fcvm",
+  "description": "Disposable Firecracker microVM sandboxes for agents: run code, snapshot, fork. Needs Linux with KVM.",
+  "websiteUrl": "https://github.com/carlosbravoa/fcvm/blob/main/docs/agents.md",
+  "repository": {
+    "url": "https://github.com/carlosbravoa/fcvm",
+    "source": "github",
+    "subfolder": "sdk/mcp"
+  },
+  "version": "0.7.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "fcvm-mcp",
+      "version": "0.7.0",
+      "runtimeHint": "uvx",
+      "transport": {"type": "stdio"},
+      "environmentVariables": [
+        {"name": "FCVM_MCP_NETWORK", "description": "Pin the network policy for every sandbox: none, or an allowlist such as @pypi,@github", "isRequired": false},
+        {"name": "FCVM_MCP_TEMPLATE", "description": "Template used when the agent names neither an image nor a template, e.g. python-sandbox", "isRequired": false},
+        {"name": "FCVM_MCP_TTL", "description": "Stop sandboxes this long after boot unless the agent sets a lifetime, e.g. 4h", "isRequired": false},
+        {"name": "FCVM_MCP_IDLE_STOP", "description": "Stop sandboxes that saw no exec or file operation for this long, e.g. 30m", "isRequired": false},
+        {"name": "FCVM_MCP_SECRETS", "description": "Names of environment variables passed into every sandbox as secrets, e.g. GITHUB_TOKEN", "isRequired": false},
+        {"name": "FCVM_MCP_FORWARD", "description": "Host credentials relayed into every sandbox: ssh-agent, git", "isRequired": false},
+        {"name": "FCVM_MCP_CACHE", "description": "1: restricted sandboxes fetch pip and npm packages through the host's mirror", "isRequired": false},
+        {"name": "FCVM_MCP_JAIL", "description": "0: don't run sandboxes under the Firecracker jailer even when it is set up", "isRequired": false},
+        {"name": "FCVM_BIN", "description": "Path of the fcvm command, when it isn't on PATH, in ~/.local/bin or in /usr/local/bin", "isRequired": false}
+      ]
+    }
+  ]
+}

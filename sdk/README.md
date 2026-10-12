@@ -9,7 +9,8 @@ written by `fcvm serve` or the fcvm service), or take `FCVM_URL` and
 ## Python
 
 ```sh
-pip install "git+https://github.com/carlosbravoa/fcvm#subdirectory=sdk/python"
+pip install fcvm
+# or from the repository: pip install "git+https://github.com/carlosbravoa/fcvm#subdirectory=sdk/python"
 # or just copy sdk/python/fcvm.py next to your code: it's one file, standard library only
 ```
 
@@ -50,7 +51,7 @@ message.
 ## Node / TypeScript
 
 ```sh
-npm install github:carlosbravoa/fcvm#main:sdk/typescript   # or copy fcvm.mjs (+ fcvm.d.ts)
+npm install fcvm   # or copy fcvm.mjs (+ fcvm.d.ts)
 ```
 
 ```js

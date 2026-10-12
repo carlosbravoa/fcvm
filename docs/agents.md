@@ -29,6 +29,17 @@ the settings below are environment variables. For an installed fcvm, that
 path goes through the `current` link, so upgrades carry the registration
 along.
 
+Clients that install servers by package name, or that start them with a
+minimal `PATH`, can use the `fcvm-mcp` launcher from PyPI instead. It finds
+the installed `fcvm` (on `PATH`, in `~/.local/bin` or `/usr/local/bin`, or
+at `FCVM_BIN`) and runs `fcvm mcp`. It is also how fcvm is listed in the
+[MCP Registry](https://registry.modelcontextprotocol.io/), as
+`io.github.carlosbravoa/fcvm`.
+
+```sh
+claude mcp add fcvm -- uvx fcvm-mcp
+```
+
 The agent needs the images it will use. It can import them itself
 (`pull_image`), or you can import them beforehand.
 

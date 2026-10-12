@@ -2,12 +2,40 @@
   "name": "fcvm",
   "version": "0.7.0",
   "description": "A client for the fcvm HTTP API: Firecracker microVM sandboxes from Node",
+  "keywords": [
+    "firecracker",
+    "microvm",
+    "sandbox",
+    "ai-agents",
+    "virtualization",
+    "isolation"
+  ],
+  "homepage": "https://github.com/carlosbravoa/fcvm",
+  "bugs": "https://github.com/carlosbravoa/fcvm/issues",
+  "author": "Carlos Bravo",
   "type": "module",
   "main": "fcvm.mjs",
-  "exports": "./fcvm.mjs",
+  "exports": {
+    "types": "./fcvm.d.ts",
+    "default": "./fcvm.mjs"
+  },
   "types": "fcvm.d.ts",
-  "files": ["fcvm.mjs", "fcvm.d.ts"],
-  "engines": {"node": ">=18"},
+  "files": [
+    "fcvm.mjs",
+    "fcvm.d.ts",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "license": "Apache-2.0",
-  "repository": {"type": "git", "url": "https://github.com/carlosbravoa/fcvm", "directory": "sdk/typescript"}
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/carlosbravoa/fcvm.git",
+    "directory": "sdk/typescript"
+  },
+  "scripts": {
+    "prepack": "cp ../../LICENSE ../../NOTICE .",
+    "postpack": "rm -f LICENSE NOTICE"
+  }
 }

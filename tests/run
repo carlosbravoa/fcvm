@@ -38,7 +38,7 @@ lint() {
     python3 - <<'EOF' || rc=1
 import pathlib, sys
 bad = 0
-for p in sorted(pathlib.Path(".").glob("lib/**/*.py")) + sorted(pathlib.Path("tests").glob("**/*.py")):
+for p in sorted(pathlib.Path(".").glob("lib/**/*.py")) + sorted(pathlib.Path("tests").glob("**/*.py")) + sorted(pathlib.Path("sdk").glob("**/*.py")):
     try:
         compile(p.read_text(), str(p), "exec")      # syntax only; writes no .pyc
     except SyntaxError as e:
@@ -53,6 +53,7 @@ EOF
         echo "(shellcheck not installed; skipped)"
     fi
     python3 tests/tools/check_links.py || rc=1
+    python3 tests/tools/check_versions.py || rc=1
     [ $rc = 0 ] && echo "lint: ok"
     return $rc
 }

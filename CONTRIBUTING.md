@@ -94,10 +94,32 @@ what `tests/fresh-machine.sh` covers. Run it before a release.
 
 1. `tests/run lint unit integration` and `tests/fresh-machine.sh` pass, and
    CI is green.
-2. Bump `VERSION`, and move the changelog's "Unreleased" notes under the new
-   version.
+2. Bump `VERSION`, and the same version in the packages under `sdk/`
+   (`tests/run lint` lists any it missed). Move the changelog's
+   "Unreleased" notes under the new version.
 3. Commit, tag `vX.Y.Z` (annotated), push the commit and the tag. The
    installer and `fcvm upgrade` pick up the highest `vX.Y.Z` tag.
+4. Publish the packages, below.
+
+### Publishing the packages
+
+Three packages carry fcvm's version: the Python client `fcvm` and the MCP
+launcher `fcvm-mcp` on PyPI, and the Node client `fcvm` on npm. The launcher
+is listed in the [MCP Registry](https://registry.modelcontextprotocol.io/)
+as `io.github.carlosbravoa/fcvm`, from `sdk/mcp/server.json`.
+
+```sh
+python3 -m venv /tmp/pub && /tmp/pub/bin/pip install build twine
+for d in sdk/python sdk/mcp; do /tmp/pub/bin/python -m build -o /tmp/pub/dist "$d"; done
+/tmp/pub/bin/twine upload /tmp/pub/dist/*          # a PyPI API token
+(cd sdk/typescript && npm publish)                  # after npm login
+(cd sdk/mcp && mcp-publisher login github && mcp-publisher publish)
+```
+
+The registry checks that the PyPI package is ours through the `mcp-name`
+comment in `sdk/mcp/README.md`, so publish to PyPI first.
+`mcp-publisher` comes from the
+[registry's releases](https://github.com/modelcontextprotocol/registry/releases).
 
 ## Style
 

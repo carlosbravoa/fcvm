@@ -361,7 +361,9 @@ demand:
 - it identifies the VM by source address, which anti-spoofing makes
   trustworthy;
 - it checks the requested host against `vms/.egress/<ip>.json`, re-read on
-  every request, so `fcvm egress --allow` applies at once;
+  every request, so `fcvm egress --allow` applies at once; the file also
+  names the VM's tenant, which picks the mirror's cache directory
+  (`cache/egress/tenants/NAME`);
 - it logs each decision to `vms/<vm>/egress.log`.
 
 ## Snapshots and fork

@@ -22,7 +22,7 @@ this page and how to verify them.
 |---|---|---|
 | full | (default) | the internet and your LAN, through NAT on `fcbr0`, as `172.30.0.(10+i)` |
 | none | `--net none` | nothing: the VM has no network card |
-| restricted | `--allow HOST,*.DOMAIN,HOST:PORT,@PRESET` | only an egress proxy that applies the VM's allowlist; on `fcbr1`, as `172.30.1.(10+i)` |
+| restricted | `--allow HOST,*.DOMAIN,HOST:PORT,@PRESET`, or `--net restricted` for an empty allowlist | only an egress proxy that applies the VM's allowlist; on `fcbr1`, as `172.30.1.(10+i)` |
 
 In every mode, `exec`, `shell`, `cp`, the console and host directories keep
 working. They use vsock, not the network.
@@ -114,6 +114,10 @@ adds a mirror on the proxy, `http://172.30.1.1:3128/cache/HOST/PATH`:
   server marks immutable or cacheable for a day) in `cache/egress/` on the
   host; index pages and package metadata are fetched fresh, with their
   links rewritten to the mirror, so the files behind them go through it too;
+- a VM with a [tenant](vms.md#tenants-and-quotas) uses its tenant's own
+  cache, `cache/egress/tenants/NAME/`: what one tenant installs is never a
+  hit for another, so it neither reveals what the other fetched nor serves
+  it a file it didn't fetch itself. VMs without a tenant share the host's;
 - `fcvm egress VM` shows `CACHE-HIT` and `CACHE-MISS` decisions, and `fcvm
   prune` empties the cache.
 

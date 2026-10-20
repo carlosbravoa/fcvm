@@ -140,9 +140,16 @@ def rewrite(body, ctype, patterns, mirror):
     return rx.sub(lambda m: mirror.encode() + b"/" + m.group(1) + (m.group(2) or b"") + b"/", body)
 
 
-def cache_paths(host, port, path):
+TENANT_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+
+
+def cache_paths(host, port, path, tenant=None):
+    """Where an artifact lives: cache/egress/XX/KEY for VMs without a tenant,
+    cache/egress/tenants/NAME/XX/KEY for a tenant's VMs, so what one tenant
+    installed never shows another what to expect (or serves it a file it
+    didn't fetch). The policy carries the VM's tenant."""
     key = hashlib.sha256(f"{host}:{port}{path}".encode()).hexdigest()
-    base = os.path.join(CACHE_DIR, key[:2], key)
+    base = os.path.join(CACHE_DIR, *(("tenants", tenant) if tenant else ()), key[:2], key)
     return base + ".meta", base + ".data"
 
 
@@ -205,7 +212,9 @@ async def mirror_request(writer, pol, headers, target, listen):
     mirror = f"http://{listen}/cache"
     # The host goes into a URL we fetch: only a plain name may pass, so that
     # "evil.com?x.pypi.org" (allowed by its suffix, fetched from evil.com) cannot.
-    ok = bool(pol) and bool(HOST_RE.match(host)) and allowed(host, port, pol.get("allow", []))
+    tenant = (pol or {}).get("tenant") or None
+    ok = bool(pol) and bool(HOST_RE.match(host)) and allowed(host, port, pol.get("allow", [])) \
+        and (tenant is None or bool(TENANT_RE.match(tenant)))
     entry = {"vm": pol and pol.get("vm"), "method": "GET", "host": host, "port": port, "path": path[:120]}
     if not ok:
         record(pol, {**entry, "decision": "deny"})
@@ -214,7 +223,7 @@ async def mirror_request(writer, pol, headers, target, listen):
                      b"Content-Length: %d\r\n\r\n" % len(body) + body)
         await writer.drain()
         return
-    meta_path, data_path = cache_paths(host, port, path)
+    meta_path, data_path = cache_paths(host, port, path, tenant)
     if os.path.exists(meta_path) and os.path.exists(data_path):
         with open(meta_path) as f:
             meta = json.load(f)

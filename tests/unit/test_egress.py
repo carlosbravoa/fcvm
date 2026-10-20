@@ -130,6 +130,66 @@ class Mirror(unittest.TestCase):
         decisions = [json.loads(l)["decision"] for l in open(log)]
         self.assertEqual(decisions, ["fetch", "cache-miss", "cache-hit", "deny", "fetch", "deny", "deny", "deny"])
         self.assertTrue(any(f.endswith(".data") for _, _, fs in os.walk(cache_dir) for f in fs))
+        self.assertFalse(os.path.exists(os.path.join(cache_dir, "tenants")))
+
+    def test_each_tenant_has_its_own_cache(self):
+        ep.CACHE_DIR = "/c"
+        try:
+            shared = ep.cache_paths("files.pythonhosted.org", 443, "/packages/six.whl")
+            acme = ep.cache_paths("files.pythonhosted.org", 443, "/packages/six.whl", "acme")
+            beta = ep.cache_paths("files.pythonhosted.org", 443, "/packages/six.whl", "beta")
+        finally:
+            ep.CACHE_DIR = None
+        self.assertTrue(shared[1].startswith("/c/") and not shared[1].startswith("/c/tenants/"))
+        self.assertTrue(acme[1].startswith("/c/tenants/acme/"))
+        self.assertTrue(beta[1].startswith("/c/tenants/beta/"))
+        self.assertEqual(os.path.basename(shared[1]), os.path.basename(acme[1]))   # same artifact, different tenant
+        # end to end: a wheel acme's VM fetched isn't a hit for beta's, and lands under acme's directory
+        d = tempfile.mkdtemp(prefix="fcvm-mirror-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        policy_dir, cache_dir = os.path.join(d, "policy"), os.path.join(d, "cache")
+        os.makedirs(policy_dir)
+        os.makedirs(cache_dir)
+        for ip, tenant in (("127.0.0.1", "acme"), ("127.0.0.2", "beta")):
+            with open(os.path.join(policy_dir, f"{ip}.json"), "w") as f:
+                json.dump({"vm": tenant + "-vm", "allow": ["files.pythonhosted.org"], "log": os.path.join(d, tenant + ".log"), "tenant": tenant}, f)
+        with open(os.path.join(policy_dir, "127.0.0.3.json"), "w") as f:
+            json.dump({"vm": "odd", "allow": ["files.pythonhosted.org"], "log": os.path.join(d, "odd.log"), "tenant": "../x"}, f)
+        fetched = []
+
+        def fake_fetch(url, headers, patterns=()):
+            fetched.append(url)
+            path = os.path.join(d, "body")
+            with open(path, "wb") as f:
+                f.write(b"WHEEL-BYTES")
+            return 200, {"Content-Type": "application/octet-stream"}, path
+
+        def get(port, src):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=10, source_address=(src, 0))
+            c.request("GET", "/cache/files.pythonhosted.org/packages/six.whl")
+            r = c.getresponse()
+            return r.status, r.read()
+
+        async def go():
+            ep.CACHE_DIR = cache_dir
+            saved, ep.fetch = ep.fetch, fake_fetch
+            try:
+                srv = await asyncio.start_server(lambda r, w: ep.handle(r, w, policy_dir, "127.0.0.1:0"), "127.0.0.1", 0)
+                port = srv.sockets[0].getsockname()[1]
+                async with srv:
+                    loop = asyncio.get_running_loop()
+                    return [await loop.run_in_executor(None, get, port, src) for src in ("127.0.0.1", "127.0.0.2", "127.0.0.1", "127.0.0.3")]
+            finally:
+                ep.fetch = saved
+                ep.CACHE_DIR = None
+        acme1, beta1, acme2, odd = asyncio.run(go())
+        self.assertEqual([r[0] for r in (acme1, beta1, acme2)], [200, 200, 200])
+        self.assertEqual(len(fetched), 2)                                          # once per tenant
+        self.assertEqual(odd[0], 403)                                              # a tenant that isn't a name: refused
+        self.assertEqual([json.loads(l)["decision"] for l in open(os.path.join(d, "acme.log"))], ["cache-miss", "cache-hit"])
+        self.assertEqual([json.loads(l)["decision"] for l in open(os.path.join(d, "beta.log"))], ["cache-miss"])
+        self.assertEqual(sorted(os.listdir(os.path.join(cache_dir, "tenants"))), ["acme", "beta"])
+        self.assertFalse([n for n in os.listdir(cache_dir) if n != "tenants" and not n.startswith(".")])
 
 
 class Allowed(unittest.TestCase):

@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 
-from fcvmtest import VMTestCase, fcvm, setting, free_port, strip_ansi, STATE
+from fcvmtest import VMTestCase, fcvm, setting, free_port, strip_ansi, unique, STATE
 
 
 class Ports(VMTestCase):
@@ -126,6 +126,16 @@ class Egress(VMTestCase):
         log = strip_ansi(fcvm("egress", vm, "-n", "50").stdout)
         self.assertIn("CACHE-HIT", log)
         self.assertIn("six", self.sh(vm, "ls /tmp/dl").stdout)
+        # a tenant's VM has its own cache: the wheel the host's VM fetched isn't a hit for it
+        tenant = unique("tenant")
+        tvm = self.vm("--allow", "@pypi", "--cache", "--tenant", tenant, image="python-3.13-slim", start=True)
+        self.sh(tvm, "pip download -q --no-deps -d /tmp/dl six", timeout=300)
+        log = strip_ansi(fcvm("egress", tvm, "-n", "50").stdout)
+        self.assertIn("CACHE-MISS", log)
+        self.assertNotIn("CACHE-HIT", log)
+        self.assertTrue(os.path.isdir(os.path.join(STATE, "cache", "egress", "tenants", tenant)))
+        self.sh(tvm, "rm -rf /tmp/dl && pip download -q --no-deps -d /tmp/dl six", timeout=300)
+        self.assertIn("CACHE-HIT", strip_ansi(fcvm("egress", tvm, "-n", "50").stdout))
 
     def test_no_network(self):
         vm = self.vm("--net", "none")

@@ -625,12 +625,13 @@ expand_allow() {
 }
 
 # Policy file the egress proxy reads for the VM at $IP (re-read per request).
+# The VM's tenant picks its mirror cache (cache/egress/tenants/NAME).
 write_policy() {   # vm ip
     local dir; dir=$(vm_dir "$1")
     mkdir -p "$VMS_DIR/.egress"
-    jq -n --arg vm "$1" --arg log "$dir/egress.log" \
+    jq -n --arg vm "$1" --arg log "$dir/egress.log" --arg t "$(vm_tenant "$1")" \
         --argjson allow "$(jq -n '$ARGS.positional' --args $(expand_allow $(jq -r '.net.allow[]?' "$dir/vm.json")))" \
-        '{vm: $vm, allow: $allow, log: $log}' > "$VMS_DIR/.egress/$2.json.tmp"
+        '{vm: $vm, allow: $allow, log: $log} + (if $t == "" then {} else {tenant: $t} end)' > "$VMS_DIR/.egress/$2.json.tmp"
     mv "$VMS_DIR/.egress/$2.json.tmp" "$VMS_DIR/.egress/$2.json"
 }
 
@@ -640,7 +641,8 @@ write_policy() {   # vm ip
 proxy_listening() { (exec 3<>"/dev/tcp/$NET_R_PREFIX.1/$EGRESS_PORT") 2>/dev/null; }
 ensure_proxy() {
     local pidf=$VMS_DIR/.egress/proxy.pid pid i
-    local want="$NET_R_PREFIX.1:$EGRESS_PORT $CACHE_DIR/egress"   # a proxy started with other settings is replaced
+    # a proxy started with other settings, or from older code (an upgrade), is replaced
+    local want="$NET_R_PREFIX.1:$EGRESS_PORT $CACHE_DIR/egress $(stat -c %Y "$FCVM_ROOT/lib/egress_proxy.py")"
     pid=$(cat "$pidf" 2>/dev/null || true)
     # The recorded pid must still be our restart loop (after a reboot it may be
     # anything), and the proxy must answer: a loop whose python just crashed

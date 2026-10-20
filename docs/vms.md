@@ -364,6 +364,8 @@ fcvm tenant show acme                                # quota, allocated, vms, im
   `snapshot ls` and `volume ls` show the tenant and take `--tenant`;
   `tenant show` lists what a tenant owns. Removing an object (`rmi`,
   `snapshot rm`, `volume rm`) needs no tenant: that's the host's call.
+  The [package mirror](networking.md#the-package-mirror) is per tenant
+  too: a tenant's VMs fill and read their own cache.
 - **Allocated** is what a tenant's running VMs take: their vCPUs, memory
   and count, plus VMs admitted in the last two minutes that haven't
   booted yet; stopped VMs take none of those. Disk is different: every VM

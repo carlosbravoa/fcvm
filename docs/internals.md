@@ -551,6 +551,6 @@ lib/web/static/         web console frontend (plain HTML/CSS/JS, vendored xterm.
 init/fc-init.c          init for every VM (initramfs): root assembly, PID 1, exec agent
 kernel/microvm-*.config kernel fragment
 docs/                   this documentation
-tests/                  tests/run (lint, unit, integration), fresh-machine.sh; see CONTRIBUTING.md
+tests/                  tests/run (lint, unit, integration), fresh-machine.sh, fresh-ec2.sh; see CONTRIBUTING.md
 .github/workflows/      CI
 ```

@@ -40,6 +40,7 @@ CLI also names the failure's **code**, so they can tell "no such VM" from
 | `pool_empty` | 409 | the pool has no ready VM right now |
 | `no_network_slot` | 503 | no free tap on the bridge; the host is at its VM limit for that network |
 | `jail_unavailable` | 503 | the VM is jailed but `fcvm-jaild` isn't running |
+| `cordoned` | 503 | the host is [cordoned](vms.md#lifetimes---ttl-and---idle-stop): no new VMs until `fcvm uncordon` |
 | `timeout` | 504 | the API's call to the CLI took too long (the operation may still complete) |
 | `invalid` | 400 | the request is malformed: an unknown option, a bad name or spec, a missing argument |
 | `error` | 400 | any other failure; the message says what went wrong |

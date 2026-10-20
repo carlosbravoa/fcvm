@@ -59,10 +59,12 @@ VMs:
                              --forward ssh-agent,git (relay your ssh-agent and git credentials
                              into the VM; it uses them without holding them)
                              --label KEY=VALUE (tag the VM; ls --label filters by them)
+                             --lease UNTIL (a Unix or ISO 8601 time, or 2h from now: the VM is
+                             stopped and removed once it passes, unless renewed with update)
                              --if-same-spec (succeed if the VM exists with the same spec)
   create VM --template NAME [opts] [-- CMD...]
                              create from a saved template; your options override its
-  start [-a] VM              boot a VM in the background; -a attaches its console
+  start [-a] [--lease UNTIL] VM  boot a VM in the background; -a attaches its console
   run IMAGE [-d] [opts] [-- CMD...]
                              throwaway VM, deleted when it stops. App images: attached
                              like docker run (exit code passed through; Ctrl-] detaches).
@@ -97,10 +99,10 @@ VMs:
   snapshot ls [--json] | rm NAME
   snapshot export NAME FILE.tar | import FILE.tar [NAME]
                              move a snapshot to another host (same images and Firecracker needed)
-  fork SNAPSHOT [NAME] [-n N] [--label K=V]
+  fork SNAPSHOT [NAME] [-n N] [--label K=V] [--lease UNTIL]
                              new running VM(s) from a snapshot in ~150 ms, with their own
                              disk, IP, MAC and hostname (processes keep running)
-  update VM [--restart POLICY] [--ttl D|none] [--idle-stop D|none] [--secret SPEC] [--unset-secret NAME] [--forward LIST|none] [--label K=V] [--unset-label K]
+  update VM [--restart POLICY] [--ttl D|none] [--idle-stop D|none] [--secret SPEC] [--unset-secret NAME] [--forward LIST|none] [--label K=V] [--unset-label K] [--lease UNTIL|none]
                              change a VM's restart policy, lifetime, secrets or forwarding
   up [-f FILE] [VM...]       the VMs of a project file (fcvm.toml here or above): create what's
                              missing, start what's stopped. down: stop and remove them
@@ -118,6 +120,8 @@ VMs:
                              deleted, ...), oldest first; -f follows; --since -20: the last 20
   ops [ID] [-f] [--json]     operations: slow commands (import, build, export, push, snapshot,
                              commit) run detached with --op; their state and output are kept
+  cordon [REASON] | uncordon refuse new VMs (create, fork, pool claims and refills) until
+                             uncordoned; running VMs and restart policies aren't affected
   ls [--all] [--json] [--label K=V]  list VMs (--all: include build VMs; --label: only those tagged so)
   rm VM                      delete a VM
   rmi IMAGE                  delete an image
@@ -162,14 +166,14 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|ssh-config|_ssh-proxy|exec|shell|ls|rm|inspect|commit|rmi|squash|export|push|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|balloon|pool|update|template|_reap|_shutdown|_event)
+    images|create|start|run|stop|console|logs|ssh|ssh-config|_ssh-proxy|exec|shell|ls|rm|inspect|commit|rmi|squash|export|push|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|balloon|pool|update|template|_reap|_shutdown|_event|cordon|uncordon)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     up|down)            exec python3 "$FCVM_ROOT/lib/project.py" "$cmd" "$@" ;;
     events)             exec python3 "$FCVM_ROOT/lib/events.py" "$@" ;;
     ops)                exec python3 "$FCVM_ROOT/lib/ops.py" "$@" ;;
     project)            exec python3 "$FCVM_ROOT/lib/project.py" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
-    serve)              exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;
+    serve)              LEASE_GRACE=$LEASE_GRACE exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;
     _home)              echo "$FCVM_HOME" ;;   # for the client libraries: where vms/.serve.json is
     help|-h|--help)     usage ;;
     *)                  usage; exit 1 ;;

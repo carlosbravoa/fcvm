@@ -82,7 +82,7 @@ ERROR_STATUS = {"vm_not_found": 404, "image_not_found": 404, "snapshot_not_found
                 "vm_exists": 409, "image_exists": 409, "snapshot_exists": 409, "volume_exists": 409,
                 "vm_running": 409, "vm_not_running": 409, "vm_busy": 409, "in_use": 409, "no_agent": 409,
                 "no_network": 409, "pool_empty": 409,
-                "no_network_slot": 503, "jail_unavailable": 503}
+                "no_network_slot": 503, "jail_unavailable": 503, "cordoned": 503}
 ERROR_LINE = re.compile(r"^fcvm-error: ([a-z_]+)$", re.M)
 
 
@@ -388,6 +388,15 @@ def secret_env(d):
     return secrets
 
 
+def lease_arg(v):
+    """A lease end for `--lease`: a number (Unix time), or a string the CLI parses."""
+    if isinstance(v, (int, float)):
+        return str(int(v))
+    if isinstance(v, str) and re.fullmatch(r"[0-9]+[smhd]?|[0-9T:.+-]+Z?", v.strip()):
+        return v.strip()
+    raise HTTPError(400, "lease must be a Unix time, an ISO 8601 time, or a duration such as 2h")
+
+
 def labels_of(d, key="labels"):
     """The request's labels ({KEY: VALUE}), checked as `fcvm create --label` checks them."""
     labels = d.get(key) or {}
@@ -671,6 +680,17 @@ class App:
         match (method, parts[0], len(parts)):
             case ("GET", "host", 1):
                 return await self.host_info()
+            case ("POST", "host", 2) if parts[1] in ("cordon", "uncordon"):
+                await fcvm_ok(parts[1], *([str(d["reason"])] if parts[1] == "cordon" and d.get("reason") else []))
+                return {"cordoned": read(os.path.join(VMS, ".node", "cordoned")).strip() or None}
+            case ("POST", "leases", 2) if parts[1] == "renew":
+                label = d.get("label") or ""
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]{0,62}=.*", label) or not d.get("until"):
+                    raise HTTPError(400, "give label (KEY=VALUE) and until (a Unix time, an ISO 8601 time, or a duration)")
+                names = [v["name"] for v in await fcvm_json("ls", "--json", "--label", label)]
+                for n in names:
+                    await fcvm_ok("update", n, "--lease", lease_arg(d["until"]))
+                return {"renewed": names}
             case ("GET", "vms", 1):
                 return [{**v, "supervisor": self.supervisor.status(v["name"])} for v in await fcvm_json("ls", "--json")]
             case ("GET", "vms", 2):
@@ -751,6 +771,8 @@ class App:
                 count = int(d.get("count") or 1)
                 args = ["fork", name] + ([d["name"]] if d.get("name") else []) + ["-n", count]
                 args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")]
+                if d.get("lease"):
+                    args += ["--lease", lease_arg(d["lease"])]
                 out, err = await fcvm_ok(*args, timeout=60 + 30 * count)
                 return {"log": err}
             case ("DELETE", "snapshots", 2):
@@ -787,6 +809,8 @@ class App:
                     if d.get(opt):
                         args += [f"--{opt.replace('_', '-')}", str(d[opt]).strip()]
                 args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")]
+                if d.get("lease"):
+                    args += ["--lease", lease_arg(d["lease"])]
                 out, _ = await fcvm_ok(*args)
                 return await fcvm_json("inspect", out.strip())
             case ("GET", "jobs", 1):
@@ -1037,6 +1061,7 @@ class App:
         return {
             "hostname": os.uname().nodename, "cpus": os.cpu_count(), "load": [float(x) for x in load],
             "user": self.user, "version": self.version,
+            "cordoned": read(os.path.join(VMS, ".node", "cordoned")).strip() or None,
             "kernel": os.path.basename(os.path.realpath(os.path.join(STATE, "kernels", "vmlinux"))),
             "disk_total": st.f_blocks * st.f_frsize, "disk_free": st.f_bavail * st.f_frsize,
             "taps_full": taps("fctap"), "taps_restricted": taps("fcrtap"),
@@ -1096,6 +1121,8 @@ class App:
         if forward_list(d):
             args += ["--forward", ",".join(forward_list(d))]
         args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")]
+        if d.get("lease"):
+            args += ["--lease", lease_arg(d["lease"])]
         if d.get("if_same_spec"):
             args.append("--if-same-spec")
         if itype == "app" and d.get("entrypoint") is not None:
@@ -1156,7 +1183,7 @@ class App:
 
     async def vm_action(self, name, action, d):
         if action == "start":
-            await fcvm_ok("start", name, timeout=60)
+            await fcvm_ok("start", name, *(["--lease", lease_arg(d["lease"])] if d.get("lease") else []), timeout=60)
         elif action == "stop":
             await fcvm_ok("stop", name, timeout=60)
         elif action == "restart":
@@ -1186,6 +1213,8 @@ class App:
                 args += ["--forward", ",".join(forward_list(d)) or "none"]
             args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")]
             args += [a for k in d.get("unset_labels") or [] for a in ("--unset-label", str(k))]
+            if "lease" in d:
+                args += ["--lease", lease_arg(d["lease"]) if d["lease"] else "none"]
             if not args:
                 raise HTTPError(400, "nothing to update: give restart, ttl, idle_stop, secrets, unset_secrets, forward, labels or unset_labels")
             await fcvm_ok("update", name, *args, env=secrets)

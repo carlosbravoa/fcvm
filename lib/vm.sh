@@ -202,15 +202,6 @@ EOF2
 RESTART_POLICIES="no on-failure unless-stopped always"
 valid_restart() { [[ " $RESTART_POLICIES " == *" $1 "* ]] || die_code invalid "--restart wants one of: $RESTART_POLICIES"; }
 
-# A duration (90, 90s, 30m, 2h, 1d) in seconds; "0" and "none" mean unset
-# (prints nothing). For --ttl and --idle-stop.
-duration_s() {   # option value
-    local v=$2
-    [ "$v" != 0 ] && [ "$v" != none ] || return 0
-    [[ $v =~ ^([0-9]+)([smhd])?$ ]] || die_code invalid "$1 wants a duration such as 90s, 30m, 2h or 1d (0 or none to unset)"
-    case ${BASH_REMATCH[2]:-s} in s) echo "${BASH_REMATCH[1]}" ;; m) echo $((BASH_REMATCH[1] * 60)) ;;
-                                h) echo $((BASH_REMATCH[1] * 3600)) ;; d) echo $((BASH_REMATCH[1] * 86400)) ;; esac
-}
 # vm.json's lifetime fields from --ttl / --idle-stop values ("" = none).
 lifetime_json() {   # ttl idle
     jq -n --arg t "$1" --arg i "$2" \
@@ -385,19 +376,20 @@ exit_code() {
 }
 
 create() {
-    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [--restart POLICY] [--ttl DURATION] [--idle-stop DURATION] [--label KEY=VALUE]... [--if-same-spec] [-- CMD...]"
+    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [--restart POLICY] [--ttl DURATION] [--idle-stop DURATION] [--label KEY=VALUE]... [--lease UNTIL] [--if-same-spec] [-- CMD...]"
     local vm=${1:?$usage}
     if [ "${2:-}" = --template ]; then template_expand "${@:3}"; set -- "$vm" "${TEMPLATE_ARGS[@]}"; fi
     local image=${2:?$usage}
     shift 2
     local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full allow=()
     local entrypoint=() set_entrypoint=0 jail=${JAIL:-0} jail_set="" vcpus_set=null mem_set=null restart=no agent=1
-    local ttl="" idle_stop="" ttl_raw="" idle_raw="" secrets=() forward=() cache=0 labels=() same_ok=0
+    local ttl="" idle_stop="" ttl_raw="" idle_raw="" secrets=() forward=() cache=0 labels=() same_ok=0 lease=""
     while [ $# -gt 0 ]; do
         case $1 in
             --cache)        cache=1; shift ;;
             --label)        label_ok "${2:?--label wants KEY=VALUE}"; labels+=("$2"); shift 2 ;;
             --if-same-spec) same_ok=1; shift ;;
+            --lease)        lease=$(parse_until --lease "${2:?--lease wants a time or a duration}"); shift 2 ;;
             --secret)       parse_secret "${2:?--secret wants NAME=VALUE, NAME=@FILE or NAME}"; secrets+=("$2"); shift 2 ;;
             --forward)      mapfile -t forward < <(parse_forward "$(IFS=,; echo "${forward[*]:-},${2:?--forward wants ssh-agent and/or git}")"); shift 2 ;;
             --vcpus)        vcpus=$2 vcpus_set=$2; shift 2 ;;
@@ -500,6 +492,7 @@ create() {
         fi
         die_code vm_exists "VM '$vm' already exists with a different spec (fcvm inspect $vm shows it)"
     fi
+    refuse_if_cordoned
     mkdir -p "$dir"
     if [ $copy = 1 ]; then
         cp --sparse=always "$IMAGES_DIR/$image.ext4" "$dir/disk.ext4"
@@ -527,13 +520,14 @@ create() {
         '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
           shares: $shares, net: $net, jail: $jail, restart: $restart, ephemeral: $ephemeral, created: (now | todate),
           labels: $labels, spec: $spec}
+         + (if $lease == "" then {} else {lease_until: ($lease | tonumber)} end)
          + (if $agent then {} else {agent: false} end) + (if $hostkey == "" then {} else {ssh_host_key: $hostkey} end)
          + $lifetime + (if ($forward | length) == 0 then {} else {forward: $forward} end)
          + (if ($forward | index("ssh-agent")) then {ssh_auth_sock: $sock} else {} end)' \
         --arg hostkey "$hostkey" --argjson agent "$([ $agent = 1 ] && echo true || echo false)" \
         --argjson lifetime "$(lifetime_json "$ttl" "$idle_stop")" \
         --argjson forward "$(json_list "${forward[@]}")" --arg sock "${SSH_AUTH_SOCK:-}" \
-        --argjson labels "$(labels_json "${labels[@]}")" --argjson spec "$spec" > "$dir/vm.json"
+        --argjson labels "$(labels_json "${labels[@]}")" --argjson spec "$spec" --arg lease "$lease" > "$dir/vm.json"
     if [[ " ${forward[*]:-} " == *" ssh-agent "* ]] && [ ! -S "${SSH_AUTH_SOCK:-}" ]; then
         warn "--forward ssh-agent: no agent in this environment (SSH_AUTH_SOCK); set it before fcvm start"
     fi
@@ -678,19 +672,23 @@ stop_portfwd() {   # dir [spec]
 # console afterwards. The serial console is held by lib/console.py, which logs
 # it and lets clients attach/detach; when Firecracker exits it runs `_reap`.
 start() {
-    local usage="usage: fcvm start [-a] VM" attach=0 vm=""
+    local usage="usage: fcvm start [-a] [--lease UNTIL] VM" attach=0 vm="" lease=""
     while [ $# -gt 0 ]; do
         case $1 in
             -a|--attach) attach=1; shift ;;
+            --lease)     lease=$(parse_until --lease "${2:?$usage}"); shift 2 ;;
             -d)          shift ;;   # background is the default now
             -*)          die_code invalid "unknown option $1 ($usage)" ;;
             *)           vm=$1; shift ;;
         esac
     done
     [ -n "$vm" ] || die_code invalid "$usage"
+    if [ -n "$lease" ]; then   # set here, whoever starts the VM (the service may run an older fcvm)
+        lock_vm "$vm"; vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"; set_lease "$vm" "$lease"; unlock_vm
+    fi
     if [ -n "${VIA_DAEMON:-}" ] && [ -z "${RESTORE:-}" ] && use_daemon; then
         local reply rc=0
-        reply=$(daemon_api POST "vms/$vm/start") || rc=$?
+        reply=$(daemon_api POST "vms/$vm/start" "$(jq -n --arg l "$lease" '(if $l == "" then {} else {lease: ($l | tonumber)} end)')") || rc=$?
         if [ $rc = 0 ]; then
             [ -n "${QUIET_START:-}" ] || log "running (pid $(jq -r .pid <<<"$reply"), started by the fcvm service). fcvm console $vm | fcvm logs $vm | fcvm stop $vm"
             if [ $attach = 1 ]; then attach_vm "$vm"; fi
@@ -1689,8 +1687,9 @@ fork_one() {
         t0=$(date +%s%N)
         disk=$(jq -r .disk "$sdir/meta.json")
         mkdir -p "$dir"
-        jq --arg snap "$snap" --argjson labels "${FORK_LABELS:-{\}}" \
-            '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate), labels: $labels}' \
+        jq --arg snap "$snap" --argjson labels "${FORK_LABELS:-{\}}" --arg lease "${FORK_LEASE:-}" \
+            '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate), labels: $labels}
+             | del(.lease_until) + (if $lease == "" then {} else {lease_until: ($lease | tonumber)} end)' \
             "$sdir/vm.json" > "$dir/vm.json"
         emit_event vm.created "$vm" fork "$(jq -nc --arg s "$snap" '{restored_from: $s}')"
         cp --sparse=always "$sdir/$disk" "$dir/$disk"
@@ -1701,8 +1700,9 @@ fork_one() {
     disk=$(jq -r .disk "$sdir/meta.json"); drive=$(jq -r .drive_id "$sdir/meta.json")
     t0=$(date +%s%N)
     mkdir -p "$dir"
-    jq --arg snap "$snap" --argjson labels "${FORK_LABELS:-{\}}" \
-        '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate), labels: $labels}' \
+    jq --arg snap "$snap" --argjson labels "${FORK_LABELS:-{\}}" --arg lease "${FORK_LEASE:-}" \
+        '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate), labels: $labels}
+         | del(.lease_until) + (if $lease == "" then {} else {lease_until: ($lease | tonumber)} end)' \
         "$sdir/vm.json" > "$dir/vm.json"
     emit_event vm.created "$vm" fork "$(jq -nc --arg s "$snap" '{restored_from: $s}')"
     cp --sparse=always "$sdir/$disk" "$dir/$disk"
@@ -1765,11 +1765,12 @@ fork_one() {
 }
 
 fork_cmd() {
-    local usage="usage: fcvm fork SNAPSHOT [NAME] [-n COUNT] [--label KEY=VALUE]..." snap="" name="" count=1 labels=()
+    local usage="usage: fcvm fork SNAPSHOT [NAME] [-n COUNT] [--label KEY=VALUE]... [--lease UNTIL]" snap="" name="" count=1 labels=() lease=""
     while [ $# -gt 0 ]; do
         case $1 in
             -n|--count) [[ ${2:-} =~ ^[1-9][0-9]*$ ]] || die_code invalid "$usage"; count=$2; shift 2 ;;
             --label)    label_ok "${2:?$usage}"; labels+=("$2"); shift 2 ;;
+            --lease)    lease=$(parse_until --lease "${2:?$usage}"); shift 2 ;;
             -*)         die_code invalid "unknown option $1 ($usage)" ;;
             *)          if [ -z "$snap" ]; then snap=$1; else name=$1; fi; shift ;;
         esac
@@ -1780,14 +1781,15 @@ fork_cmd() {
         warn "published ports aren't carried over to forks (they'd conflict with the source)"
     if use_daemon; then
         local reply rc=0
-        reply=$(daemon_api POST "snapshots/$snap/fork" "$(jq -n --arg n "$name" --argjson c "$count" --argjson l "$(labels_json "${labels[@]}")" \
-            '{count: $c, labels: $l} + (if $n == "" then {} else {name: $n} end)')") || rc=$?
+        reply=$(daemon_api POST "snapshots/$snap/fork" "$(jq -n --arg n "$name" --argjson c "$count" --argjson l "$(labels_json "${labels[@]}")" --arg lease "$lease" \
+            '{count: $c, labels: $l} + (if $n == "" then {} else {name: $n} end) + (if $lease == "" then {} else {lease: ($lease | tonumber)} end)')") || rc=$?
         if [ $rc = 0 ]; then jq -r .log <<<"$reply" | sed "/^$/d" >&2; return; fi
         [ $rc = 2 ] || exit 1
         warn "the fcvm service isn't answering; forking from this terminal"
     fi
     local base=${name:-$snap-$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')} i
-    FORK_LABELS=$(labels_json "${labels[@]}")
+    FORK_LABELS=$(labels_json "${labels[@]}") FORK_LEASE=$lease
+    refuse_if_cordoned
     if [ "$count" = 1 ]; then
         fork_one "$snap" "$base"
     else
@@ -2073,10 +2075,12 @@ pool_cmd() {
                     --ttl)       ttl=${2:?$usage}; shift 2 ;;
                     --idle-stop) idle=${2:?$usage}; shift 2 ;;
                     --label)     label_ok "${2:?$usage}"; labels+=("--label" "$2"); shift 2 ;;
+                    --lease)     parse_until --lease "${2:?$usage}" >/dev/null; labels+=("--lease" "$2"); shift 2 ;;
                     *)           die_code invalid "unknown option $1 ($usage)" ;;
                 esac
             done
             [ -f "$(pool_file "$name")" ] || die_code pool_not_found "no pool '$name' (see: fcvm pool ls)"
+            refuse_if_cordoned
             mkdir -p "$VMS_DIR/.locks"
             exec {plock}>"$VMS_DIR/.locks/pool-$name"; flock "$plock"
             for d in $(pool_members "$name" running); do vm=$d; break; done
@@ -2091,6 +2095,7 @@ pool_cmd() {
         _fill)   # one more VM for the pool (the supervisor's job)
             local name=${1:?$usage} f tpl snap jail vm opts=()
             f=$(pool_file "$name"); [ -f "$f" ] || die_code pool_not_found "no pool '$name'"
+            refuse_if_cordoned
             tpl=$(jq -r '.template // empty' "$f"); snap=$(jq -r '.snapshot // empty' "$f"); jail=$(jq -r '.jail // false' "$f")
             vm="$name-$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')"
             [ "$jail" != true ] || opts+=(--jail)
@@ -2150,6 +2155,26 @@ fc_api_get() {   # socket path
 vm_rss() {
     awk '/^VmRSS:/ {print $2 * 1024}' "/proc/$1/status" 2>/dev/null || true
 }
+set_lease() {   # vm until-or-empty
+    local f=$VMS_DIR/$1/vm.json
+    jq --arg l "$2" 'if $l == "" then del(.lease_until) else .lease_until = ($l | tonumber) end' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+
+# fcvm cordon [REASON] / uncordon: refuse new VMs (create, fork, pool claim and
+# refills) until uncordoned; running VMs and restart policies aren't affected.
+cordon_cmd() {
+    mkdir -p "$VMS_DIR/.node"
+    echo "${*:-cordoned $(date '+%Y-%m-%dT%H:%M:%S%z')}" > "$VMS_DIR/.node/cordoned"
+    emit_event node.cordoned "" "" "$(jq -nc --arg r "$*" '{reason: (if $r == "" then null else $r end)}')"
+    log "cordoned: no new VMs until fcvm uncordon (running VMs stay as they are)"
+}
+uncordon_cmd() {
+    cordoned || { log "not cordoned"; return 0; }
+    rm -f "$VMS_DIR/.node/cordoned"
+    emit_event node.uncordoned "" "" '{}'
+    log "uncordoned: new VMs are accepted again"
+}
+
 has_label() {   # vm.json "" | KEY=VALUE
     [ -z "$2" ] || jq -e --arg k "${2%%=*}" --arg v "${2#*=}" '(.labels // {})[$k] == $v' "$1" >/dev/null
 }
@@ -2198,6 +2223,7 @@ inspect_json() {
           mem_used_bytes: ($rss | tonumber? // null),
           exit_code: ($code | tonumber? // null), image_chain: $chain, disk_mode: $mode, disk_used_bytes: $disk,
           stopped_by_user: $stopped, last_exit: $last,
+          lease_until: (.lease_until // null),
           expires_at: (if .ttl_s and $booted != "" then ([($booted | tonumber), ($claimed | tonumber? // 0)] | max) + .ttl_s else null end),
           idle_expires_at: (if .idle_stop_s and $active != "" then ($active | tonumber) + .idle_stop_s else null end),
           expired: (if $expired == "" then null else $expired end),
@@ -2293,10 +2319,11 @@ list_vms() {
         used=$(du -h "$d"/*.ext4 2>/dev/null | awk '{print $1; exit}')
         [ -f "$d/disk.ext4" ] && used+=" copy"
         printf "$fmt" "$vm" "$state" "$ip" "$(jq -r .image "$d/vm.json")" "$mem" "$used" \
-            "$(jq -r --arg pooled "$(cat "$d/pooled" 2>/dev/null || true)" 'def dur: if . % 86400 == 0 then "\(. / 86400 | floor)d" elif . % 3600 == 0 then "\(. / 3600 | floor)h" elif . % 60 == 0 then "\(. / 60 | floor)m" else "\(.)s" end;
+            "$(jq -r --arg pooled "$(cat "$d/pooled" 2>/dev/null || true)" --argjson now "$(date +%s)" 'def dur: if . % 86400 == 0 then "\(. / 86400 | floor)d" elif . % 3600 == 0 then "\(. / 3600 | floor)h" elif . % 60 == 0 then "\(. / 60 | floor)m" else "\(.)s" end;
                 [(if $pooled != "" then "pool:\($pooled)" else empty end),
                  (if .jail then "jail" else empty end), (if .agent == false then "no-agent" else empty end), (if (.restart // "no") != "no" then "restart:\(.restart)" else empty end),
                  (if .ttl_s then "ttl:\(.ttl_s | dur)" else empty end), (if .idle_stop_s then "idle-stop:\(.idle_stop_s | dur)" else empty end),
+                 (if .lease_until then "lease:\(((.lease_until - $now) / 60 | floor) | if . < 0 then "ended" else "\(.)m" end)" else empty end),
                  (if (.forward // []) != [] then "forward:\(.forward | join(","))" else empty end),
                  (if .net.mode == "none" then "net:none" elif .net.mode == "restricted" then "allow:\(.net.allow | join(","))\(if .net.cache then " cache" else "" end)" else empty end)]
                 + (.ports // []) + ((.volumes // []) | map("-v " + .))
@@ -2335,8 +2362,8 @@ list_images() {
 
 # fcvm update VM [--restart POLICY] [--ttl D] [--idle-stop D]: change settings of an existing VM.
 update() {
-    local usage="usage: fcvm update VM [--restart no|on-failure|unless-stopped|always] [--ttl DURATION|none] [--idle-stop DURATION|none] [--secret SPEC]... [--unset-secret NAME]... [--forward ssh-agent,git|none] [--label KEY=VALUE]... [--unset-label KEY]..."
-    local vm=${1:-} restart="" ttl="" idle="" set_ttl=0 set_idle=0 what=() secrets=() SECRETS_DEL=() forward=() set_fwd=0 labels=() unlabel=()
+    local usage="usage: fcvm update VM [--restart no|on-failure|unless-stopped|always] [--ttl DURATION|none] [--idle-stop DURATION|none] [--secret SPEC]... [--unset-secret NAME]... [--forward ssh-agent,git|none] [--label KEY=VALUE]... [--unset-label KEY]... [--lease UNTIL|none]"
+    local vm=${1:-} restart="" ttl="" idle="" set_ttl=0 set_idle=0 what=() secrets=() SECRETS_DEL=() forward=() set_fwd=0 labels=() unlabel=() lease="" set_lease=0
     [ -n "$vm" ] || die_code invalid "$usage"; shift
     while [ $# -gt 0 ]; do
         case $1 in
@@ -2348,11 +2375,12 @@ update() {
             --forward)   mapfile -t forward < <(parse_forward "${2:?$usage}"); set_fwd=1; shift 2 ;;
             --label)     label_ok "${2:?$usage}"; labels+=("$2"); shift 2 ;;
             --unset-label) unlabel+=("${2:?$usage}"); shift 2 ;;
+            --lease)     lease=$(parse_until --lease "${2:?$usage}") set_lease=1; shift 2 ;;
             *)           die_code invalid "unknown option $1 ($usage)" ;;
         esac
     done
     [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || [ $set_fwd = 1 ] ||
-        [ ${#labels[@]} -gt 0 ] || [ ${#unlabel[@]} -gt 0 ] || die_code invalid "$usage"
+        [ ${#labels[@]} -gt 0 ] || [ ${#unlabel[@]} -gt 0 ] || [ $set_lease = 1 ] || die_code invalid "$usage"
     lock_vm "$vm"
     vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     local f=$VMS_DIR/$vm/vm.json
@@ -2379,12 +2407,19 @@ update() {
         jq --arg t "$idle" 'if $t == "" then del(.idle_stop_s) else .idle_stop_s = ($t | tonumber) end' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
         what+=("idle-stop $([ -n "$idle" ] && echo "${idle}s" || echo none)")
     fi
+    if [ $set_lease = 1 ]; then
+        set_lease "$vm" "$lease"
+        what+=("lease $([ -n "$lease" ] && date -d "@$lease" '+%Y-%m-%dT%H:%M:%S%z' || echo none)")
+    fi
     if [ ${#labels[@]} -gt 0 ] || [ ${#unlabel[@]} -gt 0 ]; then
         jq --argjson set "$(labels_json "${labels[@]}")" --argjson del "$(json_list "${unlabel[@]}")" \
             '.labels = ((.labels // {}) + $set | with_entries(select(.key as $k | $del | index($k) | not)))' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
         what+=("labels $(jq -r '.labels | to_entries | map("\(.key)=\(.value)") | join(" ")' "$f")")
         [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || [ $set_fwd = 1 ] ||
             { emit_event vm.updated "$vm" "" "$(json_list "${what[@]}" | jq -c '{what: .}')"; log "'$vm': ${what[*]}"; return 0; }
+    fi
+    if [ $set_lease = 1 ] && [ ${#what[@]} = 1 ]; then
+        emit_event vm.updated "$vm" "" "$(json_list "${what[@]}" | jq -c '{what: .}')"; log "'$vm': ${what[*]} (applied by fcvm serve / the fcvm service)"; return 0
     fi
     emit_event vm.updated "$vm" "" "$(json_list "${what[@]}" | jq -c '{what: .}')"
     log "'$vm': $(printf '%s, ' "${what[@]}" | sed 's/, $//') (applied by fcvm serve / the fcvm service)"
@@ -2446,7 +2481,7 @@ rm_vm() {
     lock_vm "$vm"
     vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     vm_running "$vm" && die_code vm_running "VM '$vm' is running (fcvm stop $vm first)"
-    emit_event vm.deleted "$vm"
+    emit_event vm.deleted "$vm" "${FCVM_EXPIRED:-}"
     rm -rf "$(vm_dir "$vm")" "$VMS_DIR/.locks/vm-$vm"
     log "removed '$vm'"
 }
@@ -2490,4 +2525,6 @@ case $cmd in
     template) template_cmd "$@" ;;
     _shutdown) shutdown_all "$@" ;;
     _event)  emit_event "$@" ;;   # for the service and the supervisor (lib/web)
+    cordon)  cordon_cmd "$@" ;;
+    uncordon) uncordon_cmd "$@" ;;
 esac

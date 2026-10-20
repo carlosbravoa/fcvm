@@ -74,7 +74,9 @@ wrap this API: `Client().create("box", template="python-sandbox")`, then
 
 | method, path | returns |
 |---|---|
-| `GET /host` | hostname, kernel, CPUs, load, disk and memory, free taps per network, `jail_available`, and recent host samples |
+| `GET /host` | hostname, kernel, CPUs, load, disk and memory, free taps per network, `jail_available`, `cordoned` (the reason, or `null`), and recent host samples |
+| `POST /host/cordon` `{"reason": "..."}`, `POST /host/uncordon` | `fcvm cordon` / `uncordon`: refuse new VMs, or accept them again |
+| `POST /leases/renew` `{"label": "cp=prod", "until": 1760900300}` | `fcvm update --lease` on every VM carrying that label; returns `{"renewed": [names]}` |
 | `GET /presets` | the egress presets (`@pypi`, ...) with their host patterns |
 
 ## VMs
@@ -84,10 +86,10 @@ wrap this API: `Client().create("box", template="python-sandbox")`, then
 | `GET /vms` | | every VM (as `fcvm ls --json`), each with a `supervisor` field |
 | `GET /vms/{vm}` | | one VM (as `fcvm inspect`), plus `supervisor` |
 | `POST /vms` | see below | create a VM and start it |
-| `POST /vms/{vm}/start` | | `fcvm start` |
+| `POST /vms/{vm}/start` | `{"lease": 1760900300}` (optional) | `fcvm start`, setting or renewing the lease |
 | `POST /vms/{vm}/stop` | | `fcvm stop`; restart policies then leave it alone |
 | `POST /vms/{vm}/restart` | | stop, then start |
-| `POST /vms/{vm}/update` | `{"restart": "no\|on-failure\|unless-stopped\|always", "ttl": "2h", "idle_stop": null, "secrets": {"NAME": "value"}, "unset_secrets": ["OLD"], "forward": ["ssh-agent", "git"], "labels": {"team": "web"}, "unset_labels": ["old"]}` | `fcvm update`: any of these; `null` or `""` clears a lifetime; secrets and forwarding apply from the next start; labels merge |
+| `POST /vms/{vm}/update` | `{"restart": "no\|on-failure\|unless-stopped\|always", "ttl": "2h", "idle_stop": null, "secrets": {"NAME": "value"}, "unset_secrets": ["OLD"], "forward": ["ssh-agent", "git"], "labels": {"team": "web"}, "unset_labels": ["old"], "lease": 1760900300}` | `fcvm update`: any of these; `null` or `""` clears a lifetime or a lease; secrets and forwarding apply from the next start; labels merge |
 | `POST /vms/{vm}/snapshot` | `{"name": "snap"}` | `fcvm snapshot` |
 | `POST /vms/{vm}/commit` | `{"image": "name"}` | `fcvm commit` (the VM must be stopped) |
 | `DELETE /vms/{vm}` | | stop it if running, then delete it |
@@ -113,7 +115,7 @@ wrap this API: `Client().create("box", template="python-sandbox")`, then
   "jail": true, "restart": "unless-stopped", "start": true,
   "ttl": "2h", "idle_stop": "30m", "secrets": {"API_KEY": "sk-..."}, "forward": ["ssh-agent", "git"],
   "disk": "16G", "copy": false, "entrypoint": null, "ref": "python:3.13-slim",
-  "labels": {"team": "web"}, "if_same_spec": false
+  "labels": {"team": "web"}, "lease": 1760900300, "if_same_spec": false
 }
 ```
 
@@ -132,6 +134,7 @@ Fields worth knowing in a VM object (as `fcvm inspect`, plus `vm.json`):
 | `status` | `{"state", "reason", "since"}`: why it's in that state and since when, see [Listing and inspecting](vms.md#listing-and-inspecting) |
 | `spec` | the create request, normalized (the fields of a template) |
 | `labels` | your tags (`{"team": "web"}`), from `labels` at create or update |
+| `lease_until` | when the VM's [lease](vms.md#lifetimes---ttl-and---idle-stop) ends (Unix time), or `null`; a `lease` in a request is a Unix time, an ISO 8601 time, or a duration such as `"2h"` |
 | `restart` | the restart policy |
 | `stopped_by_user` | stopped with `fcvm stop`, so restart policies leave it alone |
 | `last_exit` | how it last ended: `code` (an app's exit code), `fc_status` (Firecracker's: 0 = the guest shut down; negative = killed by that signal), `stale` (it was running when the host crashed or rebooted), `at` (Unix time) |
@@ -167,7 +170,7 @@ even one without a shell.
 | `POST /images` | `{"ref": "nginx:latest", "name": "optional"}` | start an import as a [background job](#background-jobs); returns the job |
 | `DELETE /images/{image}` | | `fcvm rmi` |
 | `GET /snapshots` | | `fcvm snapshot ls --json` |
-| `POST /snapshots/{snap}/fork` | `{"name": "optional", "count": 1, "labels": {}}` | `fcvm fork`; returns `{"log": "..."}` |
+| `POST /snapshots/{snap}/fork` | `{"name": "optional", "count": 1, "labels": {}, "lease": null}` | `fcvm fork`; returns `{"log": "..."}` |
 | `DELETE /snapshots/{snap}` | | `fcvm snapshot rm` |
 | `GET /volumes` | | `fcvm volume ls --json` |
 | `DELETE /volumes/{volume}` | | `fcvm volume rm` |
@@ -191,7 +194,7 @@ first.
 | `GET /pools` | | the [pools](templates.md#warm-pools), each with `ready` and its unclaimed `vms` |
 | `POST /pools` | `{"name": "py", "template": "python-sandbox", "size": 3, "jail": true}` (or `"snapshot"`) | `fcvm pool set` |
 | `DELETE /pools/{name}` | | `fcvm pool rm` |
-| `POST /pools/{name}/claim` | `{"ttl": "2h", "idle_stop": "30m", "labels": {}}` (optional) | takes a ready VM; returns it as `GET /vms/{vm}`; 409 `pool_empty` when none is ready |
+| `POST /pools/{name}/claim` | `{"ttl": "2h", "idle_stop": "30m", "labels": {}, "lease": null}` (optional) | takes a ready VM; returns it as `GET /vms/{vm}`; 409 `pool_empty` when none is ready |
 
 ## Prometheus
 

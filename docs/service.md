@@ -68,6 +68,11 @@ they stop.
 - **Exit records.** Each exit is recorded in `vms/VM/last-exit` and shown
   by `fcvm inspect`: the app's exit code, Firecracker's status, and whether
   the host went down under it.
+- **Leases.** A VM whose [lease](vms.md#lifetimes---ttl-and---idle-stop)
+  ended `LEASE_GRACE` seconds ago (300 by default, in `fcvm.conf`) is
+  stopped and removed, whatever its state.
+- **Cordon.** While the host is cordoned (`fcvm cordon`), pools aren't
+  refilled; restarts still happen.
 - **One change at a time.** Your commands and the supervisor take a per-VM
   lock, so they never change the same VM at once.
 

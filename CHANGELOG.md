@@ -39,6 +39,14 @@ to move across.
   their ids are strings, they survive a restart of the service (one cut
   short is `failed` with `interrupted`), and `GET /api/jobs/{id}?wait=S`
   blocks until the job ends. An `operation.done` event closes each one.
+- **Leases and cordon.** `--lease UNTIL` on `create`, `start`, `fork` and
+  `pool claim` (and `update --lease`, `lease` in the API, `POST
+  /leases/renew` for every VM with a label) says until when a VM is
+  wanted; once that passes by `LEASE_GRACE` (300 s), the supervisor stops
+  and removes it. For programs that manage VMs and might forget them.
+  `fcvm cordon [REASON]` / `uncordon` make a host refuse new VMs (code
+  `cordoned`) while running ones and restart policies carry on, for
+  draining it; the console shows the state.
 - **Packages.** The clients are on PyPI and npm as `fcvm` (`pip install
   fcvm`, `npm install fcvm`). `fcvm-mcp` on PyPI launches the installed
   fcvm's MCP server (`uvx fcvm-mcp`), and lists fcvm in the MCP Registry.

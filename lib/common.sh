@@ -46,6 +46,7 @@ fi
 : "${VOLUME_SIZE:=10G}"                         # default size of new volumes (sparse)
 : "${VM_DISK:=8G}"                              # per-VM writable layer (sparse)
 : "${IMPORT_FREE_MB:=64}"                      # free space added to imported disks (for --copy VMs)
+: "${LEASE_GRACE:=300}"                        # seconds after a lease ends before the VM is removed
 
 BIN_DIR=$FCVM_HOME/bin
 BUILD_DIR=$FCVM_HOME/build
@@ -104,6 +105,33 @@ die_code() {
     exit 1
 }
 die()  { die_code error "$@"; }
+
+# A duration (90, 90s, 30m, 2h, 1d) in seconds; "0" and "none" mean unset
+# (prints nothing). For --ttl and --idle-stop.
+duration_s() {   # option value
+    local v=$2
+    [ "$v" != 0 ] && [ "$v" != none ] || return 0
+    [[ $v =~ ^([0-9]+)([smhd])?$ ]] || die_code invalid "$1 wants a duration such as 90s, 30m, 2h or 1d (0 or none to unset)"
+    case ${BASH_REMATCH[2]:-s} in s) echo "${BASH_REMATCH[1]}" ;; m) echo $((BASH_REMATCH[1] * 60)) ;;
+                                h) echo $((BASH_REMATCH[1] * 3600)) ;; d) echo $((BASH_REMATCH[1] * 86400)) ;; esac
+}
+
+# A lease's end (--lease): a Unix time, an ISO 8601 time (2026-10-20T12:00:00Z),
+# or a duration from now (30m, 2h, 1d); "none" clears it. Prints the Unix time.
+parse_until() {   # option value
+    case $2 in
+        none|"") echo "" ;;
+        *[!0-9]*) if [[ $2 =~ ^[0-9]+[smhd]$ ]]; then echo $(( $(date +%s) + $(duration_s "$1" "$2") ))
+                  else date -d "$2" +%s 2>/dev/null || die_code invalid "$1 wants a Unix time, an ISO 8601 time or a duration (30m, 2h, 1d), or none"; fi ;;
+        *) echo "$2" ;;
+    esac
+}
+
+# The node is cordoned (fcvm cordon): no new VMs until fcvm uncordon.
+cordoned() { [ -f "$VMS_DIR/.node/cordoned" ]; }
+refuse_if_cordoned() {   # what
+    cordoned && die_code cordoned "this host is cordoned ($(cat "$VMS_DIR/.node/cordoned")): no new VMs until fcvm uncordon" || true
+}
 
 # Events: one JSON line per state change, appended to vms/.events.jsonl with a
 # sequence number from vms/.events.seq, both under one lock so numbers are

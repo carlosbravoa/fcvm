@@ -21,7 +21,13 @@ pooled VMs that died are removed.
 
 Lifetimes (vm.json "ttl_s" and "idle_stop_s", from `--ttl` / `--idle-stop`)
 are applied here too: a running VM is stopped once its TTL since boot, or its
-time since the last exec/shell/cp/console operation, runs out.
+time since the last exec/shell/cp/console operation, runs out. A lease
+(vm.json "lease_until", from `--lease`) that ended LEASE_GRACE seconds ago
+stops the VM and removes it, whatever its state: it's how a program that
+manages VMs (a control plane) makes sure the VMs it forgot go away.
+
+While the host is cordoned (vms/.node/cordoned, `fcvm cordon`), pools
+aren't refilled; restart policies still apply.
 
 At startup the supervisor also cleans up after a crash or reboot: a VM whose
 pid file doesn't match a live process of its own is reaped as stale, and VMs
@@ -40,6 +46,7 @@ import time
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 BACKOFF_MAX = 60
+LEASE_GRACE = int(os.environ.get("LEASE_GRACE") or 300)
 STABLE_AFTER = 60     # seconds of uptime that reset the backoff
 REAP_GRACE = 10       # a dead VM's relay gets this long to reap it before we do
 POLL = 2.0
@@ -102,6 +109,12 @@ def expiry(cfg, booted, active, now):
     if idle and (active or booted) and now - (active or booted) >= idle:
         return "idle"
     return None
+
+
+def lease_ended(cfg, now, grace=None):
+    """Has the VM's lease (vm.json lease_until) ended, grace included?"""
+    until = cfg.get("lease_until")
+    return bool(until) and now >= until + (LEASE_GRACE if grace is None else grace)
 
 
 def failed(last):
@@ -238,10 +251,27 @@ class Supervisor:
         return True
 
     # --- warm pools ---------------------------------------------------------------------
+    async def release(self, name, d, cfg, now):
+        """Stop and remove a VM whose lease ended (plus the grace period)."""
+        if not lease_ended(cfg, now) or os.path.exists(os.path.join(d, "pooled")):
+            return False
+        self.log(f"{name}: its lease ended; removing it")
+        if vm_state(d) == "running":
+            code, out = await self.cli("stop", name, env={"FCVM_EXPIRED": "lease", "QUIET_STOP": "1"})
+            if code != 0:
+                self.log(f"{name}: stop failed: {out.strip()[-300:]}")
+                return True
+        code, out = await self.cli("rm", name, env={"FCVM_EXPIRED": "lease"})
+        if code != 0:
+            self.log(f"{name}: rm failed: {out.strip()[-300:]}")
+        return True
+
     async def pools(self, now):
         """Keep every pool (vms/.pools/NAME.json) at its size: one new VM per
-        tick, dead ones removed; a failing fill is retried after a while."""
+        tick, dead ones removed; a failing fill is retried after a while.
+        Nothing is filled while the host is cordoned."""
         pools_dir = os.path.join(self.vms, ".pools")
+        cordoned = os.path.exists(os.path.join(self.vms, ".node", "cordoned"))
         for f in sorted(os.listdir(pools_dir)) if os.path.isdir(pools_dir) else []:
             if not f.endswith(".json"):
                 continue
@@ -260,7 +290,7 @@ class Supervisor:
                 elif state == "stopped" or state == "stale":
                     self.log(f"pool {pool}: {n} is not running any more; removing it")
                     await self.cli("rm", n)
-            if ready < size and now >= self.pool_retry.get(pool, 0):
+            if ready < size and not cordoned and now >= self.pool_retry.get(pool, 0):
                 code, out = await self.cli("pool", "_fill", pool)
                 if code == 0:
                     self.log(f"pool {pool}: {out.strip().splitlines()[-1] if out.strip() else 'filled'} ready ({ready + 1}/{size})")
@@ -275,6 +305,8 @@ class Supervisor:
             cfg = self.config(d)
             policy = cfg.get("restart", "no")
             state = vm_state(d)
+            if await self.release(name, d, cfg, now):
+                continue
             if state == "running" and await self.expire(name, d, cfg, now):
                 continue
             if policy == "no":

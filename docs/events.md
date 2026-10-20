@@ -43,11 +43,12 @@ fcvm events --since 4012 --json # as JSON lines, after event 4012
 |---|---|---|
 | `vm.created` | `fork` for a fork | `image`, `ephemeral`; `restored_from` for a fork |
 | `vm.started` | `fork` for a fork | `pid`, `ip` |
-| `vm.stopped` | `user` (`fcvm stop`, the console), `ttl` or `idle` (a [lifetime](vms.md#lifetimes---ttl-and---idle-stop)), `system` (host shutdown) | |
+| `vm.stopped` | `user` (`fcvm stop`, the console), `ttl` or `idle` (a [lifetime](vms.md#lifetimes---ttl-and---idle-stop)), `lease` (its lease ended), `system` (host shutdown) | |
 | `vm.exited` | how the guest ended: `exit` (an app's process ended), `shutdown` (the guest shut itself down, which a stop also causes), `crash` (Firecracker was killed or died, or the host did) | the exit record: `code`, `fc_status`, `stale`, `at` |
 | `vm.restarting` | `policy:NAME` | `in` (seconds), `attempt` |
 | `vm.updated` | | `what`: the changes, as `fcvm update` lists them |
-| `vm.deleted` | `ephemeral` (a throwaway VM that ended), `pool` (an unclaimed VM of a removed pool) | |
+| `vm.deleted` | `ephemeral` (a throwaway VM that ended), `pool` (an unclaimed VM of a removed pool), `lease` (its lease ended) | |
+| `node.cordoned`, `node.uncordoned` (no `vm`) | | `reason` given to `fcvm cordon` |
 | `pool.claimed` | | `pool` |
 | `operation.done` (no `vm`) | `done` or `failed` | `op`, `kind`, `title`, `error`: an [operation](cli.md#operations) ended |
 

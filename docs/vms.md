@@ -311,6 +311,22 @@ or `"idle"` until the next start. `fcvm ls` shows `ttl:2h` and
 a running VM. Like restart policies, lifetimes are applied by the supervisor
 in `fcvm serve`, normally the fcvm service; without it, nothing stops the VM.
 
+**Leases** are for programs that manage VMs (a script, a control plane)
+and might forget them, or die: `--lease UNTIL` on `create`, `start`,
+`fork` and `pool claim` says until when the VM is wanted, as a Unix time,
+an ISO 8601 time (`2026-10-20T12:00:00Z`) or a duration from now (`2h`).
+Once that time has passed by `LEASE_GRACE` (5 minutes by default), the
+supervisor stops the VM and **removes** it, whatever state it's in.
+Renewing is `fcvm update VM --lease UNTIL` (or `none` to clear it), and the
+API can renew every VM carrying a label at once
+(`POST /leases/renew`). `inspect` shows `lease_until`, `ls` shows
+`lease:40m`, and the events say `lease` as the reason.
+
+**Cordon.** `fcvm cordon [REASON]` makes the host refuse new VMs
+(`create`, `fork`, `pool claim`, and pools stop refilling) with the error
+`cordoned`, until `fcvm uncordon`. Running VMs, `start` and restart
+policies aren't affected: it's for draining a host before taking it down.
+
 ## Secrets
 
 ```sh

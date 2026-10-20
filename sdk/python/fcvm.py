@@ -153,7 +153,8 @@ class Client:
         """Create (and start) a VM. opts are the fields of POST /vms: vcpus, mem_mib,
         network ("full"|"none"|"restricted"), allow, ports, volumes, idle, command,
         jail, restart, ttl, idle_stop, secrets ({NAME: value}), forward, cache, disk,
-        copy, entrypoint. With a template, its fields come first and opts override."""
+        copy, entrypoint, labels ({KEY: value}), if_same_spec (succeed if the VM
+        exists with the same spec). With a template, its fields come first and opts override."""
         body = {}
         if template:
             t = next((t for t in self.templates() if t["name"] == template), None)
@@ -287,7 +288,8 @@ class Sandbox:
         return self.client.delete(f"vms/{self.name}")
 
     def update(self, **fields):
-        """restart, ttl, idle_stop (None clears), secrets ({NAME: value}), unset_secrets, forward."""
+        """restart, ttl, idle_stop (None clears), secrets ({NAME: value}), unset_secrets, forward,
+        labels ({KEY: value}, merged), unset_labels."""
         return self.client.post(f"vms/{self.name}/update", fields)
 
     def snapshot(self, name):

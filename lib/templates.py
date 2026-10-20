@@ -39,7 +39,8 @@ POLICIES = ("no", "on-failure", "unless-stopped", "always")
 FIELDS = {"description": "", "image": None, "ref": None, "vcpus": None, "mem_mib": None, "disk": None,
           "copy": False, "network": "full", "allow": [], "ports": [], "volumes": [], "process": "image",
           "command": [], "entrypoint": None, "jail": None, "restart": "no", "ttl": None, "idle_stop": None,
-          "secrets": [], "forward": [], "cache": False}
+          "secrets": [], "forward": [], "cache": False, "labels": {}}
+LABEL_KEY = re.compile(r"^(?!fcvm\.)[A-Za-z0-9][A-Za-z0-9_./-]{0,62}$")   # as `fcvm create --label` takes them
 DURATION = re.compile(r"^[0-9]+[smhd]?$")   # as --ttl / --idle-stop take it: 90s, 30m, 2h, 1d
 SECRET = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")   # names only: values come from the environment at create
 
@@ -74,6 +75,9 @@ def validate(t):
         raise Invalid("secrets must be a list of names (letters, digits and _), taken from the environment at create")
     if not all(f in ("ssh-agent", "git") for f in out["forward"]):
         raise Invalid('forward must be a list of "ssh-agent" and/or "git"')
+    if not isinstance(out["labels"], dict) or not all(isinstance(k, str) and LABEL_KEY.match(k) and isinstance(v, str)
+                                                     for k, v in out["labels"].items()):
+        raise Invalid("labels must be an object of strings; keys: letters, digits, . _ - /, not starting with fcvm.")
     if out["process"] not in ("image", "idle", "command"):
         raise Invalid("process must be image, idle or command")
     if out["process"] == "command" and not out["command"]:
@@ -170,6 +174,8 @@ def options(t):
         a += ["--idle-stop", t["idle_stop"]]
     for s in t["secrets"]:
         a += ["--secret", s]
+    for k, v in t["labels"].items():
+        a += ["--label", f"{k}={v}"]
     if t["forward"]:
         a += ["--forward", ",".join(t["forward"])]
     return a

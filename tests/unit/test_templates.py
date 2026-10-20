@@ -90,5 +90,18 @@ class Store(unittest.TestCase):
         self.assertNotIn("broken", tp.all_templates())
 
 
+class Labels(unittest.TestCase):
+    def test_labels_become_create_options(self):
+        t = tp.validate({"image": "alpine-latest", "labels": {"team": "web", "a/b.c-d": ""}})
+        self.assertEqual(t["labels"], {"team": "web", "a/b.c-d": ""})
+        self.assertEqual(tp.options(t)[-4:], ["--label", "team=web", "--label", "a/b.c-d="])
+        self.assertEqual(tp.validate({"image": "alpine-latest"})["labels"], {})
+
+    def test_bad_labels(self):
+        for bad in ({"fcvm.x": "y"}, {"": "y"}, {"k": 1}, ["k=v"], {"a b": "c"}, {"x" * 64: "y"}):
+            with self.assertRaises(tp.Invalid, msg=bad):
+                tp.validate({"image": "alpine-latest", "labels": bad})
+
+
 if __name__ == "__main__":
     unittest.main()

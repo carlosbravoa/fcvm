@@ -15,6 +15,15 @@ to move across.
   everything; `FcvmError` in both client libraries has `.code`. Scripts that
   matched the API's 400 for "no such VM" or "already running" see 404 and
   409 now.
+- **Spec, status and labels.** `fcvm inspect` (and the API's VM object)
+  has `spec`, the create request as given; `status` with the `reason` for
+  the VM's state (`user`, `ttl`, `idle`, `exit`, `shutdown`, `crash`,
+  `created`) and `since` when; and `labels`, tags of your own
+  (`create --label team=web`, `update --label` / `--unset-label`,
+  `ls --label team=web`, `labels` in templates, project files and the API,
+  also on `fork` and `pool claim`). `create --if-same-spec` (API:
+  `if_same_spec`) makes a repeated create succeed when the VM exists with
+  the same spec, so scripts and control planes can retry safely.
 - **Packages.** The clients are on PyPI and npm as `fcvm` (`pip install
   fcvm`, `npm install fcvm`). `fcvm-mcp` on PyPI launches the installed
   fcvm's MCP server (`uvx fcvm-mcp`), and lists fcvm in the MCP Registry.

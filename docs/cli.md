@@ -66,10 +66,10 @@ These use sudo.
 | `start [-a] VM` | boots it in the background, like `docker start`; `-a` attaches the console |
 | `run IMAGE [-d] [opts] [-- CMD...]` | throwaway VM, deleted when it stops. App images: attached like `docker run` (output, Ctrl-C to the app, Ctrl-] detaches, the app's exit code). System images: a shell, or CMD, then stop and delete. `-d`: in the background |
 | `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s. Restart policies then leave it alone until you start it |
-| `update VM [--restart POLICY] [--ttl D\|none] [--idle-stop D\|none] [--secret SPEC]... [--unset-secret NAME]... [--forward LIST\|none]` | changes a VM's restart policy, lifetime, secrets or forwarding (secrets and forwarding apply from the next start) |
+| `update VM [--restart POLICY] [--ttl D\|none] [--idle-stop D\|none] [--secret SPEC]... [--unset-secret NAME]... [--forward LIST\|none] [--label K=V]... [--unset-label K]...` | changes a VM's restart policy, lifetime, secrets or forwarding (secrets and forwarding apply from the next start) |
 | `rm VM` | deletes a stopped VM and its writable layer (volumes are kept) |
-| `ls [--all] [--json]` | lists VMs: state, exit code, IP, memory used/allocated, disk, network, ports, volumes, restart policy. `--all` includes build VMs |
-| `inspect VM` | one VM's details as JSON, including its last exit |
+| `ls [--all] [--json] [--label K=V]` | lists VMs: state, exit code, IP, memory used/allocated, disk, network, ports, volumes, restart policy. `--all` includes build VMs; `--label` only those carrying that label |
+| `inspect VM` | one VM's details as JSON: its `spec` (the create request, as a template holds it), `status` (`state`, `reason`, `since`), `labels`, its last exit, resource use... see [Listing and inspecting](vms.md#listing-and-inspecting) |
 
 `create` and `run` options:
 
@@ -94,6 +94,8 @@ These use sudo.
 | `--idle-stop DURATION` | stop it after that long without `exec`, `shell`, `cp` or file operations |
 | `--secret NAME=VALUE`, `NAME=@FILE`, `NAME` | a [secret](vms.md#secrets): a file in `/run/secrets` (a tmpfs, never on the VM's disk) and an environment variable. `NAME` alone takes it from your environment. Repeatable |
 | `--forward ssh-agent,git` | [forward your credentials](vms.md#forwarding-your-credentials): the host's ssh-agent, and `git credential fill` for the VM's git |
+| `--label KEY=VALUE` | tags the VM (repeatable); `ls --label KEY=VALUE` filters by them, `inspect` shows them. Keys: letters, digits, `.` `_` `-` `/`, not starting with `fcvm.` |
+| `--if-same-spec` | if a VM of that name exists with the same spec, succeed without doing anything (a safe retry); a different spec fails with `vm_exists` |
 
 ## Projects
 
@@ -118,7 +120,7 @@ These use sudo.
 |---|---|
 | `pool set NAME (--template T \| --snapshot S) --size N [--jail]` | a [warm pool](templates.md#warm-pools): N VMs booted (or forked) ahead of time, kept full by `fcvm serve` |
 | `pool ls [--json]`, `pool rm NAME` | lists pools (with how many are ready); removes one and its unclaimed VMs |
-| `pool claim NAME [--ttl D] [--idle-stop D]` | takes a ready VM out of the pool and prints its name |
+| `pool claim NAME [--ttl D] [--idle-stop D] [--label K=V]...` | takes a ready VM out of the pool and prints its name |
 
 ## Inside a VM
 
@@ -149,7 +151,7 @@ These use sudo.
 | `snapshot VM NAME` | saves a running VM's memory, device state and disk. The VM keeps running (paused ~0.75 s per GB of RAM) |
 | `snapshot ls [--json]`, `snapshot rm NAME` | lists and deletes snapshots |
 | `snapshot export NAME FILE.tar`, `snapshot import FILE.tar [NAME]` | moves a snapshot to another fcvm host, which needs the same images (by name) and a compatible Firecracker ([details](snapshots.md#moving-snapshots-between-hosts)) |
-| `fork SNAPSHOT [NAME] [-n N]` | starts running VMs from a snapshot, ~150 ms each (~1 s jailed), each with its own disk, IP, MAC and hostname |
+| `fork SNAPSHOT [NAME] [-n N] [--label K=V]...` | starts running VMs from a snapshot, ~150 ms each (~1 s jailed), each with its own disk, IP, MAC and hostname |
 
 ## Network
 

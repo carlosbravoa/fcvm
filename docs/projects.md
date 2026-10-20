@@ -36,7 +36,7 @@ forward = ["git"]
 Each `[vms.NAME]` table takes the fields of a [template](templates.md#managing-templates):
 `image`, `ref`, `vcpus`, `mem_mib`, `disk`, `copy`, `network`, `allow`,
 `ports`, `volumes`, `process`, `command`, `entrypoint`, `jail`, `restart`,
-`ttl`, `idle_stop`, `secrets`, `forward`. Plus:
+`ttl`, `idle_stop`, `secrets`, `forward`, `labels`. Plus:
 
 - **`template`**: a saved template to start from. Lists (`ports`,
   `volumes`, `allow`, `secrets`, `forward`) add to the template's; other

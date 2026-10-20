@@ -407,5 +407,27 @@ app images.
 ```sh
 fcvm ls                 # NAME, STATE, IP, IMAGE, MEM (used/allocated), DISK, network/ports/volumes
 fcvm ls --json
+fcvm ls --label team=web
 fcvm inspect web        # everything about one VM, as JSON (including its last exit)
 ```
+
+Three fields of `inspect` are there for programs that manage VMs (the
+console, scripts over the [API](api.md), a control plane):
+
+- **`spec`**: the create request as it was given, normalized, with the
+  fields of a [template](templates.md#managing-templates). It's what
+  `create --if-same-spec` compares: a second `create` of a name that
+  exists succeeds without doing anything when its spec is the same, and
+  fails with `vm_exists` when it differs, so a script that lost the first
+  reply can safely run the command again. Secrets are compared by name,
+  not value, and labels aren't part of the spec.
+- **`status`**: `state`, `reason` and `since` (Unix time): why the VM is
+  in the state it's in. `start` while it runs; after that `user` (you
+  stopped it), `ttl` or `idle` (a [lifetime](#lifetimes---ttl-and---idle-stop)
+  ran out), `exit` (an app's process ended), `shutdown` (the guest shut
+  itself down), `crash` (Firecracker died, or the host did), `created`
+  (never started).
+- **`labels`**: tags you set with `create --label KEY=VALUE`, change with
+  `update --label` / `--unset-label`, and filter by with `ls --label`.
+  Keys are letters, digits, `.`, `_`, `-` and `/`, not starting with
+  `fcvm.` (reserved); values are free text. fcvm itself never reads them.

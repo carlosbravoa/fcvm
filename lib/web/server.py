@@ -408,6 +408,15 @@ def secret_env(d):
     return secrets
 
 
+def labels_of(d, key="labels"):
+    """The request's labels ({KEY: VALUE}), checked as `fcvm create --label` checks them."""
+    labels = d.get(key) or {}
+    if not isinstance(labels, dict) or not all(isinstance(v, str) for v in labels.values()) or \
+            not all(re.fullmatch(r"(?!fcvm\.)[A-Za-z0-9][A-Za-z0-9_./-]{0,62}", str(k)) for k in labels):
+        raise HTTPError(400, "labels must be an object of strings; keys: letters, digits, . _ - /, not starting with fcvm.")
+    return list(labels.items())
+
+
 def forward_list(d):
     """The request's forward list (["ssh-agent", "git"]), checked."""
     fwd = d.get("forward") or []
@@ -720,6 +729,7 @@ class App:
             case ("POST", "snapshots", 3) if parts[2] == "fork":
                 count = int(d.get("count") or 1)
                 args = ["fork", name] + ([d["name"]] if d.get("name") else []) + ["-n", count]
+                args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")]
                 out, err = await fcvm_ok(*args, timeout=60 + 30 * count)
                 return {"log": err}
             case ("DELETE", "snapshots", 2):
@@ -755,6 +765,7 @@ class App:
                 for opt in ("ttl", "idle_stop"):
                     if d.get(opt):
                         args += [f"--{opt.replace('_', '-')}", str(d[opt]).strip()]
+                args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")]
                 out, _ = await fcvm_ok(*args)
                 return await fcvm_json("inspect", out.strip())
             case ("GET", "jobs", 1):
@@ -1058,13 +1069,16 @@ class App:
         args += [a for n in secrets for a in ("--secret", n)]   # values through the environment, not argv
         if forward_list(d):
             args += ["--forward", ",".join(forward_list(d))]
+        args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")]
+        if d.get("if_same_spec"):
+            args.append("--if-same-spec")
         if itype == "app" and d.get("entrypoint") is not None:
             args += ["--entrypoint", str(d["entrypoint"])]
         cmd = d.get("command", "").strip()
         if cmd and not d.get("idle"):
             args += ["--", "sh", "-c", cmd]
         await fcvm_ok(*args, env=secrets)
-        if d.get("start", True):
+        if d.get("start", True) and not (d.get("if_same_spec") and (await fcvm_json("inspect", name))["state"] == "running"):
             try:
                 await fcvm_ok("start", name, timeout=60)
             except HTTPError as e:
@@ -1144,8 +1158,10 @@ class App:
                 args += ["--unset-secret", n]
             if "forward" in d:
                 args += ["--forward", ",".join(forward_list(d)) or "none"]
+            args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")]
+            args += [a for k in d.get("unset_labels") or [] for a in ("--unset-label", str(k))]
             if not args:
-                raise HTTPError(400, "nothing to update: give restart, ttl, idle_stop, secrets or unset_secrets")
+                raise HTTPError(400, "nothing to update: give restart, ttl, idle_stop, secrets, unset_secrets, forward, labels or unset_labels")
             await fcvm_ok("update", name, *args, env=secrets)
         elif action == "commit":
             img = d.get("image", "").strip()

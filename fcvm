@@ -58,6 +58,8 @@ VMs:
                              never on the VM's disk; NAME alone: from your environment)
                              --forward ssh-agent,git (relay your ssh-agent and git credentials
                              into the VM; it uses them without holding them)
+                             --label KEY=VALUE (tag the VM; ls --label filters by them)
+                             --if-same-spec (succeed if the VM exists with the same spec)
   create VM --template NAME [opts] [-- CMD...]
                              create from a saved template; your options override its
   start [-a] VM              boot a VM in the background; -a attaches its console
@@ -95,9 +97,10 @@ VMs:
   snapshot ls [--json] | rm NAME
   snapshot export NAME FILE.tar | import FILE.tar [NAME]
                              move a snapshot to another host (same images and Firecracker needed)
-  fork SNAPSHOT [NAME] [-n N]  new running VM(s) from a snapshot in ~150 ms, with their own
+  fork SNAPSHOT [NAME] [-n N] [--label K=V]
+                             new running VM(s) from a snapshot in ~150 ms, with their own
                              disk, IP, MAC and hostname (processes keep running)
-  update VM [--restart POLICY] [--ttl D|none] [--idle-stop D|none] [--secret SPEC] [--unset-secret NAME] [--forward LIST|none]
+  update VM [--restart POLICY] [--ttl D|none] [--idle-stop D|none] [--secret SPEC] [--unset-secret NAME] [--forward LIST|none] [--label K=V] [--unset-label K]
                              change a VM's restart policy, lifetime, secrets or forwarding
   up [-f FILE] [VM...]       the VMs of a project file (fcvm.toml here or above): create what's
                              missing, start what's stopped. down: stop and remove them
@@ -109,8 +112,8 @@ VMs:
   template ls|show NAME|rm NAME   launch templates (* = built in)
   template save NAME --from VM | IMAGE [create opts] [-- CMD]  [-d DESCRIPTION]
                              save a recipe: create/run --template NAME use it
-  inspect VM                 VM details as JSON
-  ls [--all] [--json]        list VMs (--all: include build VMs)
+  inspect VM                 VM details as JSON: its spec, status (state, reason, since), labels...
+  ls [--all] [--json] [--label K=V]  list VMs (--all: include build VMs; --label: only those tagged so)
   rm VM                      delete a VM
   rmi IMAGE                  delete an image
   egress VM [--allow H,...] [--deny H,...] [-f]

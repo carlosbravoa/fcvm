@@ -70,6 +70,15 @@ ports = ["8000:8000"]
         a = vms["proj-a"]
         self.assertEqual((a["process"], a["allow"], a["ports"]), ("idle", ["@pypi", "@github", "example.com"], ["8000:8000"]))
 
+    def test_labels_merge_with_the_template(self):
+        _, vms = pj.load(self.write('''
+[vms.a]
+template = "python-sandbox"
+labels = {env = "ci"}
+'''))
+        self.assertEqual(vms["shop-a"]["labels"], {"env": "ci"})
+        self.assertIn("--label", pj.create_args("shop-a", vms["shop-a"]))
+
     def test_errors(self):
         for text, msg in (("", "no VMs"), ("[vms.a]\nvcpus = 2\n", "image is required"),
                           ('[vms.a]\nimage = "x"\ncolour = "red"\n', "unknown field"),

@@ -86,7 +86,7 @@ wrap this API: `Client().create("box", template="python-sandbox")`, then
 | `POST /vms/{vm}/start` | | `fcvm start` |
 | `POST /vms/{vm}/stop` | | `fcvm stop`; restart policies then leave it alone |
 | `POST /vms/{vm}/restart` | | stop, then start |
-| `POST /vms/{vm}/update` | `{"restart": "no\|on-failure\|unless-stopped\|always", "ttl": "2h", "idle_stop": null, "secrets": {"NAME": "value"}, "unset_secrets": ["OLD"], "forward": ["ssh-agent", "git"]}` | `fcvm update`: any of these; `null` or `""` clears a lifetime; secrets and forwarding apply from the next start |
+| `POST /vms/{vm}/update` | `{"restart": "no\|on-failure\|unless-stopped\|always", "ttl": "2h", "idle_stop": null, "secrets": {"NAME": "value"}, "unset_secrets": ["OLD"], "forward": ["ssh-agent", "git"], "labels": {"team": "web"}, "unset_labels": ["old"]}` | `fcvm update`: any of these; `null` or `""` clears a lifetime; secrets and forwarding apply from the next start; labels merge |
 | `POST /vms/{vm}/snapshot` | `{"name": "snap"}` | `fcvm snapshot` |
 | `POST /vms/{vm}/commit` | `{"image": "name"}` | `fcvm commit` (the VM must be stopped) |
 | `DELETE /vms/{vm}` | | stop it if running, then delete it |
@@ -111,19 +111,26 @@ wrap this API: `Client().create("box", template="python-sandbox")`, then
   "idle": true, "command": "shell command (app images, when not idle)",
   "jail": true, "restart": "unless-stopped", "start": true,
   "ttl": "2h", "idle_stop": "30m", "secrets": {"API_KEY": "sk-..."}, "forward": ["ssh-agent", "git"],
-  "disk": "16G", "copy": false, "entrypoint": null, "ref": "python:3.13-slim"
+  "disk": "16G", "copy": false, "entrypoint": null, "ref": "python:3.13-slim",
+  "labels": {"team": "web"}, "if_same_spec": false
 }
 ```
 
 Only `name` and `image` are required. `ref` imports the image first when
 it's missing. `allow` is used with
 `"network": "restricted"`. The response is the new VM, as `GET /vms/{vm}`.
+With `if_same_spec`, a VM that already exists with the same spec is
+returned as it is (and started if it isn't running), so a request can be
+retried after a lost reply; a different spec is a 409 `vm_exists`.
 
 Fields worth knowing in a VM object (as `fcvm inspect`, plus `vm.json`):
 
 | field | meaning |
 |---|---|
 | `state` | `running`, `stopped`, or `exited` (an app VM whose process ended; see `exit_code`) |
+| `status` | `{"state", "reason", "since"}`: why it's in that state and since when, see [Listing and inspecting](vms.md#listing-and-inspecting) |
+| `spec` | the create request, normalized (the fields of a template) |
+| `labels` | your tags (`{"team": "web"}`), from `labels` at create or update |
 | `restart` | the restart policy |
 | `stopped_by_user` | stopped with `fcvm stop`, so restart policies leave it alone |
 | `last_exit` | how it last ended: `code` (an app's exit code), `fc_status` (Firecracker's: 0 = the guest shut down; negative = killed by that signal), `stale` (it was running when the host crashed or rebooted), `at` (Unix time) |
@@ -159,7 +166,7 @@ even one without a shell.
 | `POST /images` | `{"ref": "nginx:latest", "name": "optional"}` | start an import as a [background job](#background-jobs); returns the job |
 | `DELETE /images/{image}` | | `fcvm rmi` |
 | `GET /snapshots` | | `fcvm snapshot ls --json` |
-| `POST /snapshots/{snap}/fork` | `{"name": "optional", "count": 1}` | `fcvm fork`; returns `{"log": "..."}` |
+| `POST /snapshots/{snap}/fork` | `{"name": "optional", "count": 1, "labels": {}}` | `fcvm fork`; returns `{"log": "..."}` |
 | `DELETE /snapshots/{snap}` | | `fcvm snapshot rm` |
 | `GET /volumes` | | `fcvm volume ls --json` |
 | `DELETE /volumes/{volume}` | | `fcvm volume rm` |
@@ -183,7 +190,7 @@ first.
 | `GET /pools` | | the [pools](templates.md#warm-pools), each with `ready` and its unclaimed `vms` |
 | `POST /pools` | `{"name": "py", "template": "python-sandbox", "size": 3, "jail": true}` (or `"snapshot"`) | `fcvm pool set` |
 | `DELETE /pools/{name}` | | `fcvm pool rm` |
-| `POST /pools/{name}/claim` | `{"ttl": "2h", "idle_stop": "30m"}` (optional) | takes a ready VM; returns it as `GET /vms/{vm}`; 400 when none is ready |
+| `POST /pools/{name}/claim` | `{"ttl": "2h", "idle_stop": "30m", "labels": {}}` (optional) | takes a ready VM; returns it as `GET /vms/{vm}`; 409 `pool_empty` when none is ready |
 
 ## Prometheus
 

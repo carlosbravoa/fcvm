@@ -109,6 +109,8 @@ def load(path):
         for k in ("ports", "volumes", "allow", "secrets", "forward"):   # lists add to the template's
             if k in spec and k in t:
                 spec[k] = t[k] + [x for x in spec[k] if x not in t[k]]
+        if "labels" in spec and "labels" in t and isinstance(spec["labels"], dict):   # so do labels
+            spec["labels"] = {**t["labels"], **spec["labels"]}
         merged = {**t, **spec}
         if "volumes" in merged:
             merged["volumes"] = [resolve_volume(v, base) for v in merged["volumes"]]

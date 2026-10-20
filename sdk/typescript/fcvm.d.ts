@@ -49,11 +49,20 @@ export interface CreateOptions {
   secrets?: Record<string, string>;
   forward?: ("ssh-agent" | "git")[];
   ref?: string;
+  /** your tags on the VM; keys: letters, digits, . _ - /, not starting with fcvm. */
+  labels?: Record<string, string>;
+  /** succeed if a VM of this name exists with the same spec (a safe retry) instead of failing */
+  if_same_spec?: boolean;
 }
 
 export interface VmInfo {
   name: string;
   state: "running" | "stopped" | "exited";
+  /** the state, why, and since when (Unix time) */
+  status: { state: string; reason: string; since: number | null };
+  labels: Record<string, string>;
+  /** the create request as given (the fields of a template) */
+  spec: Record<string, unknown> | null;
   ip: string | null;
   image: string;
   type: "app" | "system";
@@ -120,7 +129,7 @@ export class Sandbox {
   stop(): Promise<VmInfo>;
   restart(): Promise<VmInfo>;
   remove(): Promise<{ removed: string }>;
-  update(fields: Partial<Pick<CreateOptions, "restart" | "ttl" | "idle_stop" | "secrets" | "forward">> & { unset_secrets?: string[] }): Promise<VmInfo>;
+  update(fields: Partial<Pick<CreateOptions, "restart" | "ttl" | "idle_stop" | "secrets" | "forward" | "labels">> & { unset_secrets?: string[]; unset_labels?: string[] }): Promise<VmInfo>;
   snapshot(name: string): Promise<Snapshot>;
   commit(image: string): Promise<string>;
   logs(): Promise<string>;

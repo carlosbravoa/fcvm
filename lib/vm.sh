@@ -127,6 +127,17 @@ guest_arg() {
 # A JSON list of strings; unlike jq --args, safe for strings that look like options.
 json_list() { [ $# -eq 0 ] && echo '[]' || printf '%s\0' "$@" | jq -Rsc 'split("\u0000")[:-1]'; }
 
+# Labels (--label KEY=VALUE): yours to tag VMs with; fcvm ignores them. Keys
+# are up to 63 characters of letters, digits, . _ - and /, not starting with
+# "fcvm." (reserved for annotations fcvm writes). Values are free text.
+label_ok() {
+    [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_./-]{0,62}=.*$ ]] || die_code invalid "bad label '$1' (want KEY=VALUE; KEY: letters, digits, . _ - /)"
+    [[ $1 != fcvm.* ]] || die_code invalid "label keys starting with fcvm. are reserved"
+}
+labels_json() {   # KEY=VALUE... -> {"KEY": "VALUE", ...}
+    [ $# -eq 0 ] && echo '{}' || printf '%s\0' "$@" | jq -Rsc 'split("\u0000")[:-1] | map(capture("^(?<k>[^=]*)=(?<v>.*)$") | {key: .k, value: .v}) | from_entries'
+}
+
 # fcvm create/run --template NAME [ARGS...]: the template's image and create
 # options, then yours (later options win), then the template's process unless
 # you give one (-- CMD, --idle or --entrypoint). A missing image is imported
@@ -374,17 +385,19 @@ exit_code() {
 }
 
 create() {
-    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [--restart POLICY] [--ttl DURATION] [--idle-stop DURATION] [-- CMD...]"
+    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [--restart POLICY] [--ttl DURATION] [--idle-stop DURATION] [--label KEY=VALUE]... [--if-same-spec] [-- CMD...]"
     local vm=${1:?$usage}
     if [ "${2:-}" = --template ]; then template_expand "${@:3}"; set -- "$vm" "${TEMPLATE_ARGS[@]}"; fi
     local image=${2:?$usage}
     shift 2
     local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full allow=()
     local entrypoint=() set_entrypoint=0 jail=${JAIL:-0} jail_set="" vcpus_set=null mem_set=null restart=no agent=1
-    local ttl="" idle_stop="" ttl_raw="" idle_raw="" secrets=() forward=() cache=0
+    local ttl="" idle_stop="" ttl_raw="" idle_raw="" secrets=() forward=() cache=0 labels=() same_ok=0
     while [ $# -gt 0 ]; do
         case $1 in
             --cache)        cache=1; shift ;;
+            --label)        label_ok "${2:?--label wants KEY=VALUE}"; labels+=("$2"); shift 2 ;;
+            --if-same-spec) same_ok=1; shift ;;
             --secret)       parse_secret "${2:?--secret wants NAME=VALUE, NAME=@FILE or NAME}"; secrets+=("$2"); shift 2 ;;
             --forward)      mapfile -t forward < <(parse_forward "$(IFS=,; echo "${forward[*]:-},${2:?--forward wants ssh-agent and/or git}")"); shift 2 ;;
             --vcpus)        vcpus=$2 vcpus_set=$2; shift 2 ;;
@@ -415,7 +428,14 @@ create() {
     [[ $vcpus =~ ^[1-9][0-9]*$ && $mem =~ ^[1-9][0-9]*$ ]] || die "--vcpus and --mem want positive numbers"
     sock_room "$vm"
     lock_vm "$vm"
-    vm_exists "$vm" && die_code vm_exists "VM '$vm' already exists"
+    local existing=0
+    if vm_exists "$vm"; then
+        # --if-same-spec: a retry of a create that already happened (a script, a
+        # control plane) is fine if it asks for the same VM; checked below, once
+        # the request is validated and normalized.
+        [ $same_ok = 1 ] && [ -z "${FCVM_TEMPLATE_OUT:-}" ] || die_code vm_exists "VM '$vm' already exists"
+        existing=1
+    fi
     [ "$restart" = no ] || [ -z "${EPHEMERAL:-}" ] || die "--restart doesn't apply to throwaway VMs (fcvm run); use create"
     local meta type raw_cmd=("${argv[@]}") raw_ep=("${entrypoint[@]}")
     meta=$(image_json "$image")
@@ -465,28 +485,21 @@ create() {
         die "run needs the agent for a system image's shell; use create --no-agent, then fcvm console"
     [ $agent = 1 ] || [ -n "${FCVM_TEMPLATE_OUT:-}" ] || confirm_no_agent
     if [ -n "${FCVM_TEMPLATE_OUT:-}" ]; then   # fcvm template save: the checked recipe, no VM
-        local proc=image; [ $idle = 0 ] || proc=idle; [ ${#raw_cmd[@]} -eq 0 ] || proc=command
-        jq -n --arg image "$image" --arg ref "$(jq -r '.ref // empty' "$meta")" --argjson vcpus "$vcpus_set" \
-            --argjson mem "$mem_set" --arg disk "$disk" --argjson copy "$([ $copy = 1 ] && echo true || echo false)" \
-            --argjson ports "$(json_list "${ports[@]}")" \
-            --argjson volumes "$(json_list "${vols[@]}" "${shares[@]}")" \
-            --arg net "$netmode" --argjson allow "$(json_list "${allow[@]}")" --argjson cache "$([ $cache = 1 ] && echo true || echo false)" \
-            --arg proc "$proc" --argjson command "$(json_list "${raw_cmd[@]}")" \
-            --argjson ep_set "$set_entrypoint" --arg ep "${raw_ep[*]}" --arg jail "$jail_set" --arg restart "$restart" \
-            --arg ttl "${ttl:+$ttl_raw}" --arg idle_stop "${idle_stop:+$idle_raw}" --argjson secrets "$(json_list "${secret_names[@]}")" \
-            --argjson forward "$(json_list "${forward[@]}")" \
-            '{image: $image, ref: (if $ref == "" then null else $ref end), vcpus: $vcpus, mem_mib: $mem,
-              disk: (if $disk == "" then null else $disk end), copy: $copy, network: $net, allow: $allow,
-              ports: $ports, volumes: $volumes, process: $proc, command: $command,
-              entrypoint: (if $ep_set == 1 then $ep else null end),
-              jail: (if $jail == "" then null else ($jail == "1") end), restart: $restart,
-              ttl: (if $ttl == "" then null else $ttl end), idle_stop: (if $idle_stop == "" then null else $idle_stop end),
-              secrets: $secrets, forward: $forward, cache: $cache}' > "$FCVM_TEMPLATE_OUT"
+        recipe_json template > "$FCVM_TEMPLATE_OUT"
         unlock_vm; rm -f "$VMS_DIR/.locks/vm-$vm"
         return 0
     fi
 
-    local dir; dir=$(vm_dir "$vm")
+    local dir spec; dir=$(vm_dir "$vm")
+    spec=$(recipe_json spec)
+    if [ $existing = 1 ]; then
+        if [ "$(jq -c '.spec // null' "$dir/vm.json")" = "$(jq -c . <<<"$spec")" ]; then
+            unlock_vm
+            [ -n "${EPHEMERAL:-}" ] || log "VM '$vm' already exists with this spec (--if-same-spec)"
+            return 0
+        fi
+        die_code vm_exists "VM '$vm' already exists with a different spec (fcvm inspect $vm shows it)"
+    fi
     mkdir -p "$dir"
     if [ $copy = 1 ]; then
         cp --sparse=always "$IMAGES_DIR/$image.ext4" "$dir/disk.ext4"
@@ -512,19 +525,47 @@ create() {
         --argjson net "$(jq -n --arg mode "$netmode" --argjson cache "$([ $cache = 1 ] && echo true || echo false)" \
             '{mode: $mode, allow: $ARGS.positional} + (if $cache then {cache: true} else {} end)' --args "${allow[@]}")" \
         '{image: $image, type: $type, vcpus: $vcpus, mem_mib: $mem, ports: $ports, volumes: $volumes,
-          shares: $shares, net: $net, jail: $jail, restart: $restart, ephemeral: $ephemeral, created: (now | todate)}
+          shares: $shares, net: $net, jail: $jail, restart: $restart, ephemeral: $ephemeral, created: (now | todate),
+          labels: $labels, spec: $spec}
          + (if $agent then {} else {agent: false} end) + (if $hostkey == "" then {} else {ssh_host_key: $hostkey} end)
          + $lifetime + (if ($forward | length) == 0 then {} else {forward: $forward} end)
          + (if ($forward | index("ssh-agent")) then {ssh_auth_sock: $sock} else {} end)' \
         --arg hostkey "$hostkey" --argjson agent "$([ $agent = 1 ] && echo true || echo false)" \
         --argjson lifetime "$(lifetime_json "$ttl" "$idle_stop")" \
-        --argjson forward "$(json_list "${forward[@]}")" --arg sock "${SSH_AUTH_SOCK:-}" > "$dir/vm.json"
+        --argjson forward "$(json_list "${forward[@]}")" --arg sock "${SSH_AUTH_SOCK:-}" \
+        --argjson labels "$(labels_json "${labels[@]}")" --argjson spec "$spec" > "$dir/vm.json"
     if [[ " ${forward[*]:-} " == *" ssh-agent "* ]] && [ ! -S "${SSH_AUTH_SOCK:-}" ]; then
         warn "--forward ssh-agent: no agent in this environment (SSH_AUTH_SOCK); set it before fcvm start"
     fi
     local SECRETS_DEL=()
     [ ${#secrets[@]} -eq 0 ] || write_secrets "$dir" "${secrets[@]}"
     [ -n "${EPHEMERAL:-}" ] || log "created VM '$vm' from $image ($([ $copy = 1 ] && echo 'private copy' || echo 'shared image + writable layer'))"
+}
+
+# The create request, checked and normalized, as JSON: what a template holds
+# (fcvm template save) and what vm.json keeps as the VM's `spec`. The template
+# keeps vcpus and mem_mib only when given (null means the defaults at create);
+# the spec keeps the values the VM got. Reads create()'s variables.
+recipe_json() {   # template | spec
+    local proc=image v=$vcpus_set m=$mem_set; [ $idle = 0 ] || proc=idle; [ ${#raw_cmd[@]} -eq 0 ] || proc=command
+    [ "$1" != spec ] || v=$vcpus m=$mem
+    jq -n --arg image "$image" --arg ref "$(jq -r '.ref // empty' "$meta")" --argjson vcpus "$v" \
+        --argjson mem "$m" --arg disk "$disk" --argjson copy "$([ $copy = 1 ] && echo true || echo false)" \
+        --argjson ports "$(json_list "${ports[@]}")" \
+        --argjson volumes "$(json_list "${vols[@]}" "${shares[@]}")" \
+        --arg net "$netmode" --argjson allow "$(json_list "${allow[@]}")" --argjson cache "$([ $cache = 1 ] && echo true || echo false)" \
+        --arg proc "$proc" --argjson command "$(json_list "${raw_cmd[@]}")" \
+        --argjson ep_set "$set_entrypoint" --arg ep "${raw_ep[*]}" --arg jail "$jail_set" --arg restart "$restart" \
+        --arg ttl "${ttl:+$ttl_raw}" --arg idle_stop "${idle_stop:+$idle_raw}" --argjson secrets "$(json_list "${secret_names[@]}")" \
+        --argjson forward "$(json_list "${forward[@]}")" --argjson labels "$(labels_json "${labels[@]}")" --arg kind "$1" \
+        '{image: $image, ref: (if $ref == "" then null else $ref end), vcpus: $vcpus, mem_mib: $mem,
+          disk: (if $disk == "" then null else $disk end), copy: $copy, network: $net, allow: $allow,
+          ports: $ports, volumes: $volumes, process: $proc, command: $command,
+          entrypoint: (if $ep_set == 1 then $ep else null end),
+          jail: (if $jail == "" then null else ($jail == "1") end), restart: $restart,
+          ttl: (if $ttl == "" then null else $ttl end), idle_stop: (if $idle_stop == "" then null else $idle_stop end),
+          secrets: $secrets, forward: $forward, cache: $cache}
+         + (if $kind == "template" and ($labels | length) > 0 then {labels: $labels} else {} end)'
 }
 
 # Claim a free tap: the flock is inherited by firecracker and held for its lifetime.
@@ -1644,7 +1685,8 @@ fork_one() {
         t0=$(date +%s%N)
         disk=$(jq -r .disk "$sdir/meta.json")
         mkdir -p "$dir"
-        jq --arg snap "$snap" '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate)}' \
+        jq --arg snap "$snap" --argjson labels "${FORK_LABELS:-{\}}" \
+            '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate), labels: $labels}' \
             "$sdir/vm.json" > "$dir/vm.json"
         cp --sparse=always "$sdir/$disk" "$dir/$disk"
         RESTORE=$snap QUIET_START=1 start "$vm"
@@ -1654,7 +1696,8 @@ fork_one() {
     disk=$(jq -r .disk "$sdir/meta.json"); drive=$(jq -r .drive_id "$sdir/meta.json")
     t0=$(date +%s%N)
     mkdir -p "$dir"
-    jq --arg snap "$snap" '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate)}' \
+    jq --arg snap "$snap" --argjson labels "${FORK_LABELS:-{\}}" \
+        '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate), labels: $labels}' \
         "$sdir/vm.json" > "$dir/vm.json"
     cp --sparse=always "$sdir/$disk" "$dir/$disk"
     DIR=$dir IP=""
@@ -1715,10 +1758,11 @@ fork_one() {
 }
 
 fork_cmd() {
-    local usage="usage: fcvm fork SNAPSHOT [NAME] [-n COUNT]" snap="" name="" count=1
+    local usage="usage: fcvm fork SNAPSHOT [NAME] [-n COUNT] [--label KEY=VALUE]..." snap="" name="" count=1 labels=()
     while [ $# -gt 0 ]; do
         case $1 in
             -n|--count) [[ ${2:-} =~ ^[1-9][0-9]*$ ]] || die_code invalid "$usage"; count=$2; shift 2 ;;
+            --label)    label_ok "${2:?$usage}"; labels+=("$2"); shift 2 ;;
             -*)         die_code invalid "unknown option $1 ($usage)" ;;
             *)          if [ -z "$snap" ]; then snap=$1; else name=$1; fi; shift ;;
         esac
@@ -1729,13 +1773,14 @@ fork_cmd() {
         warn "published ports aren't carried over to forks (they'd conflict with the source)"
     if use_daemon; then
         local reply rc=0
-        reply=$(daemon_api POST "snapshots/$snap/fork" "$(jq -n --arg n "$name" --argjson c "$count" \
-            '{count: $c} + (if $n == "" then {} else {name: $n} end)')") || rc=$?
+        reply=$(daemon_api POST "snapshots/$snap/fork" "$(jq -n --arg n "$name" --argjson c "$count" --argjson l "$(labels_json "${labels[@]}")" \
+            '{count: $c, labels: $l} + (if $n == "" then {} else {name: $n} end)')") || rc=$?
         if [ $rc = 0 ]; then jq -r .log <<<"$reply" | sed "/^$/d" >&2; return; fi
         [ $rc = 2 ] || exit 1
         warn "the fcvm service isn't answering; forking from this terminal"
     fi
     local base=${name:-$snap-$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')} i
+    FORK_LABELS=$(labels_json "${labels[@]}")
     if [ "$count" = 1 ]; then
         fork_one "$snap" "$base"
     else
@@ -1966,7 +2011,7 @@ pool_members() {   # name [running]: pooled VMs, unclaimed
 }
 
 pool_cmd() {
-    local usage="usage: fcvm pool set NAME (--template T | --snapshot S) --size N [--jail] | fcvm pool ls [--json] | fcvm pool rm NAME | fcvm pool claim NAME [--ttl D] [--idle-stop D]"
+    local usage="usage: fcvm pool set NAME (--template T | --snapshot S) --size N [--jail] | fcvm pool ls [--json] | fcvm pool rm NAME | fcvm pool claim NAME [--ttl D] [--idle-stop D] [--label KEY=VALUE]..."
     local sub=${1:-ls}; [ $# -eq 0 ] || shift
     case $sub in
         set)
@@ -2014,11 +2059,12 @@ pool_cmd() {
             done
             log "removed pool '$name' and its unclaimed VMs (claimed ones are ordinary VMs now)" ;;
         claim)
-            local name=${1:?$usage} ttl="" idle="" vm="" d plock; shift
+            local name=${1:?$usage} ttl="" idle="" vm="" d plock labels=(); shift
             while [ $# -gt 0 ]; do
                 case $1 in
                     --ttl)       ttl=${2:?$usage}; shift 2 ;;
                     --idle-stop) idle=${2:?$usage}; shift 2 ;;
+                    --label)     label_ok "${2:?$usage}"; labels+=("--label" "$2"); shift 2 ;;
                     *)           die_code invalid "unknown option $1 ($usage)" ;;
                 esac
             done
@@ -2030,7 +2076,7 @@ pool_cmd() {
             d=$(vm_dir "$vm")
             rm -f "$d/pooled"; date +%s > "$d/claimed"; touch_activity "$vm"
             exec {plock}>&-
-            [ -z "$ttl$idle" ] || update "$vm" ${ttl:+--ttl "$ttl"} ${idle:+--idle-stop "$idle"} >/dev/null
+            [ -z "$ttl$idle" ] && [ ${#labels[@]} -eq 0 ] || update "$vm" ${ttl:+--ttl "$ttl"} ${idle:+--idle-stop "$idle"} "${labels[@]}" >/dev/null 2>&1
             log "claimed '$vm' from pool '$name'"
             echo "$vm" ;;
         _fill)   # one more VM for the pool (the supervisor's job)
@@ -2095,6 +2141,25 @@ fc_api_get() {   # socket path
 vm_rss() {
     awk '/^VmRSS:/ {print $2 * 1024}' "/proc/$1/status" 2>/dev/null || true
 }
+has_label() {   # vm.json "" | KEY=VALUE
+    [ -z "$2" ] || jq -e --arg k "${2%%=*}" --arg v "${2#*=}" '(.labels // {})[$k] == $v' "$1" >/dev/null
+}
+
+# A VM's state, the reason for it and since when (Unix time), from what the
+# commands leave behind: `pid` while it runs; `expired` (ttl, idle) or the
+# `stopped` marker after a stop; `last-exit` after the guest ended on its own
+# or Firecracker died; nothing yet after create.
+state_reason() {   # vm state -> "reason since"
+    local d=$VMS_DIR/$1 why since=""
+    if [ "$2" = running ]; then echo "start $(stat -c %Y "$d/pid" 2>/dev/null)"; return; fi
+    if [ -s "$d/expired" ]; then why=$(cat "$d/expired"); since=$(stat -c %Y "$d/expired")
+    elif [ -f "$d/stopped" ]; then why=user; since=$(stat -c %Y "$d/stopped")
+    elif [ -f "$d/last-exit" ]; then
+        why=$(jq -r 'if .stale then "crash" elif .code != null then "exit" elif (.fc_status // 0) != 0 then "crash" else "shutdown" end' "$d/last-exit")
+        since=$(jq -r '.at | floor' "$d/last-exit")
+    else why=created; since=$(date -d "$(jq -r .created "$d/vm.json")" +%s 2>/dev/null || true); fi
+    echo "$why $since"
+}
 
 inspect_json() {
     local vm=$1 d state=stopped pid="" ip="" code=""
@@ -2107,9 +2172,11 @@ inspect_json() {
     local rss="" balloon=null; [ -z "$pid" ] || rss=$(vm_rss "$pid")
     [ "$state" != running ] || balloon=$(fc_api_get "$d/fc.sock" /balloon 2>/dev/null | jq '.amount_mib' 2>/dev/null || echo null)
     # Lifetime: when --ttl and --idle-stop would stop a running VM (Unix time).
-    local booted="" active=""
+    local booted="" active="" reason
     if [ "$state" = running ]; then booted=$(stat -c %Y "$d/pid" 2>/dev/null || true); active=$(stat -c %Y "$d/activity" 2>/dev/null || echo "$booted"); fi
+    read -r reason since < <(state_reason "$vm" "$state")
     jq --arg name "$vm" --arg state "$state" --arg pid "$pid" --arg ip "$ip" --arg code "$code" --arg rss "$rss" \
+        --arg reason "$reason" --arg since "${since:-}" \
         --argjson disk "$(( $(stat -c %b "$d"/*.ext4 | head -1) * 512 ))" \
         --arg mode "$([ -f "$d/disk.ext4" ] && echo copy || echo overlay)" \
         --argjson chain "$(jq -n '$ARGS.positional' --args $(image_chain "$(jq -r .image "$d/vm.json")"))" \
@@ -2124,7 +2191,9 @@ inspect_json() {
           stopped_by_user: $stopped, last_exit: $last,
           expires_at: (if .ttl_s and $booted != "" then ([($booted | tonumber), ($claimed | tonumber? // 0)] | max) + .ttl_s else null end),
           idle_expires_at: (if .idle_stop_s and $active != "" then ($active | tonumber) + .idle_stop_s else null end),
-          expired: (if $expired == "" then null else $expired end)} + {restart: "no"} + .' \
+          expired: (if $expired == "" then null else $expired end),
+          status: {state: $state, reason: $reason, since: ($since | tonumber? // null)}}
+         + {restart: "no", labels: {}, spec: null} + .' \
         --argjson stopped "$([ -f "$d/stopped" ] && echo true || echo false)" \
         --argjson last "$(cat "$d/last-exit" 2>/dev/null || echo null)" "$d/vm.json"
 }
@@ -2176,12 +2245,20 @@ egress() {
 }
 
 list_vms() {
-    local d all=0 json=0 a
-    for a; do case $a in --all|-a) all=1 ;; --json) json=1 ;; esac; done
+    local d all=0 json=0 a label=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --all|-a) all=1; shift ;;
+            --json)   json=1; shift ;;
+            --label)  label_ok "${2:?--label wants KEY=VALUE}"; label=$2; shift 2 ;;
+            *)        die_code invalid "unknown option $1 (usage: fcvm ls [--all] [--json] [--label KEY=VALUE])" ;;
+        esac
+    done
     if [ $json = 1 ]; then
         for d in "$VMS_DIR"/*/; do
             [ -f "$d/vm.json" ] || continue
             [ $all = 1 ] || [[ $(basename "$d") != _* ]] || continue
+            has_label "$d/vm.json" "$label" || continue
             inspect_json "$(basename "$d")"
         done | jq -s .
         return
@@ -2193,6 +2270,7 @@ list_vms() {
         [ -f "$d/vm.json" ] || continue
         vm=$(basename "$d")
         [ $all = 1 ] || [[ $vm != _* ]] || continue   # internal (fcvm build)
+        has_label "$d/vm.json" "$label" || continue
         state=stopped ip=-
         alloc=$(jq -r .mem_mib "$d/vm.json"); mem="${alloc}M"
         if vm_running "$vm"; then
@@ -2248,8 +2326,8 @@ list_images() {
 
 # fcvm update VM [--restart POLICY] [--ttl D] [--idle-stop D]: change settings of an existing VM.
 update() {
-    local usage="usage: fcvm update VM [--restart no|on-failure|unless-stopped|always] [--ttl DURATION|none] [--idle-stop DURATION|none] [--secret SPEC]... [--unset-secret NAME]... [--forward ssh-agent,git|none]"
-    local vm=${1:-} restart="" ttl="" idle="" set_ttl=0 set_idle=0 what=() secrets=() SECRETS_DEL=() forward=() set_fwd=0
+    local usage="usage: fcvm update VM [--restart no|on-failure|unless-stopped|always] [--ttl DURATION|none] [--idle-stop DURATION|none] [--secret SPEC]... [--unset-secret NAME]... [--forward ssh-agent,git|none] [--label KEY=VALUE]... [--unset-label KEY]..."
+    local vm=${1:-} restart="" ttl="" idle="" set_ttl=0 set_idle=0 what=() secrets=() SECRETS_DEL=() forward=() set_fwd=0 labels=() unlabel=()
     [ -n "$vm" ] || die_code invalid "$usage"; shift
     while [ $# -gt 0 ]; do
         case $1 in
@@ -2259,10 +2337,13 @@ update() {
             --secret)    parse_secret "${2:?$usage}"; secrets+=("$2"); shift 2 ;;
             --unset-secret) SECRETS_DEL+=("${2:?$usage}"); shift 2 ;;
             --forward)   mapfile -t forward < <(parse_forward "${2:?$usage}"); set_fwd=1; shift 2 ;;
+            --label)     label_ok "${2:?$usage}"; labels+=("$2"); shift 2 ;;
+            --unset-label) unlabel+=("${2:?$usage}"); shift 2 ;;
             *)           die_code invalid "unknown option $1 ($usage)" ;;
         esac
     done
-    [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || [ $set_fwd = 1 ] || die_code invalid "$usage"
+    [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || [ $set_fwd = 1 ] ||
+        [ ${#labels[@]} -gt 0 ] || [ ${#unlabel[@]} -gt 0 ] || die_code invalid "$usage"
     lock_vm "$vm"
     vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     local f=$VMS_DIR/$vm/vm.json
@@ -2288,6 +2369,13 @@ update() {
     if [ $set_idle = 1 ]; then
         jq --arg t "$idle" 'if $t == "" then del(.idle_stop_s) else .idle_stop_s = ($t | tonumber) end' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
         what+=("idle-stop $([ -n "$idle" ] && echo "${idle}s" || echo none)")
+    fi
+    if [ ${#labels[@]} -gt 0 ] || [ ${#unlabel[@]} -gt 0 ]; then
+        jq --argjson set "$(labels_json "${labels[@]}")" --argjson del "$(json_list "${unlabel[@]}")" \
+            '.labels = ((.labels // {}) + $set | with_entries(select(.key as $k | $del | index($k) | not)))' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+        what+=("labels $(jq -r '.labels | to_entries | map("\(.key)=\(.value)") | join(" ")' "$f")")
+        [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || [ $set_fwd = 1 ] ||
+            { log "'$vm': ${what[*]}"; return 0; }
     fi
     log "'$vm': $(printf '%s, ' "${what[@]}" | sed 's/, $//') (applied by fcvm serve / the fcvm service)"
 }

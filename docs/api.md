@@ -170,14 +170,18 @@ even one without a shell.
 
 | method, path | body | does |
 |---|---|---|
-| `GET /images` | | `fcvm images --json` |
-| `POST /images` | `{"ref": "nginx:latest", "name": "optional"}` | start an import as a [background job](#background-jobs); returns the job |
+| `GET /images` | `?tenant=NAME` | `fcvm images --json`: each with its `tenant` (`null` when public); with the query, only that tenant's |
+| `POST /images` | `{"ref": "nginx:latest", "name": "optional", "tenant": "optional"}` | start an import as a [background job](#background-jobs); returns the job. With a tenant, the image is that tenant's own |
 | `DELETE /images/{image}` | | `fcvm rmi` |
-| `GET /snapshots` | | `fcvm snapshot ls --json` |
-| `POST /snapshots/{snap}/fork` | `{"name": "optional", "count": 1, "labels": {}, "tenant": null, "lease": null}` | `fcvm fork`; returns `{"log": "..."}`; 429 `quota_exceeded` when the tenant is full |
+| `GET /snapshots` | `?tenant=NAME` | `fcvm snapshot ls --json`, each with its `tenant` |
+| `POST /snapshots/{snap}/fork` | `{"name": "optional", "count": 1, "labels": {}, "tenant": null, "lease": null}` | `fcvm fork`; returns `{"log": "..."}`; 429 `quota_exceeded` when the tenant is full, 403 `policy` when the snapshot is another tenant's |
 | `DELETE /snapshots/{snap}` | | `fcvm snapshot rm` |
-| `GET /volumes` | | `fcvm volume ls --json` |
+| `GET /volumes` | `?tenant=NAME` | `fcvm volume ls --json`, each with its `tenant` |
+| `POST /volumes` | `{"name": "data", "size": "10G", "tenant": "optional"}` | `fcvm volume create`; returns the volume |
 | `DELETE /volumes/{volume}` | | `fcvm volume rm` |
+
+A VM that names another tenant's image, snapshot or volume is refused
+with 403 `policy` ([Tenants and quotas](vms.md#tenants-and-quotas)).
 
 ## Templates
 
@@ -207,10 +211,10 @@ label of its VMs; its quota is checked when they start.
 
 | method, path | body | does |
 |---|---|---|
-| `GET /tenants` | | every tenant: `{name, quota: {vcpus, mem_mib, vms}, allocated: {vcpus, mem_mib, vms}, vms: [names]}` (`fcvm tenant ls --json`) |
-| `GET /tenants/{name}` | | one tenant; 404 `tenant_not_found` if it has neither a quota nor VMs |
-| `PUT /tenants/{name}` | `{"quota": {"vcpus": 8, "mem_mib": 16384, "vms": null}}` | `fcvm tenant set`: the given limits (a whole number, or `null` for none) replace those; others stay. Returns the tenant |
-| `DELETE /tenants/{name}` | | `fcvm tenant rm`: removes the quota; the VMs keep their label |
+| `GET /tenants` | | every tenant: `{name, quota: {vcpus, mem_mib, vms, disk_mib}, allocated: {vcpus, mem_mib, vms, disk_mib}, vms, images, snapshots, volumes: [names]}` (`fcvm tenant ls --json`) |
+| `GET /tenants/{name}` | | one tenant; 404 `tenant_not_found` if it has neither a quota nor VMs nor objects |
+| `PUT /tenants/{name}` | `{"quota": {"vcpus": 8, "mem_mib": 16384, "vms": null, "disk_mib": 102400}}` | `fcvm tenant set`: the given limits (a whole number, or `null` for none) replace those; others stay. Returns the tenant |
+| `DELETE /tenants/{name}` | | `fcvm tenant rm`: removes the quota; the VMs and objects keep their tenant |
 
 ## Prometheus
 

@@ -3,26 +3,33 @@
 quotas, what the host can hold and what's allocated, and admission, the
 check a VM passes before it takes resources.
 
-  fcvm tenant set NAME [--vcpus N|none] [--mem MIB|none] [--vms N|none]
+  fcvm tenant set NAME [--vcpus N|none] [--mem MIB|none] [--vms N|none] [--disk MIB|none]
   fcvm tenant ls [--json] | show NAME | rm NAME
   fcvm status --json              lib/status.sh runs `node.py status`
-  node.py admit [--claim --tenant T] VM
+  node.py admit [--claim] [--tenant T] [--disk SIZE] [VM]
                                   lib/vm.sh, before a VM starts, is forked
-                                  or is claimed for a tenant
+                                  or is claimed for a tenant, and before
+                                  anything takes disk (a VM's layer, a
+                                  volume, an image, a snapshot)
 
 A tenant is the `tenant` label of a VM (`--tenant NAME` sets it; it can't
-be changed afterwards). vms/.tenants/NAME.json holds the tenant's quota:
-{"name", "quota": {"vcpus", "mem_mib", "vms"}, ...}, each null for no
-limit, written by `fcvm tenant set`. A tenant without a file has no quota.
+be changed afterwards), and the `tenant` field of the images, snapshots
+and volumes it owns. vms/.tenants/NAME.json holds the tenant's quota:
+{"name", "quota": {"vcpus", "mem_mib", "vms", "disk_mib"}, ...}, each null
+for no limit, written by `fcvm tenant set`. A tenant without a file has
+no quota.
 
 Allocated means the vCPUs, memory and count of the VMs that run, plus
 those admitted in the last two minutes that haven't recorded a pid yet
-(the `starting` marker). The host's capacity comes from NODE_VCPUS,
-NODE_MEM_MIB and NODE_VMS in fcvm.conf, or from the host's CPUs and
-memory times NODE_CPU_OVERCOMMIT (2) and NODE_MEM_OVERCOMMIT (1) less
-NODE_RESERVE_MIB (1024); it is enforced only with NODE_ADMIT=1 (tenant
-quotas always are). `starting` and a VM's lock live under vms/.locks;
-admission serializes on vms/.locks/admission. Standard library only.
+(the `starting` marker); and the disk every VM (running or not), image,
+snapshot and volume was given (nominal sizes: a sparse 10G volume counts
+10G). The host's capacity comes from NODE_VCPUS, NODE_MEM_MIB, NODE_VMS
+and NODE_DISK_MIB in fcvm.conf, or from the host's CPUs and memory times
+NODE_CPU_OVERCOMMIT (2) and NODE_MEM_OVERCOMMIT (1) less NODE_RESERVE_MIB
+(1024), and the size of the filesystem holding the state; it is enforced
+only with NODE_ADMIT=1 (tenant quotas always are). `starting` and a VM's
+lock live under vms/.locks; admission serializes on vms/.locks/admission.
+Standard library only.
 """
 import fcntl
 import json
@@ -36,8 +43,33 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.environ.get("FCVM_HOME") or ROOT
 VMS = os.path.join(STATE, "vms")
 NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
-KEYS = ("vcpus", "mem_mib", "vms")
+KEYS = ("vcpus", "mem_mib", "vms", "disk_mib")
+LIVE = ("vcpus", "mem_mib", "vms")   # held while a VM runs; disk_mib is held while the object exists
 STARTING_FRESH = 120            # seconds an admitted VM counts as allocated before it has a pid
+SIZE = re.compile(r"^\s*([0-9]+)\s*([kKmMgGtT]?)(?:[iI]?[bB])?\s*$")
+
+
+def sdir(name):
+    """A state directory (images, snapshots, volumes); VMS is its own variable."""
+    return os.path.join(STATE, name)
+
+
+def size_mib(s):
+    """'8G', '512M', '10GiB', bytes as a plain number -> whole MiB (rounded up); None if unreadable."""
+    m = SIZE.match(str(s))
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2).upper()
+    n *= {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}[unit]
+    return -(-n // (1 << 20))
+
+
+def file_mib(path):
+    """A file's nominal size in whole MiB (0 when it's missing)."""
+    try:
+        return -(-os.stat(path).st_size // (1 << 20))
+    except OSError:
+        return 0
 
 
 def die(code, msg):
@@ -135,16 +167,42 @@ def vms():
             continue
         state = "running" if running(d) else "starting" if starting(d) else "stopped"
         out.append({"name": name, "vcpus": int(cfg.get("vcpus") or 0), "mem_mib": int(cfg.get("mem_mib") or 0),
+                    "disk_mib": file_mib(os.path.join(d, "disk.ext4")) or file_mib(os.path.join(d, "rw.ext4")),
                     "tenant": (cfg.get("labels") or {}).get("tenant"), "state": state})
     return out
 
 
-def allocated(all_vms, tenant=None, exclude=None):
-    """The vCPUs, memory and count of the VMs that hold resources (running
-    or starting), for one tenant when given, leaving one VM out."""
-    sel = [v for v in all_vms if v["state"] != "stopped" and v["name"] != exclude
-           and (tenant is None or v["tenant"] == tenant)]
-    return {"vcpus": sum(v["vcpus"] for v in sel), "mem_mib": sum(v["mem_mib"] for v in sel), "vms": len(sel)}
+def objects():
+    """The images, snapshots and volumes, each with its tenant (None when
+    public) and the disk it was given."""
+    out = {"images": [], "snapshots": [], "volumes": []}
+    for fn in sorted(os.listdir(sdir("images")) if os.path.isdir(sdir("images")) else []):
+        if fn.endswith(".json") and not fn.startswith(".") and isinstance(m := read_json(os.path.join(sdir("images"), fn)), dict):
+            out["images"].append({"name": fn[:-5], "tenant": m.get("tenant"),
+                                  "disk_mib": file_mib(os.path.join(sdir("images"), fn[:-5] + ".ext4"))})
+    for name in sorted(os.listdir(sdir("snapshots")) if os.path.isdir(sdir("snapshots")) else []):
+        d = os.path.join(sdir("snapshots"), name)
+        if not name.startswith(".") and isinstance(m := read_json(os.path.join(d, "meta.json")), dict):
+            out["snapshots"].append({"name": name, "tenant": m.get("tenant"),
+                                     "disk_mib": file_mib(os.path.join(d, "mem")) + file_mib(os.path.join(d, m.get("disk") or "rw.ext4"))})
+    for fn in sorted(os.listdir(sdir("volumes")) if os.path.isdir(sdir("volumes")) else []):
+        if fn.endswith(".ext4") and not fn.startswith("."):
+            m = read_json(os.path.join(sdir("volumes"), fn[:-5] + ".json"))
+            out["volumes"].append({"name": fn[:-5], "tenant": (m or {}).get("tenant") if isinstance(m, dict) else None,
+                                   "disk_mib": file_mib(os.path.join(sdir("volumes"), fn))})
+    return out
+
+
+def allocated(all_vms, tenant=None, exclude=None, objs=None):
+    """What holds resources: the vCPUs, memory and count of the VMs that
+    run or start, and the disk of every VM, image, snapshot and volume;
+    for one tenant when given, leaving one VM out."""
+    mine = [v for v in all_vms if v["name"] != exclude and (tenant is None or v["tenant"] == tenant)]
+    live = [v for v in mine if v["state"] != "stopped"]
+    objs = objects() if objs is None else objs
+    disk = sum(v["disk_mib"] for v in mine) + sum(o["disk_mib"] for kind in objs.values() for o in kind
+                                                   if tenant is None or o["tenant"] == tenant)
+    return {"vcpus": sum(v["vcpus"] for v in live), "mem_mib": sum(v["mem_mib"] for v in live), "vms": len(live), "disk_mib": disk}
 
 
 # --- capacity ---------------------------------------------------------------------------
@@ -178,10 +236,16 @@ def capacity():
     """What the host may hold (docs/configuration.md, Node), with where it came from."""
     cpus, mem = os.cpu_count() or 1, meminfo("MemTotal")
     reserve = number("NODE_RESERVE_MIB", 1024)
+    try:
+        st = os.statvfs(STATE)
+        disk, free = st.f_blocks * st.f_frsize >> 20, st.f_bavail * st.f_frsize >> 20
+    except OSError:
+        disk = free = 0
     cap = {"vcpus": number("NODE_VCPUS", int(cpus * factor("NODE_CPU_OVERCOMMIT", 2))),
            "mem_mib": number("NODE_MEM_MIB", max(int((mem - reserve) * factor("NODE_MEM_OVERCOMMIT", 1)), 0)),
-           "vms": number("NODE_VMS", None)}
-    return cap, {"cpus": cpus, "mem_mib": mem}
+           "vms": number("NODE_VMS", None),
+           "disk_mib": number("NODE_DISK_MIB", disk)}
+    return cap, {"cpus": cpus, "mem_mib": mem, "disk_mib": disk, "disk_free_mib": free}
 
 
 def enforced():
@@ -220,11 +284,19 @@ def quota_of(name):
     return {k: (int(q[k]) if q.get(k) is not None else None) for k in KEYS}
 
 
-def tenant_view(name, all_vms, t=None):
+def tenant_view(name, all_vms, t=None, objs=None):
+    objs = objects() if objs is None else objs
     return {"name": name, "quota": quota_of(name) if t is None else {k: t.get("quota", {}).get(k) for k in KEYS},
-            "allocated": allocated(all_vms, tenant=name),
+            "allocated": allocated(all_vms, tenant=name, objs=objs),
             "vms": [v["name"] for v in all_vms if v["tenant"] == name],
+            **{kind: [o["name"] for o in objs[kind] if o["tenant"] == name] for kind in ("images", "snapshots", "volumes")},
             **({k: t[k] for k in ("created", "updated") if k in t} if t else {})}
+
+
+def owners(all_vms, objs):
+    """Every tenant name in use: with a quota file, VMs or objects."""
+    return sorted(set(tenants()) | {v["tenant"] for v in all_vms if v["tenant"]}
+                  | {o["tenant"] for kind in objs.values() for o in kind if o["tenant"]})
 
 
 def event(type_, data):
@@ -237,7 +309,7 @@ def event(type_, data):
 
 
 def tenant_cmd(args):
-    usage = "usage: fcvm tenant set NAME [--vcpus N|none] [--mem MIB|none] [--vms N|none] | ls [--json] | show NAME | rm NAME"
+    usage = "usage: fcvm tenant set NAME [--vcpus N|none] [--mem MIB|none] [--vms N|none] [--disk MIB|none] | ls [--json] | show NAME | rm NAME"
     sub = args[0] if args else "ls"
     rest = args[1:]
     if sub == "set":
@@ -246,7 +318,7 @@ def tenant_cmd(args):
         name, rest = rest[0], rest[1:]
         t = tenant(name) or {"name": name, "quota": {k: None for k in KEYS}, "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         quota = {k: t.get("quota", {}).get(k) for k in KEYS}
-        flags = {"--vcpus": "vcpus", "--mem": "mem_mib", "--vms": "vms"}
+        flags = {"--vcpus": "vcpus", "--mem": "mem_mib", "--vms": "vms", "--disk": "disk_mib"}
         while rest:
             a = rest.pop(0)
             if a not in flags or not rest:
@@ -265,27 +337,26 @@ def tenant_cmd(args):
         sys.stderr.write(f"\033[1;34m==>\033[0m tenant '{name}': {limits}\n")
     elif sub == "ls":
         as_json = "--json" in rest
-        all_vms = vms()
-        names = sorted(set(tenants()) | {v["tenant"] for v in all_vms if v["tenant"]})
-        views = [tenant_view(n, all_vms, tenants().get(n)) for n in names]
+        all_vms, objs = vms(), objects()
+        views = [tenant_view(n, all_vms, tenants().get(n), objs) for n in owners(all_vms, objs)]
         if as_json:
             print(json.dumps(views, indent=1))
             return
-        rows = [("NAME", "VCPUS", "MEM", "VMS", "QUOTA")]
+        rows = [("NAME", "VCPUS", "MEM", "VMS", "DISK", "QUOTA")]
         for t in views:
             q, a = t["quota"], t["allocated"]
             cell = lambda k: f"{a[k]}/{q[k]}" if q[k] is not None else str(a[k])   # noqa: E731
-            rows.append((t["name"], cell("vcpus"), cell("mem_mib"), cell("vms"), "yes" if n_quota(q) else "none"))
+            rows.append((t["name"], cell("vcpus"), cell("mem_mib"), cell("vms"), cell("disk_mib"), "yes" if n_quota(q) else "none"))
         widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
         for r in rows:
             print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
     elif sub == "show":
         if not rest or not NAME.match(rest[0]):
             die("invalid", usage)
-        all_vms = vms()
-        if not tenant(rest[0]) and not any(v["tenant"] == rest[0] for v in all_vms):
+        all_vms, objs = vms(), objects()
+        if not tenant(rest[0]) and rest[0] not in owners(all_vms, objs):
             die("tenant_not_found", f"no tenant '{rest[0]}' (fcvm tenant ls)")
-        print(json.dumps(tenant_view(rest[0], all_vms, tenant(rest[0])), indent=1))
+        print(json.dumps(tenant_view(rest[0], all_vms, tenant(rest[0]), objs), indent=1))
     elif sub == "rm":
         if not rest or not NAME.match(rest[0]):
             die("invalid", usage)
@@ -305,39 +376,47 @@ def n_quota(q):
 # --- admission --------------------------------------------------------------------------
 
 def admit(args):
-    """node.py admit [--claim --tenant T] VM: refuse with quota_exceeded or
-    node_full when the VM wouldn't fit; else count it as starting. --claim
-    checks only the tenant's quota (the VM already runs), for pool claim."""
-    claim, tenant_name, vm = False, None, None
+    """node.py admit [--claim] [--tenant T] [--disk SIZE] [VM]: refuse with
+    quota_exceeded or node_full when what's asked wouldn't fit; else, for a
+    VM, count it as starting. A VM asks for its vCPUs, memory and a slot;
+    --disk SIZE asks for that much disk on top (a fork's copy), or alone
+    (a new layer, volume, image or snapshot for tenant T). --claim checks
+    only the tenant's quota (the VM already runs), for pool claim."""
+    usage = "usage: node.py admit [--claim] [--tenant T] [--disk SIZE] [VM]"
+    claim, tenant_name, vm, disk = False, None, None, 0
     while args:
         a = args.pop(0)
         if a == "--claim":
             claim = True
         elif a == "--tenant":
             tenant_name = args.pop(0) if args else die("invalid", "--tenant wants a name")
+        elif a == "--disk":
+            disk = size_mib(args.pop(0) if args else "") or die("invalid", "--disk wants a size (8G, 512M)")
         else:
             vm = a
-    if not vm or not NAME.match(vm):
-        die("invalid", "usage: node.py admit [--claim --tenant T] VM")
+    if (vm and not NAME.match(vm)) or (not vm and not disk) or (claim and not vm):
+        die("invalid", usage)
     with Lock("admission"):
-        all_vms = vms()
-        me = next((v for v in all_vms if v["name"] == vm), None)
-        if not me:
-            die("vm_not_found", f"no VM '{vm}'")
-        t = tenant_name or me["tenant"]
-        need = {"vcpus": me["vcpus"], "mem_mib": me["mem_mib"], "vms": 1}
+        all_vms, objs = vms(), objects()
+        me = None
+        if vm:
+            me = next((v for v in all_vms if v["name"] == vm), None)
+            if not me:
+                die("vm_not_found", f"no VM '{vm}'")
+        t = tenant_name or (me or {}).get("tenant")
+        need = {"vcpus": me["vcpus"] if me else 0, "mem_mib": me["mem_mib"] if me else 0, "vms": 1 if me else 0, "disk_mib": disk}
         if t:
-            quota, used = quota_of(t), allocated(all_vms, tenant=t, exclude=vm)
+            quota, used = quota_of(t), allocated(all_vms, tenant=t, exclude=vm, objs=objs)
             for k in KEYS:
-                if quota[k] is not None and used[k] + need[k] > quota[k]:
+                if need[k] and quota[k] is not None and used[k] + need[k] > quota[k]:
                     die("quota_exceeded", f"tenant '{t}' would exceed its {k} quota: {used[k]} allocated + {need[k]} > {quota[k]} (fcvm tenant show {t})")
         if not claim and enforced():
             cap, _ = capacity()
-            used = allocated(all_vms, exclude=vm)
+            used = allocated(all_vms, exclude=vm, objs=objs)
             for k in KEYS:
-                if cap[k] is not None and used[k] + need[k] > cap[k]:
+                if need[k] and cap[k] is not None and used[k] + need[k] > cap[k]:
                     die("node_full", f"this host is full: {k} {used[k]} allocated + {need[k]} > {cap[k]} (fcvm status --json)")
-        if not claim:
+        if vm and not claim:
             with open(os.path.join(VMS, vm, "starting"), "w"):
                 pass
 
@@ -366,9 +445,9 @@ def free_taps(prefix, total):
 
 def status():
     """The node view: capacity, allocated, allocatable, tenants, slots."""
-    all_vms = vms()
+    all_vms, objs = vms(), objects()
     cap, host = capacity()
-    alloc = allocated(all_vms)
+    alloc = allocated(all_vms, objs=objs)
     taps = number("NET_TAPS", 64)
     os.makedirs(os.path.join(VMS, ".locks"), exist_ok=True)
     present = lambda p: len([n for n in os.listdir("/sys/class/net") if re.fullmatch(p + r"\d+", n)])   # noqa: E731
@@ -385,7 +464,8 @@ def status():
         "allocated": alloc,
         "allocatable": {k: (cap[k] - alloc[k] if cap[k] is not None else None) for k in KEYS},
         "vms": {s: len([v for v in all_vms if v["state"] == s]) for s in ("running", "starting", "stopped")},
-        "tenants": [tenant_view(n, all_vms, t) for n, t in tenants().items()],
+        "objects": {kind: len(objs[kind]) for kind in objs},
+        "tenants": [tenant_view(n, all_vms, tenants().get(n), objs) for n in owners(all_vms, objs)],
         "slots": {"taps_full": {"total": present("fctap"), "free": free_taps("fctap", taps)},
                   "taps_restricted": {"total": present("fcrtap"), "free": free_taps("fcrtap", taps)},
                   "jail": os.path.exists("/run/fcvm/jaild.sock")},

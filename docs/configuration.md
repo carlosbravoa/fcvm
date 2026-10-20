@@ -152,10 +152,11 @@ shows these settings.
 
 | setting | default | |
 |---|---|---|
-| `NODE_ADMIT` | `0` | `1`: a VM that wouldn't fit the capacity below is refused at start, fork or pool refill with `node_full`. Off, the capacity is reported but not enforced |
+| `NODE_ADMIT` | `0` | `1`: a VM that wouldn't fit the capacity below is refused at start, fork or pool refill, and anything that would take more disk than is left at its creation, with `node_full`. Off, the capacity is reported but not enforced |
 | `NODE_VCPUS` | CPUs × `NODE_CPU_OVERCOMMIT` | vCPUs the host may allocate to running VMs |
 | `NODE_MEM_MIB` | (memory − `NODE_RESERVE_MIB`) × `NODE_MEM_OVERCOMMIT` | memory, in MiB, likewise |
 | `NODE_VMS` | | running VMs at once (no limit by default; taps limit them anyway) |
+| `NODE_DISK_MIB` | the size of the filesystem the state directory is on | disk, in MiB, that VM layers, images, snapshots and volumes may be given in all (nominal sizes: sparse files count whole) |
 | `NODE_CPU_OVERCOMMIT`, `NODE_MEM_OVERCOMMIT` | `2`, `1` | factors for the computed defaults |
 | `NODE_RESERVE_MIB` | `1024` | memory kept for the host in the computed default |
 

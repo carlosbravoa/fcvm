@@ -31,12 +31,15 @@ forks = snap.fork("try", count=3)                                     # three ru
 quick = c.claim("py")                                                 # from a warm pool
 ```
 
-`Client`: `vms()`, `sandbox(name)`, `images()`, `templates()`,
-`snapshots()`, `volumes()`, `pools()`, `import_image(ref)` (a job to
-`wait()` on), `create(name, image=..., template=..., **fields)` with the
-fields of `POST /vms` (`vcpus`, `mem_mib`, `network`, `allow`, `cache`,
-`ports`, `volumes`, `idle`, `command`, `jail`, `restart`, `ttl`,
-`idle_stop`, `secrets`, `forward`), `claim(pool)`.
+`Client`: `vms(label=, tenant=)`, `sandbox(name)`, `images(tenant=)`,
+`templates()`, `snapshots(tenant=)`, `volumes(tenant=)`, `pools()`,
+`import_image(ref, name=, tenant=)` (a job to `wait()` on),
+`create_volume(name, size=, tenant=)`, `create(name, image=...,
+template=..., **fields)` with the fields of `POST /vms` (`vcpus`,
+`mem_mib`, `network`, `allow`, `cache`, `ports`, `volumes`, `idle`,
+`command`, `jail`, `restart`, `ttl`, `idle_stop`, `secrets`, `forward`,
+`labels`, `tenant`, `lease`), `claim(pool)`, `tenants()`, `tenant(name)`,
+`set_tenant(name, vcpus=, mem_mib=, vms=, disk_mib=)`, `remove_tenant(name)`.
 
 `Sandbox`: `exec(command | argv=[...], workdir, env, user, stdin, timeout,
 background)`, `run(command)` (raises on failure, returns stdout),

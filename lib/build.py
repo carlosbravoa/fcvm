@@ -245,7 +245,8 @@ class Builder:
         self.drop_vm()
         self.vm = f"_build-{os.getpid()}"
         idle = ["--idle"] if image_json(base).get("type", "app") == "app" else []   # system images stay up
-        fcvm("create", self.vm, base, *idle, *self.net_flags())
+        tenant = ["--tenant", self.args.tenant] if self.args.tenant else []   # the build VM, its cache layers and the image are the tenant's
+        fcvm("create", self.vm, base, *idle, *self.net_flags(), *tenant)
         fcvm("start", self.vm)
         self.vm_base = base
 
@@ -326,7 +327,8 @@ class Builder:
         if cfg["user"] == "root":
             cfg["user"] = ""
         args_scope = {}
-        key = hashlib.sha256(f"FROM {base} {json.dumps(base_meta, sort_keys=True)}".encode()).hexdigest()
+        # cache layers are commits of the build VM, so a tenant's; its key keeps them apart
+        key = hashlib.sha256(f"FROM {base} {json.dumps(base_meta, sort_keys=True)}{' tenant ' + a.tenant if a.tenant else ''}".encode()).hexdigest()
         current = base
         log(f"building '{a.tag}' from {base} ({len(steps)} steps)")
 
@@ -503,6 +505,8 @@ class Builder:
             "env": [f"{k}={v}" for k, v in cfg["env"].items()], "workdir": cfg["workdir"],
             "user": cfg["user"] or "root", "exposed_ports": cfg["exposed"],
         })
+        if a.tenant:
+            meta["tenant"] = a.tenant
         with open(os.path.join(IMAGES, f"{tag}.json"), "w") as f:
             json.dump(meta, f, indent=2)
         size = subprocess.run(["du", "-h", out], capture_output=True, text=True).stdout.split()[0]
@@ -518,7 +522,10 @@ def main():
     ap.add_argument("--no-cache", action="store_true")
     ap.add_argument("--net", choices=["full", "none"])
     ap.add_argument("--allow", action="append", default=[])
+    ap.add_argument("--tenant", help="the image (and the build) is that tenant's")
     args = ap.parse_args()
+    if args.tenant and not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$", args.tenant):
+        die(f"invalid tenant name '{args.tenant}'")
     if not os.path.isdir(args.context):
         die(f"build context {args.context} is not a directory")
     args.tag = args.tag or re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(os.path.abspath(args.context)))

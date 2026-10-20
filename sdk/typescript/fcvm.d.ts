@@ -61,9 +61,13 @@ export interface CreateOptions {
 
 export interface Tenant {
   name: string;
-  quota: { vcpus: number | null; mem_mib: number | null; vms: number | null };
-  allocated: { vcpus: number; mem_mib: number; vms: number };
+  quota: { vcpus: number | null; mem_mib: number | null; vms: number | null; disk_mib: number | null };
+  /** vCPUs, memory and count of its running VMs; the disk of all its VMs, images, snapshots and volumes */
+  allocated: { vcpus: number; mem_mib: number; vms: number; disk_mib: number };
   vms: string[];
+  images: string[];
+  snapshots: string[];
+  volumes: string[];
 }
 
 export interface VmInfo {
@@ -109,12 +113,16 @@ export class Client {
   setTenant(name: string, quota: Partial<Tenant["quota"]>): Promise<Tenant>;
   removeTenant(name: string): Promise<{ removed: string }>;
   sandbox(name: string): Promise<Sandbox>;
-  images(): Promise<Record<string, unknown>[]>;
+  /** images, snapshots and volumes carry a `tenant` (null when public); `tenant` keeps only that tenant's */
+  images(opts?: { tenant?: string }): Promise<Record<string, unknown>[]>;
   templates(): Promise<Record<string, unknown>[]>;
-  snapshots(): Promise<Snapshot[]>;
-  volumes(): Promise<Record<string, unknown>[]>;
+  snapshots(opts?: { tenant?: string }): Promise<Snapshot[]>;
+  volumes(opts?: { tenant?: string }): Promise<Record<string, unknown>[]>;
   pools(): Promise<Record<string, unknown>[]>;
-  importImage(ref: string, name?: string): Promise<ServerJob>;
+  /** `fcvm import`; with a tenant, the image is that tenant's own */
+  importImage(ref: string, name?: string, opts?: { tenant?: string }): Promise<ServerJob>;
+  /** `fcvm volume create`; size such as "10G" (the server's default when omitted) */
+  createVolume(name: string, opts?: { size?: string; tenant?: string }): Promise<Record<string, unknown>>;
   create(name: string, opts?: CreateOptions): Promise<Sandbox>;
   claim(pool: string, opts?: { ttl?: string; idle_stop?: string; labels?: Record<string, string>; lease?: number | string; tenant?: string }): Promise<Sandbox>;
 }

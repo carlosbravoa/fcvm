@@ -32,6 +32,7 @@ Everything is relative to the state directory (`fcvm version` prints it).
 |---|---|---|
 | `--label KEY=VALUE` | `create`, `update`, `fork`, `pool claim` | tags; `ls --label KEY=VALUE` filters; fcvm never reads them, except `tenant` |
 | `--tenant NAME` | `create`, `fork`, `pool claim` | the `tenant` label, set once (`update` refuses `--label tenant=`); `ls --tenant NAME` filters. Its quota is checked at admission |
+| `--tenant NAME` | `import`, `build`, `volume create`, `snapshot import` | the object's `tenant`: only that tenant's VMs may use it (`policy` otherwise). `commit` and `snapshot` take the VM's; `fork` takes the snapshot's. `images`, `snapshot ls`, `volume ls --tenant NAME` filter |
 | `--unset-label KEY` | `update` | |
 | `--if-same-spec` | `create` | succeed if the VM exists with the same `spec`; `vm_exists` if it differs |
 | `--lease UNTIL` | `create`, `start`, `update`, `fork`, `pool claim` | a Unix time, ISO 8601 time, or duration from now; `none` clears |
@@ -62,17 +63,24 @@ minutes old).
 
 ### Tenants: `vms/.tenants/NAME.json` and `fcvm tenant show NAME`
 
-`{name, quota: {vcpus, mem_mib, vms}, created, updated}`, each quota
-value a whole number or `null` (no limit), written by `fcvm tenant set`.
-`tenant show` adds `allocated: {vcpus, mem_mib, vms}` (the tenant's
-running and starting VMs) and `vms` (its VMs' names). A tenant is the
-`tenant` label of its VMs; one without a file has no quota.
+`{name, quota: {vcpus, mem_mib, vms, disk_mib}, created, updated}`, each
+quota value a whole number or `null` (no limit), written by `fcvm tenant
+set`. `tenant show` adds `allocated: {vcpus, mem_mib, vms, disk_mib}`
+(vCPUs, memory and count of the tenant's running and starting VMs; the
+nominal disk of all its VMs, images, snapshots and volumes) and `vms`,
+`images`, `snapshots`, `volumes` (names). A tenant is the `tenant` label
+of its VMs and the `tenant` field of `images/NAME.json`,
+`snapshots/NAME/meta.json` and `volumes/NAME.json` (absent: public); one
+without a file has no quota.
 
 **Admission** runs under `vms/.locks/admission` when a VM starts (by any
 path, including restart policies), is forked, or is claimed from a pool
-for a tenant: `quota_exceeded` when the tenant's quota would be exceeded;
-`node_full` when `NODE_ADMIT=1` and the host's capacity would be. A
-refused fork leaves nothing; a refused claim leaves the VM pooled.
+for a tenant, and before anything takes disk (a VM's layer at `create`,
+a fork's copy, `commit`, `snapshot`, `volume create`, `import`, `build`):
+`quota_exceeded` when the tenant's quota would be exceeded; `node_full`
+when `NODE_ADMIT=1` and the host's capacity would be. A refused fork
+leaves nothing; a refused claim leaves the VM pooled. A VM that names
+another tenant's object is refused with `policy`.
 
 ### Events: `vms/.events.jsonl`, `vms/.events.1.jsonl`, `vms/.events.seq`
 
@@ -95,11 +103,12 @@ process is gone without an end is `failed` with `error: "interrupted"`.
 - `vms/.node/cordoned` exists while the host refuses new VMs
   (`fcvm cordon`); its content is the reason.
 - `fcvm status --json`: `{version, contract, hostname, cordoned,
-  admission, host: {cpus, mem_mib, mem_available_mib, load}, capacity,
-  allocated, allocatable (each {vcpus, mem_mib, vms}), vms: {running,
-  starting, stopped}, tenants, slots: {taps_full, taps_restricted: {total,
-  free}, jail}, kernel, firecracker}`. `GET /api/host` carries the same
-  under `node`.
+  admission, host: {cpus, mem_mib, mem_available_mib, disk_mib,
+  disk_free_mib, load}, capacity, allocated, allocatable (each {vcpus,
+  mem_mib, vms, disk_mib}), vms: {running, starting, stopped}, objects:
+  {images, snapshots, volumes}, tenants, slots: {taps_full,
+  taps_restricted: {total, free}, jail}, kernel, firecracker}`.
+  `GET /api/host` carries the same under `node`.
 - `fcvm config --json`: `{version, contract, config_file,
   config_file_exists, settings: {NAME: "value"}, paths: {code, state,
   images, vms, volumes, snapshots, kernels, bin, cache, build}}`: the
@@ -107,8 +116,9 @@ process is gone without an end is `failed` with `error: "interrupted"`.
 - `vms/.serve.json`: `{url, token, port, pid}` of the running service
   (mode 0600).
 - `vms/.pools/NAME.json`: `{name, template|snapshot, size, jail}`.
-- `images/NAME.json`, `snapshots/NAME/meta.json`, `volumes/NAME.ext4`:
-  the objects `fcvm images|snapshot ls|volume ls --json` list.
+- `images/NAME.json`, `snapshots/NAME/meta.json`, `volumes/NAME.ext4`
+  (and `volumes/NAME.json`, its tenant and size): the objects
+  `fcvm images|snapshot ls|volume ls --json` list, each with `tenant`.
 
 ### Settings
 
@@ -116,8 +126,8 @@ process is gone without an end is `failed` with `error: "interrupted"`.
 variables in [Configuration](configuration.md). The ones this contract
 adds: `LEASE_GRACE` (seconds, default 300), and the
 [node settings](configuration.md#node) `NODE_ADMIT`, `NODE_VCPUS`,
-`NODE_MEM_MIB`, `NODE_VMS`, `NODE_CPU_OVERCOMMIT`, `NODE_MEM_OVERCOMMIT`,
-`NODE_RESERVE_MIB`.
+`NODE_MEM_MIB`, `NODE_VMS`, `NODE_DISK_MIB`, `NODE_CPU_OVERCOMMIT`,
+`NODE_MEM_OVERCOMMIT`, `NODE_RESERVE_MIB`.
 
 ## What a release may change
 

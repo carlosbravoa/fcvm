@@ -30,16 +30,18 @@ Build:
   kernel [VERSION]           fetch latest $KERNEL_CHANNEL kernel from kernel.org, build a microVM vmlinux
   init                       build fc-init and the initramfs every VM boots with
   base [NAME]                build a full-OS base image from scratch: Ubuntu 26.04 (default name: ubuntu-26.04)
-  import REF [NAME]          image from Docker Hub / any registry, or local: docker-archive:F.tar,
+  import REF [NAME] [--tenant NAME]
+                             image from Docker Hub / any registry, or local: docker-archive:F.tar,
                              oci:DIR, oci-archive:F.tar (or a path) -> VM image
-  build [-t NAME] [-f FILE] [--build-arg K=V] [--no-cache] [--allow H,...] [CONTEXT]
+  build [-t NAME] [-f FILE] [--build-arg K=V] [--no-cache] [--allow H,...] [--tenant NAME] [CONTEXT]
                              build an image from a Dockerfile subset (cached per step)
   all                        firecracker + kernel + init + base
 
 VMs:
-  images [--all] [--json]    list images (--all: include the build cache). Types: app = runs
-                             the image's command as the VM's single process; system =
-                             boots systemd like a full machine
+  images [--all] [--json] [--tenant NAME]
+                             list images (--all: include the build cache; --tenant: one tenant's).
+                             Types: app = runs the image's command as the VM's single
+                             process; system = boots systemd like a full machine
   create VM IMAGE [opts] [-- CMD...]
                              create a VM: IMAGE's disk is shared read-only, writes go to
                              a per-VM layer. opts: --vcpus N --mem MiB --disk SIZE
@@ -88,7 +90,7 @@ VMs:
                              ssh client config for system VMs (Host fcvm-NAME, stable across
                              restarts); --install puts it in ~/.ssh/config. For scp, rsync, VS Code
   cp SRC DST                 copy files in/out of a running VM (VM:PATH on one side)
-  commit VM IMAGE            save a stopped VM's changes as a new image (a layer)
+  commit VM IMAGE            save a stopped VM's changes as a new image (a layer; the VM's tenant's)
   squash IMAGE NEW           merge IMAGE's layers into one (same base image)
   export IMAGE FILE.tar      the image as an OCI archive (docker/podman load, fcvm import elsewhere)
   push IMAGE REGISTRY/REPO[:TAG]
@@ -98,13 +100,14 @@ VMs:
   umount VM PATH             remove it (by its guest path or host directory)
   publish VM [BIND:][HOST]:GUEST  publish a TCP port (at once if running; no HOST: a free one)
   unpublish VM HOSTPORT      stop publishing it
-  snapshot VM NAME           save a running VM's memory + disk (it keeps running)
-  snapshot ls [--json] | rm NAME
-  snapshot export NAME FILE.tar | import FILE.tar [NAME]
+  snapshot VM NAME           save a running VM's memory + disk (it keeps running; the VM's tenant's)
+  snapshot ls [--json] [--tenant NAME] | rm NAME
+  snapshot export NAME FILE.tar | import FILE.tar [NAME] [--tenant NAME]
                              move a snapshot to another host (same images and Firecracker needed)
   fork SNAPSHOT [NAME] [-n N] [--label K=V] [--tenant NAME] [--lease UNTIL]
                              new running VM(s) from a snapshot in ~150 ms, with their own
-                             disk, IP, MAC and hostname (processes keep running)
+                             disk, IP, MAC and hostname (processes keep running); a tenant's
+                             snapshot forks for that tenant only
   update VM [--restart POLICY] [--ttl D|none] [--idle-stop D|none] [--secret SPEC] [--unset-secret NAME] [--forward LIST|none] [--label K=V] [--unset-label K] [--lease UNTIL|none]
                              change a VM's restart policy, lifetime, secrets or forwarding
   up [-f FILE] [VM...]       the VMs of a project file (fcvm.toml here or above): create what's
@@ -114,10 +117,11 @@ VMs:
                              a warm pool: N VMs booted ahead of time (kept full by fcvm serve)
   pool ls | rm NAME | claim NAME [--ttl D] [--idle-stop D] [--label K=V] [--tenant NAME] [--lease UNTIL]
                              list pools; remove one; take a ready VM out of one (prints its name)
-  tenant set NAME [--vcpus N|none] [--mem MiB|none] [--vms N|none]
-                             a tenant's quota, enforced when its VMs start (quota_exceeded)
+  tenant set NAME [--vcpus N|none] [--mem MiB|none] [--vms N|none] [--disk MiB|none]
+                             a tenant's quota, enforced when its VMs start and whenever its
+                             VMs, images, snapshots or volumes take disk (quota_exceeded)
   tenant ls [--json] | show NAME | rm NAME
-                             tenants, what they have allocated, and their quotas
+                             tenants, what they have allocated and own, and their quotas
   template ls|show NAME|rm NAME   launch templates (* = built in)
   template save NAME --from VM | IMAGE [create opts] [-- CMD]  [-d DESCRIPTION]
                              save a recipe: create/run --template NAME use it
@@ -136,8 +140,8 @@ VMs:
   rmi IMAGE                  delete an image
   egress VM [--allow H,...] [--deny H,...] [-f]
                              a restricted VM's allowlist and request log (changes are live)
-  volume create NAME [SIZE] | ls [--json] | rm NAME
-                             named volumes (persistent ext4 disks)
+  volume create NAME [SIZE] [--tenant NAME] | ls [--json] [--tenant NAME] | rm NAME
+                             named volumes (persistent ext4 disks); a tenant's is its VMs' only
   mcp                        MCP server on stdio, for agents (see README)
   serve [--port 8686]        web console and API on http://127.0.0.1:8686 (local only; prints a
                              login URL) and the supervisor for restart policies

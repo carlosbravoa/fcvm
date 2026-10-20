@@ -137,7 +137,7 @@ class Client:
         return self.get(f"tenants/{name}")
 
     def set_tenant(self, name, **quota):
-        """Set a tenant's quota: vcpus, mem_mib, vms (each a number, or None for no limit)."""
+        """Set a tenant's quota: vcpus, mem_mib, vms, disk_mib (each a number, or None for no limit)."""
         return self.request("PUT", f"tenants/{name}", {"quota": quota})
 
     def remove_tenant(self, name):
@@ -147,24 +147,29 @@ class Client:
         """An existing VM by name (checked)."""
         return Sandbox(self, name, self.get(f"vms/{name}"))
 
-    def images(self):
-        return self.get("images")
+    def images(self, tenant=None):
+        """Every image (each with its `tenant`, None when public); `tenant` keeps only that tenant's."""
+        return self.get("images", **({"tenant": tenant} if tenant else {}))
 
     def templates(self):
         return self.get("templates")
 
-    def snapshots(self):
-        return [Snapshot(self, s["name"], s) for s in self.get("snapshots")]
+    def snapshots(self, tenant=None):
+        return [Snapshot(self, s["name"], s) for s in self.get("snapshots", **({"tenant": tenant} if tenant else {}))]
 
-    def volumes(self):
-        return self.get("volumes")
+    def volumes(self, tenant=None):
+        return self.get("volumes", **({"tenant": tenant} if tenant else {}))
 
     def pools(self):
         return self.get("pools")
 
-    def import_image(self, ref, name=None):
-        """Start an import; returns a ServerJob to wait on."""
-        return ServerJob(self, self.post("images", {"ref": ref, **({"name": name} if name else {})}))
+    def import_image(self, ref, name=None, tenant=None):
+        """Start an import; returns a ServerJob to wait on. With a tenant, the image is that tenant's own."""
+        return ServerJob(self, self.post("images", {"ref": ref, **({"name": name} if name else {}), **({"tenant": tenant} if tenant else {})}))
+
+    def create_volume(self, name, size=None, tenant=None):
+        """`fcvm volume create`: size such as "10G" (the server's default when omitted)."""
+        return self.post("volumes", {"name": name, **({"size": size} if size else {}), **({"tenant": tenant} if tenant else {})})
 
     def create(self, name, image=None, template=None, start=True, **opts):
         """Create (and start) a VM. opts are the fields of POST /vms: vcpus, mem_mib,

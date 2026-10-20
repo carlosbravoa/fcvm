@@ -75,6 +75,12 @@ fcvm snapshot rm ready      # running forks are unaffected
 The web console lists snapshots, and forks or deletes them. The MCP server
 has `snapshot_vm`, `fork`, `snapshots` and `remove_snapshot`.
 
+A snapshot of a VM that has a [tenant](vms.md#tenants-and-quotas) is that
+tenant's: `snapshot ls` shows it, `--tenant NAME` lists one tenant's, and
+its forks take the tenant label (a fork `--tenant` for another tenant is
+refused with `policy`). The snapshot's memory and disk count against the
+tenant's disk quota, as does each fork's copy of the disk.
+
 ## Moving snapshots between hosts
 
 ```sh

@@ -51,9 +51,9 @@ fi
 # Empty caps are computed from the host's CPUs and memory; NODE_ADMIT=1 refuses
 # VMs that don't fit (node_full). Tenant quotas (fcvm tenant set) always apply.
 : "${NODE_ADMIT:=0}"
-: "${NODE_VCPUS:=}" "${NODE_MEM_MIB:=}" "${NODE_VMS:=}"
+: "${NODE_VCPUS:=}" "${NODE_MEM_MIB:=}" "${NODE_VMS:=}" "${NODE_DISK_MIB:=}"
 : "${NODE_CPU_OVERCOMMIT:=2}" "${NODE_MEM_OVERCOMMIT:=1}" "${NODE_RESERVE_MIB:=1024}"
-export NODE_ADMIT NODE_VCPUS NODE_MEM_MIB NODE_VMS NODE_CPU_OVERCOMMIT NODE_MEM_OVERCOMMIT NODE_RESERVE_MIB NET_TAPS
+export NODE_ADMIT NODE_VCPUS NODE_MEM_MIB NODE_VMS NODE_DISK_MIB NODE_CPU_OVERCOMMIT NODE_MEM_OVERCOMMIT NODE_RESERVE_MIB NET_TAPS
 CONTRACT=1                                     # docs/node-contract.md: what outside programs may rely on
 
 BIN_DIR=$FCVM_HOME/bin

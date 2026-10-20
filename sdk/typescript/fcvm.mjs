@@ -94,14 +94,19 @@ export class Client {
   setTenant(name, quota) { return this.request("PUT", `tenants/${name}`, { body: { quota } }); }
   removeTenant(name) { return this.delete(`tenants/${name}`); }
   async sandbox(name) { return new Sandbox(this, name, await this.get(`vms/${name}`)); }
-  images() { return this.get("images"); }
+  images({ tenant } = {}) { return this.get("images", tenant ? { tenant } : undefined); }
   templates() { return this.get("templates"); }
-  async snapshots() { return (await this.get("snapshots")).map((s) => new Snapshot(this, s.name, s)); }
-  volumes() { return this.get("volumes"); }
+  async snapshots({ tenant } = {}) {
+    return (await this.get("snapshots", tenant ? { tenant } : undefined)).map((s) => new Snapshot(this, s.name, s));
+  }
+  volumes({ tenant } = {}) { return this.get("volumes", tenant ? { tenant } : undefined); }
   pools() { return this.get("pools"); }
 
-  async importImage(ref, name) {
-    return new ServerJob(this, await this.post("images", name ? { ref, name } : { ref }));
+  async importImage(ref, name, { tenant } = {}) {
+    return new ServerJob(this, await this.post("images", { ref, ...(name && { name }), ...(tenant && { tenant }) }));
+  }
+  createVolume(name, { size, tenant } = {}) {
+    return this.post("volumes", { name, ...(size && { size }), ...(tenant && { tenant }) });
   }
 
   // opts: the fields of POST /vms (vcpus, mem_mib, network, allow, ports, volumes, idle,

@@ -124,7 +124,9 @@ fcvm pool rm py                                              # the pool and its 
 - **Tenants.** A pooled VM belongs to nobody until it's claimed:
   `claim --tenant NAME` gives it to that tenant, within its
   [quota](vms.md#tenants-and-quotas). A template that sets a `tenant`
-  label makes a pool that tenant's own.
+  label, or a pool from a tenant's snapshot, makes a pool that tenant's
+  own: its VMs carry the label from the start, and only that tenant can
+  claim them.
 - **The MCP server** claims from a template's pool whenever the agent
   asks for a sandbox from that template with no other arguments (and the
   pool is jailed if sandboxes must be); `create_sandbox` also takes

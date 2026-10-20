@@ -83,7 +83,7 @@ ERROR_STATUS = {"vm_not_found": 404, "image_not_found": 404, "snapshot_not_found
                 "vm_exists": 409, "image_exists": 409, "snapshot_exists": 409, "volume_exists": 409,
                 "vm_running": 409, "vm_not_running": 409, "vm_busy": 409, "in_use": 409, "no_agent": 409,
                 "no_network": 409, "pool_empty": 409,
-                "quota_exceeded": 429,
+                "policy": 403, "quota_exceeded": 429,
                 "no_network_slot": 503, "jail_unavailable": 503, "cordoned": 503, "node_full": 503}
 ERROR_LINE = re.compile(r"^fcvm-error: ([a-z_]+)$", re.M)
 
@@ -723,10 +723,10 @@ class App:
                 quota = d.get("quota") if "quota" in d else d
                 if not isinstance(quota, dict) or not all(k in node.KEYS and (v is None or (isinstance(v, int) and v >= 0))
                                                             for k, v in quota.items()):
-                    raise HTTPError(400, 'quota must be an object of vcpus, mem_mib and vms, each a whole number or null (no limit)')
+                    raise HTTPError(400, 'quota must be an object of vcpus, mem_mib, vms and disk_mib, each a whole number or null (no limit)')
                 args = ["tenant", "set", name]
                 for k, v in quota.items():
-                    args += [{"vcpus": "--vcpus", "mem_mib": "--mem", "vms": "--vms"}[k], "none" if v is None else str(v)]
+                    args += [{"vcpus": "--vcpus", "mem_mib": "--mem", "vms": "--vms", "disk_mib": "--disk"}[k], "none" if v is None else str(v)]
                 await fcvm_ok(*args)
                 return await fcvm_json("tenant", "show", name)
             case ("DELETE", "tenants", 2):
@@ -780,12 +780,12 @@ class App:
                 out, _ = await fcvm_ok("egress", name, "-n", "200")
                 return {"text": ANSI.sub("", out)}
             case ("GET", "images", 1):
-                return await fcvm_json("images", "--json")
+                return await fcvm_json("images", "--json", *tenant_args(q))
             case ("POST", "images", 1):
                 ref = d.get("ref", "").strip()
                 if not ref or ref.startswith("-"):
                     raise HTTPError(400, "image reference required")
-                args = ["import", ref] + ([d["name"]] if d.get("name") else [])
+                args = ["import", ref] + ([d["name"]] if d.get("name") else []) + tenant_args(d)
                 return await self.jobs.start("import", f"import {ref}", args)
             case ("DELETE", "images", 2):
                 await fcvm_ok("rmi", name)
@@ -805,7 +805,7 @@ class App:
                     raise HTTPError(400, str(e))
                 return {"removed": name}
             case ("GET", "snapshots", 1):
-                return await fcvm_json("snapshot", "ls", "--json")
+                return await fcvm_json("snapshot", "ls", "--json", *tenant_args(q))
             case ("POST", "snapshots", 3) if parts[2] == "fork":
                 count = int(d.get("count") or 1)
                 args = ["fork", name] + ([d["name"]] if d.get("name") else []) + ["-n", count]
@@ -818,7 +818,16 @@ class App:
                 await fcvm_ok("snapshot", "rm", name)
                 return {"removed": name}
             case ("GET", "volumes", 1):
-                return await fcvm_json("volume", "ls", "--json")
+                return await fcvm_json("volume", "ls", "--json", *tenant_args(q))
+            case ("POST", "volumes", 1):
+                vname = d.get("name", "")
+                if not NAME.match(vname or "-"):
+                    raise HTTPError(400, "a volume name is required (letters, digits, . _ -)")
+                size = str(d.get("size") or "").strip()
+                if size and not re.fullmatch(r"[0-9]+[KMGT]?", size.upper()):
+                    raise HTTPError(400, "size must be a number with K, M, G or T (10G)")
+                await fcvm_ok("volume", "create", vname, *([size] if size else []), *tenant_args(d))
+                return next((v for v in await fcvm_json("volume", "ls", "--json") if v["name"] == vname), {"name": vname})
             case ("DELETE", "volumes", 2):
                 await fcvm_ok("volume", "rm", name)
                 return {"removed": name}

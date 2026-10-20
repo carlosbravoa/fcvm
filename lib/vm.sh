@@ -141,7 +141,24 @@ labels_json() {   # KEY=VALUE... -> {"KEY": "VALUE", ...}
 # Admission (lib/node.py): does the VM fit its tenant's quota and, with
 # NODE_ADMIT=1, the host? Fails with quota_exceeded or node_full; otherwise
 # the VM counts as allocated (the `starting` marker) until it records a pid.
+# `node_admit [--tenant T] --disk SIZE` asks for disk alone (a new layer,
+# volume, image or snapshot), before it's taken.
 node_admit() { python3 "$FCVM_ROOT/lib/node.py" admit "$@"; }
+
+# Who owns an object: images/NAME.json, snapshots/NAME/meta.json and
+# volumes/NAME.json carry a `tenant`; none means public. A tenant's objects
+# are its own: own_ok refuses their use by a VM of another tenant, or of
+# none (docs/vms.md, Tenants and quotas).
+image_tenant()    { jq -r '.tenant // empty' "$IMAGES_DIR/$1.json" 2>/dev/null || true; }
+snapshot_tenant() { jq -r '.tenant // empty' "$SNAPSHOTS_DIR/$1/meta.json" 2>/dev/null || true; }
+volume_tenant()   { jq -r '.tenant // empty' "$VOLUMES_DIR/$1.json" 2>/dev/null || true; }
+vm_tenant()       { jq -r '.labels.tenant // empty' "$VMS_DIR/$1/vm.json" 2>/dev/null || true; }
+own_ok() {   # vm-tenant kind name owner
+    [ -z "$4" ] || [ "$4" = "$1" ] ||
+        die_code policy "$2 '$3' belongs to tenant '$4'$([ -n "$1" ] && echo ", not to '$1'" || echo "; the VM has no tenant (--tenant $4)")"
+}
+# `tenant` from --label/--tenant arguments already collected as KEY=VALUE.
+labels_tenant() { labels_json "$@" | jq -r '.tenant // empty'; }
 
 # fcvm create/run --template NAME [ARGS...]: the template's image and create
 # options, then yours (later options win), then the template's process unless
@@ -424,6 +441,7 @@ create() {
     done
     [[ $vm =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid VM name '$vm'"
     [[ $vcpus =~ ^[1-9][0-9]*$ && $mem =~ ^[1-9][0-9]*$ ]] || die "--vcpus and --mem want positive numbers"
+    local tenant; tenant=$(labels_tenant "${labels[@]}")   # --tenant, or a template's tenant label
     sock_room "$vm"
     lock_vm "$vm"
     local existing=0
@@ -451,6 +469,8 @@ create() {
     fi
     [ ${#argv[@]} -eq 0 ] || [ "$type" = app ] || die "-- CMD, --idle and --entrypoint only apply to app images (system images boot systemd)"
     [ $copy = 0 ] || [ -z "$(jq -r '.parent // empty' "$meta")" ] || die "--copy needs a base image; '$image' is a committed layer"
+    local layer
+    for layer in $(image_chain "$image"); do own_ok "$tenant" image "$layer" "$(image_tenant "$layer")"; done
     if [ ${#allow[@]} -gt 0 ]; then
         [ "$netmode" = full ] || die "--allow and --net none are mutually exclusive"
         netmode=restricted
@@ -471,7 +491,9 @@ create() {
     done
     for p in "${vols[@]}"; do
         [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:,]*(:ro)?$ ]] || die_code invalid "bad volume spec '$p' (want NAME:/PATH[:ro] for a named volume, or HOST/DIR[:GUEST/PATH][:ro] for a host directory)"
-        [ -n "${FCVM_TEMPLATE_OUT:-}" ] || [ -f "$VOLUMES_DIR/${p%%:*}.ext4" ] || volume_create "${p%%:*}"
+        [ -n "${FCVM_TEMPLATE_OUT:-}" ] && continue
+        if [ -f "$VOLUMES_DIR/${p%%:*}.ext4" ]; then own_ok "$tenant" volume "${p%%:*}" "$(volume_tenant "${p%%:*}")"
+        else volume_create "${p%%:*}" "$VOLUME_SIZE" ${tenant:+--tenant "$tenant"}; fi   # a new one is the VM's tenant's
     done
     [ -z "${FCVM_TEMPLATE_OUT:-}" ] || [ $agent = 1 ] || die "--no-agent can't be saved in a template"
     local secret_names=() s
@@ -499,6 +521,9 @@ create() {
         die_code vm_exists "VM '$vm' already exists with a different spec (fcvm inspect $vm shows it)"
     fi
     refuse_if_cordoned
+    # The disk the VM takes counts from now (its tenant's quota, the host's capacity)
+    local need=${disk:-$VM_DISK}; [ $copy = 0 ] || need=${disk:-$(stat -c %s "$IMAGES_DIR/$image.ext4")}
+    node_admit ${tenant:+--tenant "$tenant"} --disk "$need" || exit 1
     mkdir -p "$dir"
     if [ $copy = 1 ]; then
         cp --sparse=always "$IMAGES_DIR/$image.ext4" "$dir/disk.ext4"
@@ -1319,16 +1344,31 @@ shell_vm() {
 
 # --- volumes: persistent ext4 disks, attached with -v NAME:/PATH[:ro] ---------
 
+# fcvm volume create NAME [SIZE] [--tenant T]: an empty ext4 disk, sparse.
+# volumes/NAME.json records who owns it (and when it was made); without a
+# tenant the volume is public.
 volume_create() {
-    local name=${1:?usage: fcvm volume create NAME [SIZE]} size=${2:-$VOLUME_SIZE}
+    local usage="usage: fcvm volume create NAME [SIZE] [--tenant NAME]" name="" size="" tenant=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --tenant) tenant_ok "${2:?$usage}"; tenant=$2; shift 2 ;;
+            -*)       die_code invalid "unknown option $1 ($usage)" ;;
+            *)        if [ -z "$name" ]; then name=$1; elif [ -z "$size" ]; then size=$1; else die_code invalid "$usage"; fi; shift ;;
+        esac
+    done
+    [ -n "$name" ] || die_code invalid "$usage"
+    size=${size:-$VOLUME_SIZE}
     [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid volume name '$name'"
     local f=$VOLUMES_DIR/$name.ext4
     [ ! -e "$f" ] || die_code volume_exists "volume '$name' already exists"
+    node_admit ${tenant:+--tenant "$tenant"} --disk "$size" || exit 1
     mkdir -p "$VOLUMES_DIR"
     truncate -s "$size" "$f"
     mkfs.ext4 -q -F -L "vol-${name:0:12}" -E lazy_itable_init=1,lazy_journal_init=1,root_owner=0:0 "$f"
     debugfs -w -R "rmdir /lost+found" "$f" >/dev/null 2>&1   # an empty root, like a docker volume
-    log "created volume '$name' ($size, sparse)"
+    jq -n --arg name "$name" --arg size "$size" --arg t "$tenant" \
+        '{name: $name, size: $size, created: (now | todate)} + (if $t == "" then {} else {tenant: $t} end)' > "$VOLUMES_DIR/$name.json"
+    log "created volume '$name' ($size, sparse${tenant:+, tenant $tenant})"
 }
 
 # VMs that reference volume $1. Filters: "running" (only running VMs), "rw" (only rw mounts).
@@ -1351,26 +1391,33 @@ volume_cmd() {
     case $sub in
         create) volume_create "$@" ;;
         ls)
-            local json=0 f name
-            [ "${1:-}" = --json ] && json=1
+            local json=0 f name tenant="" owner
+            while [ $# -gt 0 ]; do
+                case $1 in
+                    --json)   json=1; shift ;;
+                    --tenant) tenant_ok "${2:?--tenant wants a name}"; tenant=$2; shift 2 ;;
+                    *)        die_code invalid "unknown option $1 (usage: fcvm volume ls [--json] [--tenant NAME])" ;;
+                esac
+            done
             for f in "$VOLUMES_DIR"/*.ext4; do
                 [ -f "$f" ] || continue
-                name=$(basename "$f" .ext4)
-                jq -n --arg name "$name" --argjson size "$(stat -c %s "$f")" \
+                name=$(basename "$f" .ext4); owner=$(volume_tenant "$name")
+                [ -z "$tenant" ] || [ "$owner" = "$tenant" ] || continue
+                jq -n --arg name "$name" --argjson size "$(stat -c %s "$f")" --arg t "$owner" \
                     --argjson used "$(( $(stat -c %b "$f") * 512 ))" \
                     --argjson vms "$(jq -n '$ARGS.positional' --args $(volume_users "$name"))" \
-                    '{name: $name, size_bytes: $size, used_bytes: $used, vms: $vms}'
+                    '{name: $name, size_bytes: $size, used_bytes: $used, vms: $vms, tenant: (if $t == "" then null else $t end)}'
             done | if [ $json = 1 ]; then jq -s .; else
-                jq -rs '(["NAME","SIZE","USED","VMS"] | @tsv), (.[] | [.name, "\(.size_bytes / 1073741824 | floor)G",
-                    "\(.used_bytes / 1048576 | floor)M", (.vms | join(","))] | @tsv)' | column -t -s $'\t'; fi ;;
+                jq -rs '(["NAME","SIZE","USED","VMS","TENANT"] | @tsv), (.[] | [.name, "\(.size_bytes / 1073741824 | floor)G",
+                    "\(.used_bytes / 1048576 | floor)M", (.vms | join(",")), (.tenant // "-")] | @tsv)' | column -t -s $'\t'; fi ;;
         rm)
             local name=${1:?usage: fcvm volume rm NAME} users
             [ -f "$VOLUMES_DIR/$name.ext4" ] || die_code volume_not_found "no volume '$name'"
             users=$(volume_users "$name" | tr '\n' ' ')
             [ -z "$users" ] || die_code in_use "volume '$name' is used by VM(s): $users"
-            rm -f "$VOLUMES_DIR/$name.ext4"
+            rm -f "$VOLUMES_DIR/$name.ext4" "$VOLUMES_DIR/$name.json"
             log "removed volume '$name'" ;;
-        *) die_code invalid "usage: fcvm volume create NAME [SIZE] | ls [--json] | rm NAME" ;;
+        *) die_code invalid "usage: fcvm volume create NAME [SIZE] [--tenant NAME] | ls [--json] [--tenant NAME] | rm NAME" ;;
     esac
 }
 
@@ -1386,11 +1433,13 @@ commit() {
     vm_running "$vm" && die_code vm_running "VM '$vm' is running; stop it first (fcvm stop $vm)"
     [[ $image =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid image name '$image'"
     [ ! -e "$IMAGES_DIR/$image.json" ] || die_code image_exists "image '$image' already exists"
-    local dir parent src out rc=0
+    local dir parent src out rc=0 tenant
     dir=$(vm_dir "$vm")
     parent=$(jq -r .image "$dir/vm.json")
+    tenant=$(vm_tenant "$vm")   # the image is the VM's tenant's
     out=$IMAGES_DIR/$image.ext4
     if [ -f "$dir/disk.ext4" ]; then src=$dir/disk.ext4; else src=$dir/rw.ext4; fi
+    node_admit ${tenant:+--tenant "$tenant"} --disk "$(stat -c %s "$src")" || exit 1
     cp --sparse=always "$src" "$out"
     chmod u+w "$out"
     e2fsck -fy "$out" >/dev/null 2>&1 || rc=$?   # replay the journal if the VM was killed
@@ -1405,13 +1454,13 @@ commit() {
     [ "$(jq -r .type "$dir/vm.json")" != system ] || scrub_identity "$out" "$pre"
     chmod a-w "$out"
     if [ -f "$dir/disk.ext4" ]; then
-        jq --arg vm "$vm" --arg parent "$parent" 'del(.parent) + {ref: "commit of \($vm) (from \($parent))"}' \
-            "$IMAGES_DIR/$parent.json" > "$IMAGES_DIR/$image.json"
+        jq --arg vm "$vm" --arg parent "$parent" --arg t "$tenant" 'del(.parent, .tenant) + {ref: "commit of \($vm) (from \($parent))"}
+            + (if $t == "" then {} else {tenant: $t} end)' "$IMAGES_DIR/$parent.json" > "$IMAGES_DIR/$image.json"
     else
-        jq --arg vm "$vm" --arg parent "$parent" '. + {parent: $parent, ref: "commit of \($vm) (from \($parent))"}' \
-            "$IMAGES_DIR/$parent.json" > "$IMAGES_DIR/$image.json"
+        jq --arg vm "$vm" --arg parent "$parent" --arg t "$tenant" 'del(.tenant) + {parent: $parent, ref: "commit of \($vm) (from \($parent))"}
+            + (if $t == "" then {} else {tenant: $t} end)' "$IMAGES_DIR/$parent.json" > "$IMAGES_DIR/$image.json"
     fi
-    log "committed '$vm' as image '$image' ($(du -h "$out" | cut -f1) on disk$([ -f "$dir/disk.ext4" ] || echo ", layer on $parent"))"
+    log "committed '$vm' as image '$image' ($(du -h "$out" | cut -f1) on disk$([ -f "$dir/disk.ext4" ] || echo ", layer on $parent")${tenant:+, tenant $tenant})"
 }
 
 # Merge committed layers (images, OLDEST first) into one new layer disk $1,
@@ -1510,10 +1559,12 @@ squash() {
     image_json "$image" >/dev/null
     [[ $new =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid image name '$new'"
     [ ! -e "$IMAGES_DIR/$new.json" ] || die_code image_exists "image '$new' already exists"
-    local chain=() layers=() i
+    local chain=() layers=() i tenant
     mapfile -t chain < <(image_chain "$image")
     [ ${#chain[@]} -gt 2 ] || die "'$image' has ${#chain[@]} level(s); nothing to squash"
     for ((i = ${#chain[@]} - 2; i >= 0; i--)); do layers+=("${chain[i]}"); done
+    tenant=$(image_tenant "$image")   # the result stays the image's tenant's (its json is copied below)
+    node_admit ${tenant:+--tenant "$tenant"} --disk "$(stat -c %s "$IMAGES_DIR/$image.ext4")" || exit 1
     log "merging ${#layers[@]} layers of '$image' onto ${chain[-1]}"
     squash_layers "$IMAGES_DIR/$new.ext4" "${layers[@]}"
     chmod a-w "$IMAGES_DIR/$new.ext4"
@@ -1653,11 +1704,13 @@ snapshot_create() {
     fi
     [ "$(jq '.shares // [] | length' "$vdir/vm.json")" = 0 ] ||
         die "VM '$vm' has live host directories mounted; their connections can't be cloned into a fork"
-    local jailed=false vmstate=$dir/vmstate memf=$dir/mem
+    local jailed=false vmstate=$dir/vmstate memf=$dir/mem tenant
     if vm_jailed "$vm"; then   # Firecracker writes inside its chroot; the helper moves the files out
         jailed=true vmstate=/snap.vmstate memf=/snap.mem
     fi
     if [ -f "$vdir/disk.ext4" ]; then disk=disk.ext4 drive=root; else disk=rw.ext4 drive=rw; fi
+    tenant=$(vm_tenant "$vm")   # the snapshot, and its forks by default, are the VM's tenant's
+    node_admit ${tenant:+--tenant "$tenant"} --disk "$(( $(jq -r .mem_mib "$vdir/vm.json") + ($(stat -c %s "$vdir/$disk") + 1048575) / 1048576 ))M" || exit 1
     mkdir -p "$dir"
     t0=$(date +%s%N)
     fc_api "$vdir/fc.sock" PATCH /vm '{"state": "Paused"}' || { rm -rf "$dir"; die "cannot pause '$vm'"; }
@@ -1674,10 +1727,10 @@ snapshot_create() {
     cp "$vdir/vm.json" "$dir/vm.json"
     jq -n --arg src "$vm" --arg disk "$disk" --arg drive "$drive" --argjson ms "$ms" \
         --arg fc "$("$FIRECRACKER" --version | head -1)" --arg srcdisk "$vdir/$disk" \
-        --argjson jail "$jailed" \
+        --argjson jail "$jailed" --arg t "$tenant" \
         '{source: $src, disk: $disk, drive_id: $drive, source_disk: $srcdisk, paused_ms: $ms,
-          firecracker: $fc, jail: $jail, created: (now | todate)}' > "$dir/meta.json"
-    log "snapshot '$name' of '$vm' (paused ${ms} ms; memory $(du -h "$dir/mem" | cut -f1) on disk). Fork it: fcvm fork $name"
+          firecracker: $fc, jail: $jail, created: (now | todate)} + (if $t == "" then {} else {tenant: $t} end)' > "$dir/meta.json"
+    log "snapshot '$name' of '$vm' (paused ${ms} ms; memory $(du -h "$dir/mem" | cut -f1) on disk${tenant:+; tenant $tenant}). Fork it: fcvm fork $name"
 }
 
 # Boot VM $2 from snapshot $1: its own copy of the disk, a free tap, its own
@@ -1698,6 +1751,7 @@ fork_one() {
             '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate), labels: $labels}
              | del(.lease_until) + (if $lease == "" then {} else {lease_until: ($lease | tonumber)} end)' \
             "$sdir/vm.json" > "$dir/vm.json"
+        node_admit --disk "$(stat -c %s "$sdir/$disk")" "$vm" || { rm -rf "$dir"; exit 1; }   # start checks again, as it must
         emit_event vm.created "$vm" fork "$(jq -nc --arg s "$snap" '{restored_from: $s}')"
         cp --sparse=always "$sdir/$disk" "$dir/$disk"
         RESTORE=$snap QUIET_START=1 start "$vm"
@@ -1711,7 +1765,7 @@ fork_one() {
         '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate), labels: $labels}
          | del(.lease_until) + (if $lease == "" then {} else {lease_until: ($lease | tonumber)} end)' \
         "$sdir/vm.json" > "$dir/vm.json"
-    node_admit "$vm" || { rm -rf "$dir"; exit 1; }
+    node_admit --disk "$(stat -c %s "$sdir/$disk")" "$vm" || { rm -rf "$dir"; exit 1; }
     emit_event vm.created "$vm" fork "$(jq -nc --arg s "$snap" '{restored_from: $s}')"
     cp --sparse=always "$sdir/$disk" "$dir/$disk"
     DIR=$dir IP=""
@@ -1786,6 +1840,11 @@ fork_cmd() {
     done
     [ -n "$snap" ] || die_code invalid "$usage"
     [ -f "$SNAPSHOTS_DIR/$snap/meta.json" ] || die_code snapshot_not_found "no snapshot '$snap' (see: fcvm snapshot ls)"
+    # A tenant's snapshot forks only for that tenant: the forks take it unless
+    # --tenant names it; another tenant's request is refused.
+    local owner tenant; owner=$(snapshot_tenant "$snap") tenant=$(labels_tenant "${labels[@]}")
+    if [ -n "$owner" ] && [ -z "$tenant" ]; then labels+=("tenant=$owner")
+    else own_ok "$tenant" snapshot "$snap" "$owner"; fi
     [ "$(jq '.ports | length' "$SNAPSHOTS_DIR/$snap/vm.json")" = 0 ] || use_daemon ||   # (the service's log says it)
         warn "published ports aren't carried over to forks (they'd conflict with the source)"
     if use_daemon; then
@@ -1828,7 +1887,15 @@ snapshot_export() {
 }
 
 snapshot_import() {
-    local usage="usage: fcvm snapshot import FILE.tar [NAME]" file=${1:?$usage} name=${2:-} dir tmp
+    local usage="usage: fcvm snapshot import FILE.tar [NAME] [--tenant NAME]" file="" name="" tenant="" dir tmp
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --tenant) tenant_ok "${2:?$usage}"; tenant=$2; shift 2 ;;
+            -*)       die_code invalid "unknown option $1 ($usage)" ;;
+            *)        if [ -z "$file" ]; then file=$1; elif [ -z "$name" ]; then name=$1; else die_code invalid "$usage"; fi; shift ;;
+        esac
+    done
+    [ -n "$file" ] || die_code invalid "$usage"
     [ -f "$file" ] || die "no such file: $file"
     tmp=$(mktemp -d -p "$SNAPSHOTS_DIR" .import.XXXXXX) || { mkdir -p "$SNAPSHOTS_DIR"; tmp=$(mktemp -d -p "$SNAPSHOTS_DIR" .import.XXXXXX); }
     tar -S -C "$tmp" -xf "$file" 2>/dev/null && [ -f "$tmp/export.json" ] && [ -f "$tmp/meta.json" ] ||
@@ -1849,10 +1916,16 @@ snapshot_import() {
             warn "forks of this snapshot need a stand-in for its source disk at $srcdisk, which can't be created here (snapshots of --jail VMs don't have this limitation)"
         fi
     fi
-    jq --arg file "$(basename "$file")" '. + {imported_from: $file}' "$tmp/meta.json" > "$tmp/meta.json.tmp" && mv "$tmp/meta.json.tmp" "$tmp/meta.json"
+    # The snapshot is --tenant's (its VM's tenant label follows), else public
+    node_admit ${tenant:+--tenant "$tenant"} --disk "$(( ($(stat -c %s "$tmp/mem") + $(stat -c %s "$tmp/$(jq -r .disk "$tmp/meta.json")") + 1048575) / 1048576 ))M" ||
+        { rm -rf "$tmp"; exit 1; }
+    jq --arg file "$(basename "$file")" --arg t "$tenant" 'del(.tenant) + {imported_from: $file} + (if $t == "" then {} else {tenant: $t} end)' \
+        "$tmp/meta.json" > "$tmp/meta.json.tmp" && mv "$tmp/meta.json.tmp" "$tmp/meta.json"
+    jq --arg t "$tenant" '.labels = ((.labels // {}) | del(.tenant)) + (if $t == "" then {} else {tenant: $t} end)' \
+        "$tmp/vm.json" > "$tmp/vm.json.tmp" && mv "$tmp/vm.json.tmp" "$tmp/vm.json"
     rm -f "$tmp/export.json"
     mv "$tmp" "$SNAPSHOTS_DIR/$name"
-    log "imported snapshot '$name' ($(jq -r .image "$SNAPSHOTS_DIR/$name/vm.json")). Fork it: fcvm fork $name"
+    log "imported snapshot '$name' ($(jq -r .image "$SNAPSHOTS_DIR/$name/vm.json")${tenant:+, tenant $tenant}). Fork it: fcvm fork $name"
 }
 
 snapshot_cmd() {
@@ -1860,23 +1933,30 @@ snapshot_cmd() {
         export) shift; snapshot_export "$@" ;;
         import) shift; snapshot_import "$@" ;;
         ls)
-            local json=0 d
-            [ "${2:-}" = --json ] && json=1
+            local json=0 d tenant=""; shift
+            while [ $# -gt 0 ]; do
+                case $1 in
+                    --json)   json=1; shift ;;
+                    --tenant) tenant_ok "${2:?--tenant wants a name}"; tenant=$2; shift 2 ;;
+                    *)        die_code invalid "unknown option $1 (usage: fcvm snapshot ls [--json] [--tenant NAME])" ;;
+                esac
+            done
             for d in "$SNAPSHOTS_DIR"/*/; do
                 [ -f "$d/meta.json" ] || continue
+                [ -z "$tenant" ] || [ "$(snapshot_tenant "$(basename "$d")")" = "$tenant" ] || continue
                 jq --arg name "$(basename "$d")" --argjson mem "$(( $(stat -c %b "$d/mem") * 512 ))" \
                    --argjson disk "$(( $(stat -c %b "$d"/*.ext4 | head -1) * 512 ))" --slurpfile vm "$d/vm.json" \
                    '{name: $name, source, image: $vm[0].image, type: $vm[0].type, mem_mib: $vm[0].mem_mib,
-                     mem_bytes_on_disk: $mem, disk_bytes: $disk, paused_ms, created}' "$d/meta.json"
+                     mem_bytes_on_disk: $mem, disk_bytes: $disk, paused_ms, created, tenant: (.tenant // null)}' "$d/meta.json"
             done | if [ $json = 1 ]; then jq -s .; else
-                jq -rs '(["NAME","SOURCE","IMAGE","MEM","DISK","CREATED"] | @tsv),
+                jq -rs '(["NAME","SOURCE","IMAGE","MEM","DISK","CREATED","TENANT"] | @tsv),
                     (.[] | [.name, .source, .image, "\(.mem_bytes_on_disk / 1048576 | floor)M/\(.mem_mib)M",
-                            "\(.disk_bytes / 1048576 | floor)M", .created] | @tsv)' | column -t -s $'\t'; fi ;;
+                            "\(.disk_bytes / 1048576 | floor)M", .created, (.tenant // "-")] | @tsv)' | column -t -s $'\t'; fi ;;
         rm)
             local name=${2:?usage: fcvm snapshot rm NAME}
             [ -d "$SNAPSHOTS_DIR/$name" ] || die_code snapshot_not_found "no snapshot '$name'"
             rm -rf "${SNAPSHOTS_DIR:?}/$name"; log "removed snapshot '$name'" ;;
-        ""|-h|--help) die_code invalid "usage: fcvm snapshot VM NAME | fcvm snapshot ls [--json] | fcvm snapshot rm NAME | fcvm snapshot export NAME FILE.tar | fcvm snapshot import FILE.tar [NAME]" ;;
+        ""|-h|--help) die_code invalid "usage: fcvm snapshot VM NAME | fcvm snapshot ls [--json] [--tenant NAME] | fcvm snapshot rm NAME | fcvm snapshot export NAME FILE.tar | fcvm snapshot import FILE.tar [NAME] [--tenant NAME]" ;;
         *) snapshot_create "$@" ;;
     esac
 }
@@ -2357,16 +2437,24 @@ list_vms() {
 }
 
 list_images() {
-    local j name all=0 json=0 a
-    for a; do case $a in --all|-a) all=1 ;; --json) json=1 ;; esac; done
+    local j name all=0 json=0 tenant=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --all|-a) all=1; shift ;;
+            --json)   json=1; shift ;;
+            --tenant) tenant_ok "${2:?--tenant wants a name}"; tenant=$2; shift 2 ;;
+            *)        die_code invalid "unknown option $1 (usage: fcvm images [--all] [--json] [--tenant NAME])" ;;
+        esac
+    done
     if [ $json = 1 ]; then
         for j in "$IMAGES_DIR"/*.json; do
             [ -f "$j" ] || continue
             name=$(basename "$j" .json)
             [ $all = 1 ] || [[ $name != _* ]] || continue
+            [ -z "$tenant" ] || [ "$(image_tenant "$name")" = "$tenant" ] || continue
             jq --arg name "$name" --argjson used "$(( $(stat -c %b "${j%.json}.ext4") * 512 ))" \
                 --argjson users "$(jq -n '$ARGS.positional' --args $(image_users "$name"))" \
-                '{name: $name, type: (.type // "app"), parent: (.parent // null), ref: (.ref // null),
+                '{name: $name, type: (.type // "app"), parent: (.parent // null), ref: (.ref // null), tenant: (.tenant // null),
                   disk_used_bytes: $used, used_by: $users} + (. | {argv, env, workdir, user, exposed_ports} | with_entries(select(.value != null)))' "$j"
         done | jq -s .
         return
@@ -2376,9 +2464,10 @@ list_images() {
         [ -f "$j" ] || continue
         name=$(basename "$j" .json)
         [ $all = 1 ] || [[ $name != _* ]] || continue   # build cache (fcvm build)
+        [ -z "$tenant" ] || [ "$(image_tenant "$name")" = "$tenant" ] || continue
         printf '%-28s %-10s %-8s %-8s %s\n' "$name" "$(jq -r '.type // "app"' "$j")" \
             "$(du -h "${j%.json}.ext4" | cut -f1)" "$(image_users "$name" | wc -l)" \
-            "$(jq -r 'if .parent then "layer on \(.parent)" else (.ref // "-") end' "$j")"
+            "$(jq -r 'if .parent then "layer on \(.parent)" else (.ref // "-") end + (if .tenant then " (tenant \(.tenant))" else "" end)' "$j")"
     done
 }
 

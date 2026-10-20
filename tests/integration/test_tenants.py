@@ -51,7 +51,7 @@ class Tenants(VMTestCase):
         fcvm("start", b)
         self.assertEqual(self.inspect(b)["state"], "running")
         shown = json.loads(fcvm("tenant", "show", t).stdout)
-        self.assertEqual(shown["allocated"], {"vcpus": 4, "mem_mib": 512, "vms": 2})
+        self.assertEqual(shown["allocated"], {"vcpus": 4, "mem_mib": 512, "vms": 2, "disk_mib": 2 * 8192})   # two 8G layers
         c = self.vm("--tenant", t, "--vcpus", "1", "--mem", "256", start=False)
         r = fcvm("start", c, check=False, env=LOCAL)
         self.assertIn("vms quota: 2 allocated + 1 > 2", r.stderr)           # the count, now
@@ -96,6 +96,60 @@ class Tenants(VMTestCase):
         ev = next(e for e in reversed(events()) if e["type"] == "pool.claimed")
         self.assertEqual((ev["vm"], ev["data"]["tenant"]), (vm, t))
         self.assertIn("pool.set", [e["type"] for e in events(60)])
+
+    def test_objects_belong_to_their_tenant(self):
+        t, other = self.tenant(), self.tenant()
+        src = self.vm("--tenant", t, "--mem", "256", "--disk", "1G")
+        # a snapshot is the VM's tenant's; its forks are too, unless another tenant asks (refused)
+        snap = self.snapshot(src)
+        self.assertEqual(json.loads(fcvm("snapshot", "ls", "--json", "--tenant", t).stdout)[0]["tenant"], t)
+        self.assertEqual(json.loads(fcvm("snapshot", "ls", "--json", "--tenant", other).stdout), [])
+        fork = unique("fork")
+        fcvm("fork", snap, fork, env=LOCAL)
+        self.addCleanup(self.remove_vm, fork)
+        self.assertEqual(self.inspect(fork)["labels"], {"tenant": t})
+        r = fcvm("fork", snap, unique("fork"), "--tenant", other, check=False, env=LOCAL)
+        self.assertEqual(r.stderr.splitlines()[-1], "fcvm-error: policy", r.stderr)
+        # a commit is the VM's tenant's image; only its VMs may boot from it
+        fcvm("stop", src)
+        img = self.image_name()
+        fcvm("commit", src, img)
+        self.assertEqual(next(i["tenant"] for i in json.loads(fcvm("images", "--json").stdout) if i["name"] == img), t)
+        self.assertEqual([i["name"] for i in json.loads(fcvm("images", "--json", "--tenant", t).stdout)], [img])
+        for args in ((), ("--tenant", other)):
+            r = fcvm("create", unique("vm"), img, "--idle", *args, check=False)
+            self.assertEqual(r.stderr.splitlines()[-1], "fcvm-error: policy", r.stderr)
+            self.assertIn(f"belongs to tenant '{t}'", r.stderr)
+        self.vm("--tenant", t, image=img, start=False)
+        # volumes: created for a tenant, or by its VM; others can't attach them
+        vol = self.volume()
+        fcvm("volume", "create", vol, "1G", "--tenant", t)
+        self.assertEqual(json.loads(fcvm("volume", "ls", "--json", "--tenant", t).stdout)[0]["name"], vol)
+        r = fcvm("create", unique("vm"), IMAGE, "--idle", "-v", f"{vol}:/data", check=False)
+        self.assertEqual(r.stderr.splitlines()[-1], "fcvm-error: policy", r.stderr)
+        self.vm("--tenant", t, "-v", f"{vol}:/data", start=False)
+        auto = self.volume()
+        self.vm("--tenant", other, "-v", f"{auto}:/data", start=False)             # made on first use: the VM's tenant's
+        self.assertEqual(json.loads(fcvm("volume", "ls", "--json", "--tenant", other).stdout)[0]["name"], auto)
+        shown = json.loads(fcvm("tenant", "show", t).stdout)
+        self.assertEqual((shown["images"], shown["snapshots"], shown["volumes"]), ([img], [snap], [vol]))
+        self.assertGreaterEqual(shown["allocated"]["disk_mib"], 1024 * 3 + 256)   # VM layers, the fork's, the snapshot, the volume
+
+    def test_disk_quota(self):
+        t = self.tenant("--disk", "2048")
+        a = self.vm("--tenant", t, "--mem", "256", "--disk", "1G", start=False)
+        self.assertEqual(json.loads(fcvm("tenant", "show", t).stdout)["allocated"]["disk_mib"], 1024)
+        r = fcvm("create", unique("vm"), IMAGE, "--idle", "--tenant", t, "--disk", "2G", check=False)
+        self.assertEqual(r.stderr.splitlines()[-1], "fcvm-error: quota_exceeded", r.stderr)
+        self.assertIn("disk_mib quota: 1024 allocated + 2048 > 2048", r.stderr)
+        vol = self.volume()
+        r = fcvm("volume", "create", vol, "2G", "--tenant", t, check=False)
+        self.assertEqual(r.stderr.splitlines()[-1], "fcvm-error: quota_exceeded", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(VMS, "..", "volumes", f"{vol}.ext4")))
+        fcvm("volume", "create", vol, "1G", "--tenant", t)                        # exactly fits
+        fcvm("start", a, env=LOCAL)                                               # starting takes no new disk
+        fcvm("tenant", "set", t, "--disk", "none")
+        self.vm("--tenant", t, "--mem", "256", "--disk", "2G", start=False)
 
     def test_node_capacity_when_enforced(self):
         vm = self.vm("--vcpus", "1", "--mem", "256", start=False)

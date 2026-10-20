@@ -336,13 +336,15 @@ at once. For a program that places VMs on hosts (a control plane) the
 host then refuses what doesn't fit, with a code it can act on.
 
 ```sh
-fcvm tenant set acme --vcpus 8 --mem 16384 --vms 4   # acme's limits (none, or a mix; none lifts one)
+fcvm tenant set acme --vcpus 8 --mem 16384 --vms 4 --disk 102400   # acme's limits (none, or a mix; none lifts one)
 fcvm create job1 python-3.13-slim --idle --tenant acme
 fcvm start job1                                      # refused with quota_exceeded if acme is full
 fcvm fork py-ready --tenant acme                     # forks and pool claims take a tenant too
-fcvm ls --tenant acme
-fcvm tenant ls                                       # NAME  VCPUS  MEM        VMS  QUOTA
-fcvm tenant show acme                                # quota, allocated, vms, as JSON
+fcvm commit job1 acme-tools                          # the image is acme's: only acme's VMs may use it
+fcvm volume create acme-data 20G --tenant acme       # so is the volume
+fcvm ls --tenant acme; fcvm images --tenant acme
+fcvm tenant ls                                       # NAME  VCPUS  MEM        VMS  DISK  QUOTA
+fcvm tenant show acme                                # quota, allocated, vms, images, snapshots, volumes
 ```
 
 - **A tenant is the `tenant` label** of a VM, set with `--tenant NAME` on
@@ -351,24 +353,42 @@ fcvm tenant show acme                                # quota, allocated, vms, as
   that `update` refuses to change or unset it. Templates and project files
   may set it as a label. A VM without it belongs to nobody in particular:
   the host's owner's own VMs.
+- **Images, snapshots and volumes have a tenant too**, or none, which
+  makes them public. `commit` and `snapshot` give the result the VM's
+  tenant; `import`, `build`, `volume create` and `snapshot import` take
+  `--tenant`; a volume that `-v` creates on first use is the VM's
+  tenant's. A tenant's objects are its own: a VM of another tenant, or of
+  none, that names one fails with `policy` (HTTP 403) at `create` (the
+  image and every layer under it, the volumes) or `fork` (the snapshot;
+  forks take the snapshot's tenant unless `--tenant` repeats it). `images`,
+  `snapshot ls` and `volume ls` show the tenant and take `--tenant`;
+  `tenant show` lists what a tenant owns. Removing an object (`rmi`,
+  `snapshot rm`, `volume rm`) needs no tenant: that's the host's call.
 - **Allocated** is what a tenant's running VMs take: their vCPUs, memory
   and count, plus VMs admitted in the last two minutes that haven't
-  booted yet. Stopped VMs take nothing. Disk isn't counted yet.
+  booted yet; stopped VMs take none of those. Disk is different: every VM
+  (running or not), image, snapshot and volume of the tenant counts with
+  the size it was given, so a sparse 10G volume counts 10G, and a stopped
+  VM its layer.
 - **Admission** happens when a VM starts (also a restart by policy), is
-  forked, or is claimed from a pool for a tenant: if the tenant's quota
-  would be exceeded, the command fails with `quota_exceeded` and nothing
-  changes (a refused fork leaves no VM; a refused claim leaves the VM in
-  the pool). A tenant with no `tenant set` has no quota.
+  forked, or is claimed from a pool for a tenant, and whenever something
+  of the tenant's takes disk (`create`, `fork`, `commit`, `snapshot`,
+  `volume create`, `import`, `build`): if the tenant's quota would be
+  exceeded, the command fails with `quota_exceeded` and nothing changes (a
+  refused fork leaves no VM; a refused claim leaves the VM in the pool). A
+  tenant with no `tenant set` has no quota.
 - **A pooled VM** has no tenant until it's claimed: `pool claim --tenant
   acme` gives it to acme, within acme's quota. A pool whose template sets
-  a `tenant` label is that tenant's, and a claim for another fails.
+  a `tenant` label, or whose snapshot is a tenant's, is that tenant's, and
+  a claim for another fails.
 - **The host's own capacity** can be enforced the same way, for every VM:
-  `NODE_ADMIT=1` in `fcvm.conf` refuses starts that would exceed
-  `NODE_VCPUS`, `NODE_MEM_MIB` or `NODE_VMS` (by default the host's CPUs
-  times 2, and its memory less 1 GB; [Configuration](configuration.md#node))
-  with `node_full`. It's off by default: on a laptop, overcommitting is
-  the point. `fcvm status --json` shows capacity, allocated and
-  allocatable either way, and the console's host line shows the share.
+  `NODE_ADMIT=1` in `fcvm.conf` refuses what would exceed `NODE_VCPUS`,
+  `NODE_MEM_MIB`, `NODE_VMS` or `NODE_DISK_MIB` (by default the host's
+  CPUs times 2, its memory less 1 GB, and the size of the filesystem the
+  state lives on; [Configuration](configuration.md#node)) with
+  `node_full`. It's off by default: on a laptop, overcommitting is the
+  point. `fcvm status --json` shows capacity, allocated and allocatable
+  either way, and the console's host line shows the share.
 
 Tenants and quotas are a node's side of a fleet: who may do what, and
 which tenant a token belongs to, is the control plane's. [The node

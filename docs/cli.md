@@ -49,10 +49,10 @@ These use sudo.
 
 | command | what it does |
 |---|---|
-| `import REF [NAME]` | a registry image (`nginx:latest`, `ghcr.io/org/app:tag`, `name@sha256:...`) or a local one (`docker-archive:F.tar`, `oci:DIR[:TAG]`, `oci-archive:F.tar`, or just a path) → an app image |
-| `build [-t NAME] [-f FILE] [--build-arg K=V]... [--no-cache] [--net none \| --allow H,...] [CONTEXT]` | builds an image from a Dockerfile subset, cached per step. The result is the FROM image plus one layer |
-| `images [--all] [--json]` | lists images, with type, size, users and source. `--all` includes the build cache |
-| `commit VM IMAGE` | saves a stopped VM's changes as a new image: a read-only layer on its image |
+| `import REF [NAME] [--tenant NAME]` | a registry image (`nginx:latest`, `ghcr.io/org/app:tag`, `name@sha256:...`) or a local one (`docker-archive:F.tar`, `oci:DIR[:TAG]`, `oci-archive:F.tar`, or just a path) → an app image. `--tenant`: the image is that [tenant's](vms.md#tenants-and-quotas) own |
+| `build [-t NAME] [-f FILE] [--build-arg K=V]... [--no-cache] [--net none \| --allow H,...] [--tenant NAME] [CONTEXT]` | builds an image from a Dockerfile subset, cached per step. The result is the FROM image plus one layer. `--tenant`: the build runs as that tenant and the image is its own |
+| `images [--all] [--json] [--tenant NAME]` | lists images, with type, size, users and source (and the tenant, if any). `--all` includes the build cache; `--tenant` only that tenant's |
+| `commit VM IMAGE` | saves a stopped VM's changes as a new image: a read-only layer on its image. The image belongs to the VM's tenant, if it has one |
 | `squash IMAGE NEW` | merges IMAGE's layers into one, on the same base image |
 | `export IMAGE FILE.tar` | the image, flattened, as an OCI image archive for `docker load`, `podman load` or `fcvm import` elsewhere |
 | `push IMAGE REGISTRY/REPO[:TAG]` | the same, uploaded to a registry (`REGISTRY_USER`/`REGISTRY_PASSWORD` to log in) |
@@ -132,10 +132,10 @@ These use sudo.
 
 | command | what it does |
 |---|---|
-| `tenant set NAME [--vcpus N\|none] [--mem MiB\|none] [--vms N\|none]` | a tenant's quota, enforced when its VMs start, fork or are claimed (`quota_exceeded`). Given limits merge with the ones set before; `none` lifts one. A tenant is just the `tenant` label of its VMs ([Tenants and quotas](vms.md#tenants-and-quotas)) |
-| `tenant ls [--json]` | every tenant (with a quota, or with VMs), what it has allocated and its limits |
-| `tenant show NAME` | one tenant as JSON: `quota`, `allocated` (vCPUs, memory and count of its running VMs), `vms` |
-| `tenant rm NAME` | removes the quota; the tenant's VMs keep their label |
+| `tenant set NAME [--vcpus N\|none] [--mem MiB\|none] [--vms N\|none] [--disk MiB\|none]` | a tenant's quota: vCPUs, memory and VMs are checked when its VMs start, fork or are claimed, disk whenever something of its takes disk (`quota_exceeded`). Given limits merge with the ones set before; `none` lifts one. A tenant is the `tenant` label of its VMs and the `tenant` of its images, snapshots and volumes ([Tenants and quotas](vms.md#tenants-and-quotas)) |
+| `tenant ls [--json]` | every tenant (with a quota, VMs or objects), what it has allocated and its limits |
+| `tenant show NAME` | one tenant as JSON: `quota`, `allocated` (vCPUs, memory and count of its running VMs; the disk of everything it owns), `vms`, `images`, `snapshots`, `volumes` |
+| `tenant rm NAME` | removes the quota; the tenant's VMs and objects keep their tenant |
 
 ## Inside a VM
 
@@ -155,7 +155,7 @@ These use sudo.
 
 | command | what it does |
 |---|---|
-| `volume create NAME [SIZE]`, `volume ls [--json]`, `volume rm NAME` | named volumes: persistent ext4 disks attached with `-v` |
+| `volume create NAME [SIZE] [--tenant NAME]`, `volume ls [--json] [--tenant NAME]`, `volume rm NAME` | named volumes: persistent ext4 disks attached with `-v`. With a tenant, only that tenant's VMs may attach it; a volume `-v` creates on first use is the VM's tenant's |
 | `mount VM HOST/DIR[:GUEST/PATH][:ro]`, `umount VM PATH` | adds or removes a live host directory (same forms as `-v`): at once on a running VM, and from the next start. `umount` takes the guest path or the host directory |
 | `publish VM [BIND:][HOSTPORT]:GUESTPORT`, `unpublish VM HOSTPORT` | publishes or unpublishes a TCP port: at once on a running VM, and from the next start. Without `HOSTPORT` a free one is picked; the spec is printed |
 
@@ -163,10 +163,10 @@ These use sudo.
 
 | command | what it does |
 |---|---|
-| `snapshot VM NAME` | saves a running VM's memory, device state and disk. The VM keeps running (paused ~0.75 s per GB of RAM) |
-| `snapshot ls [--json]`, `snapshot rm NAME` | lists and deletes snapshots |
-| `snapshot export NAME FILE.tar`, `snapshot import FILE.tar [NAME]` | moves a snapshot to another fcvm host, which needs the same images (by name) and a compatible Firecracker ([details](snapshots.md#moving-snapshots-between-hosts)) |
-| `fork SNAPSHOT [NAME] [-n N] [--label K=V]... [--tenant NAME] [--lease UNTIL]` | starts running VMs from a snapshot, ~150 ms each (~1 s jailed), each with its own disk, IP, MAC and hostname |
+| `snapshot VM NAME` | saves a running VM's memory, device state and disk. The VM keeps running (paused ~0.75 s per GB of RAM). The snapshot belongs to the VM's tenant, if it has one |
+| `snapshot ls [--json] [--tenant NAME]`, `snapshot rm NAME` | lists and deletes snapshots; `--tenant` only that tenant's |
+| `snapshot export NAME FILE.tar`, `snapshot import FILE.tar [NAME] [--tenant NAME]` | moves a snapshot to another fcvm host, which needs the same images (by name) and a compatible Firecracker ([details](snapshots.md#moving-snapshots-between-hosts)). An import is public unless `--tenant` says whose it is |
+| `fork SNAPSHOT [NAME] [-n N] [--label K=V]... [--tenant NAME] [--lease UNTIL]` | starts running VMs from a snapshot, ~150 ms each (~1 s jailed), each with its own disk, IP, MAC and hostname. A tenant's snapshot forks for that tenant only (the forks take its label; `--tenant` naming another fails with `policy`) |
 
 ## Network
 

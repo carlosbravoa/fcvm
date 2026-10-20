@@ -44,6 +44,31 @@ class Operations(unittest.TestCase):
             ev = json.loads(f.readlines()[-1])
         self.assertEqual((ev["type"], ev["vm"], ev["reason"], ev["data"]["op"]), ("operation.done", None, "done", op))
 
+    def test_start_returns_at_once_with_the_pid_recorded(self):
+        import subprocess
+        import sys
+        t0 = time.time()
+        r = subprocess.run([sys.executable, os.path.join(ops.ROOT, "lib", "ops.py"), "start", "follow", "events", "-f"],
+                           capture_output=True, text=True, timeout=10)     # `fcvm events -f` never ends on its own
+        self.assertLess(time.time() - t0, 5, "the caller must not wait for the operation (its fds are detached)")
+        op = r.stdout.strip()
+        m = ops.meta(op)
+        self.assertEqual(m["status"], "running")
+        self.assertTrue(m["pid"] and os.path.exists(f"/proc/{m['pid']}"), (m, ops.lines(op)))
+        self.assertEqual(ops.get(op)["status"], "running")               # not taken for interrupted
+        os.killpg(os.getpgid(m["pid"]), 9)                                # the worker and its command
+        time.sleep(0.2)
+        self.assertEqual((ops.get(op)["status"], ops.get(op)["error"]), ("failed", "interrupted"))
+
+    def test_reading_right_after_start_never_sees_it_interrupted(self):
+        # the child and the worker used to race on one temp file: the worker's
+        # rename failed and it died silently, so an immediate read said "interrupted"
+        for _ in range(8):
+            op = ops.start(["version"], "version")
+            j = ops.get(op)
+            self.assertIn(j["status"], ("running", "done"), j)
+            self.assertEqual(wait_done(op)["status"], "done")
+
     def test_failure_keeps_the_error_and_code(self):
         op = ops.start(["inspect", "no-such-vm"], "inspect")
         m = wait_done(op)

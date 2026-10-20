@@ -60,13 +60,17 @@ rename them.
 
 `GET /api/events?since=N` returns `{"events": [...], "next": N}`: the
 events after `N`, oldest first, and the sequence number to pass next
-time. `vm=NAME` keeps one VM's, `limit=N` the last N. `GET /api/vms`
+time. `vm=NAME` keeps one VM's, `limit=N` only the last N of them (so
+`next` then skips the older ones; the MCP tool's `limit` keeps the oldest
+instead, for paging). `GET /api/vms`
 carries `X-Fcvm-Seq`, the latest event at the time of the list, so a
 client can list, then watch from exactly there.
 
 With `Accept: text/event-stream` the connection stays open and events are
 streamed as they happen, in the [server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html)
-format (`id` is the sequence number, `event` the type, `data` the JSON).
+format: `id` is the sequence number and `data` the JSON (there is no
+`event` field, so a browser's `onmessage` sees them all; the type is in
+the data).
 A browser's `EventSource` resumes a dropped stream from its last id by
 itself; `since=latest` starts from now.
 

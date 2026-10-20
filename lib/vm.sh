@@ -2086,9 +2086,10 @@ pool_cmd() {
             for d in $(pool_members "$name" running); do vm=$d; break; done
             [ -n "$vm" ] || die_code pool_empty "pool '$name' has no VM ready right now (fcvm serve fills it to $(jq .size "$(pool_file "$name")")); create one the usual way meanwhile"
             d=$(vm_dir "$vm")
+            # settings first: if they fail, the VM stays in the pool
+            [ -z "$ttl$idle" ] && [ ${#labels[@]} -eq 0 ] || QUIET_UPDATE=1 update "$vm" ${ttl:+--ttl "$ttl"} ${idle:+--idle-stop "$idle"} "${labels[@]}"
             rm -f "$d/pooled"; date +%s > "$d/claimed"; touch_activity "$vm"
             exec {plock}>&-
-            [ -z "$ttl$idle" ] && [ ${#labels[@]} -eq 0 ] || update "$vm" ${ttl:+--ttl "$ttl"} ${idle:+--idle-stop "$idle"} "${labels[@]}" >/dev/null 2>&1
             emit_event pool.claimed "$vm" "" "$(jq -nc --arg p "$name" '{pool: $p}')"
             log "claimed '$vm' from pool '$name'"
             echo "$vm" ;;
@@ -2416,13 +2417,10 @@ update() {
             '.labels = ((.labels // {}) + $set | with_entries(select(.key as $k | $del | index($k) | not)))' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
         what+=("labels $(jq -r '.labels | to_entries | map("\(.key)=\(.value)") | join(" ")' "$f")")
         [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || [ $set_fwd = 1 ] ||
-            { emit_event vm.updated "$vm" "" "$(json_list "${what[@]}" | jq -c '{what: .}')"; log "'$vm': ${what[*]}"; return 0; }
-    fi
-    if [ $set_lease = 1 ] && [ ${#what[@]} = 1 ]; then
-        emit_event vm.updated "$vm" "" "$(json_list "${what[@]}" | jq -c '{what: .}')"; log "'$vm': ${what[*]} (applied by fcvm serve / the fcvm service)"; return 0
+            { emit_event vm.updated "$vm" "" "$(json_list "${what[@]}" | jq -c '{what: .}')"; [ -n "${QUIET_UPDATE:-}" ] || log "'$vm': ${what[*]}"; return 0; }
     fi
     emit_event vm.updated "$vm" "" "$(json_list "${what[@]}" | jq -c '{what: .}')"
-    log "'$vm': $(printf '%s, ' "${what[@]}" | sed 's/, $//') (applied by fcvm serve / the fcvm service)"
+    [ -n "${QUIET_UPDATE:-}" ] || log "'$vm': $(printf '%s, ' "${what[@]}" | sed 's/, $//') (applied by fcvm serve / the fcvm service)"
 }
 
 # fcvm _shutdown [--force]: run by fcvm.service when it stops. Only while the

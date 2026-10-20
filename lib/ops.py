@@ -44,8 +44,14 @@ def _boot_id():
     return _read("/proc/sys/kernel/random/boot_id").strip()
 
 
+def _alive(pid):
+    """Is the process there, and not a zombie waiting to be reaped?"""
+    stat = _read(f"/proc/{pid}/stat")
+    return bool(stat) and stat[stat.rfind(")") + 2:stat.rfind(")") + 3] != "Z"
+
+
 def _write(op, meta):
-    tmp = os.path.join(OPS, f".{op}.json.tmp")
+    tmp = os.path.join(OPS, f".{op}.json.{os.getpid()}.tmp")   # per process: the child and the worker both write
     with open(tmp, "w") as f:
         json.dump(meta, f)
     os.replace(tmp, os.path.join(OPS, f"{op}.json"))
@@ -97,8 +103,7 @@ def _sweep_one(op, m):
     """Mark a running operation whose process is gone as interrupted."""
     if m.get("status") != "running":
         return m
-    alive = m.get("boot_id") == _boot_id() and m.get("pid") and os.path.exists(f"/proc/{m['pid']}")
-    if alive:
+    if m.get("boot_id") == _boot_id() and m.get("pid") and _alive(m["pid"]):
         return m
     m.update(status="failed", ended=m.get("ended") or time.time(), error="interrupted")
     _write(op, m)
@@ -133,22 +138,38 @@ def start(args, kind, title=None):
     _write(op, m)
     pid = os.fork()
     if pid:
-        os.waitpid(pid, 0)                       # the child exits at once; the grandchild runs the command
+        os.waitpid(pid, 0)                       # the child records the worker's pid and exits
         return op
     try:
         os.setsid()
-        if os.fork():
+        worker = os.fork()
+        if worker:                               # the child: the record names the worker before anyone reads it
+            m["pid"] = worker
+            _write(op, m)
             os._exit(0)
-        _run(op, m, args)
+        # the worker: nothing of the caller's stays open, or `$(fcvm ... --op)`
+        # would wait for the operation to end; its own errors go to the log
+        null = os.open(os.devnull, os.O_RDONLY)
+        log = os.open(os.path.join(OPS, f"{op}.log"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        os.dup2(null, 0)
+        os.dup2(log, 1)
+        os.dup2(log, 2)
+        os.closerange(3, 1024)
+        try:
+            _run(op, m, args)
+        except BaseException as e:               # never silently: into the log and the record
+            import traceback
+            traceback.print_exc()
+            m.update(status="failed", ended=time.time(), error=f"fcvm ops: {e}", code="error")
+            _write(op, m)
     finally:
         os._exit(0)
 
 
 def _run(op, m, args):
-    m["pid"] = os.getpid()
-    _write(op, m)
-    with open(os.path.join(OPS, f"{op}.log"), "ab") as log, open(os.devnull, "rb") as null:
-        p = subprocess.run([FCVM, *args], stdin=null, stdout=log, stderr=subprocess.STDOUT)
+    m["pid"] = os.getpid()                       # as the child recorded it; written again only at the end
+    with open(os.path.join(OPS, f"{op}.log"), "ab") as log:
+        p = subprocess.run([FCVM, *args], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
     m["status"] = "done" if p.returncode == 0 else "failed"
     m["exit"], m["ended"] = p.returncode, time.time()
     if p.returncode:
@@ -213,6 +234,8 @@ def main(argv):
     while follow and j["status"] == "running":
         time.sleep(0.5)
         j = get(op, nxt)
+        if not j:
+            sys.exit(f"\033[1;31merror:\033[0m operation '{op}' is gone")
         for l in j["lines"]:
             print(l, flush=True)
         nxt = j["next"]

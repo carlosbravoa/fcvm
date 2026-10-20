@@ -63,12 +63,53 @@ def read(since=0, vm=None, limit=None):
     return out[-limit:] if limit else out
 
 
+class Tail:
+    """Events after `since` as they are recorded, reading only what was
+    appended since the last poll (and the whole file again after a
+    rotation), so a follower costs nothing while nothing happens."""
+
+    def __init__(self, since=0, vm=None):
+        self.since, self.vm = since, vm
+        self.ino, self.pos = None, 0
+
+    def poll(self):
+        """The new events, oldest first (possibly none)."""
+        path = FILES[-1]
+        try:
+            st = os.stat(path)
+        except OSError:
+            return []
+        if st.st_ino != self.ino or st.st_size < self.pos:
+            # a rotation (or the first poll): everything after `since`, across both files
+            out = read(self.since, self.vm)
+            self.ino, self.pos = st.st_ino, st.st_size
+        else:
+            if st.st_size == self.pos:
+                return []
+            out = []
+            with open(path) as f:
+                f.seek(self.pos)
+                text = f.read()
+            # a line still being written stays for the next poll
+            cut = text.rfind("\n") + 1
+            self.pos += len(text[:cut].encode())
+            for line in text[:cut].splitlines():
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("seq", 0) > self.since and (self.vm is None or e.get("vm") == self.vm):
+                    out.append(e)
+        if out:
+            self.since = out[-1]["seq"]
+        return out
+
+
 def follow(since=0, vm=None):
     """Yield events as they are recorded, forever."""
+    tail = Tail(since, vm)
     while True:
-        for e in read(since, vm):
-            since = e["seq"]
-            yield e
+        yield from tail.poll()
         time.sleep(POLL)
 
 

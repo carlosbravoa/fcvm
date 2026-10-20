@@ -52,6 +52,34 @@ class Emit(unittest.TestCase):
         self.assertIn("could not record event", r.stderr)
 
 
+class Tailing(Emit):
+    def test_tail_reads_only_what_was_appended(self):
+        self.emit("vm.created", "box")
+        t = events.Tail()
+        self.assertEqual([e["seq"] for e in t.poll()], [1])
+        self.assertEqual(t.poll(), [])
+        self.emit("vm.started", "box")
+        self.emit("vm.stopped", "other")
+        self.assertEqual([e["seq"] for e in t.poll()], [2, 3])
+        only = events.Tail(since=1, vm="box")
+        self.assertEqual([e["seq"] for e in only.poll()], [2])
+        with open(events.FILES[-1], "a") as f:
+            f.write('{"seq": 4, "type": "vm.x", "vm": "box"')              # a line still being written
+        self.assertEqual(t.poll(), [])
+        with open(events.FILES[-1], "a") as f:
+            f.write("}\n")
+        self.assertEqual([e["seq"] for e in t.poll()], [4])
+
+    def test_tail_survives_a_rotation(self):
+        t = events.Tail()
+        for i in range(4):
+            self.emit("vm.updated", "box", env={"FCVM_EVENTS_ROTATE": "300"})
+            t.poll()
+        self.assertEqual(t.since, 4)
+        self.emit("vm.deleted", "box")
+        self.assertEqual([e["seq"] for e in t.poll()], [5])
+
+
 class Format(unittest.TestCase):
     def test_fmt(self):
         line = events.fmt({"seq": 7, "t": 0, "type": "vm.stopped", "vm": "web", "reason": "ttl", "by": "supervisor", "data": {"x": None}})

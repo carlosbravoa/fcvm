@@ -144,23 +144,22 @@ refuse_if_cordoned() {   # what
 emit_event() {   # type vm [reason] [data-json]
     _emit_event "$@" 2>/dev/null || warn "could not record event $1 for '$2'"
 }
-_emit_event() {
+_emit_event() (   # a subshell: the lock's fd never outlives this, whatever path leaves it
     local type=$1 vm=$2 reason=${3:-} data=${4:-'{}'} fd seq labels
     mkdir -p "$VMS_DIR/.locks"
     exec {fd}>"$VMS_DIR/.locks/events"
-    flock -w 5 "$fd" || return 1
+    flock -w 5 "$fd" || exit 1
     seq=$(( $(cat "$VMS_DIR/.events.seq" 2>/dev/null || echo 0) + 1 ))
     labels=$(jq -c '.labels // {}' "$VMS_DIR/$vm/vm.json" 2>/dev/null) || labels='{}'
     jq -nc --argjson seq "$seq" --arg type "$type" --arg vm "$vm" --arg reason "$reason" --argjson data "$data" \
         --arg by "${FCVM_ACTOR:-cli:$(id -un)}" --argjson labels "$labels" \
         '{seq: $seq, t: now, type: $type, vm: (if $vm == "" then null else $vm end), reason: (if $reason == "" then null else $reason end),
-          by: $by, labels: $labels, data: $data}' >> "$VMS_DIR/.events.jsonl" || return 1
+          by: $by, labels: $labels, data: $data}' >> "$VMS_DIR/.events.jsonl" || exit 1
     echo "$seq" > "$VMS_DIR/.events.seq"
     if [ "$(stat -c %s "$VMS_DIR/.events.jsonl")" -gt "${FCVM_EVENTS_ROTATE:-4194304}" ]; then
         mv -f "$VMS_DIR/.events.jsonl" "$VMS_DIR/.events.1.jsonl"
     fi
-    exec {fd}>&-
-}
+)
 need() {
     local c
     for c; do command -v "$c" >/dev/null || die "missing command '$c' (run: fcvm host-setup)"; done

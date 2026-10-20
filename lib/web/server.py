@@ -401,7 +401,7 @@ def labels_of(d, key="labels"):
     """The request's labels ({KEY: VALUE}), checked as `fcvm create --label` checks them."""
     labels = d.get(key) or {}
     if not isinstance(labels, dict) or not all(isinstance(v, str) for v in labels.values()) or \
-            not all(re.fullmatch(r"(?!fcvm\.)[A-Za-z0-9][A-Za-z0-9_./-]{0,62}", str(k)) for k in labels):
+            not all(isinstance(k, str) and templates.LABEL_KEY.match(k) for k in labels):
         raise HTTPError(400, "labels must be an object of strings; keys: letters, digits, . _ - /, not starting with fcvm.")
     return list(labels.items())
 
@@ -620,10 +620,11 @@ class App:
             result = await fn(m.group(2), query, reader, length)
             return 200, {"Content-Type": "application/json"}, json.dumps(result).encode()
         data = json.loads(body or b"{}") if body else {}
+        seq_before = events.last_seq() if path == "/api/vms" and method == "GET" else None   # before the list is made
         result = await self.api(method, path[5:].strip("/").split("/"), query, data)
         hdrs = {"Content-Type": "application/json"}
-        if path == "/api/vms" and method == "GET":
-            hdrs["X-Fcvm-Seq"] = str(events.last_seq())   # the event this list reflects: watch from here
+        if seq_before is not None:
+            hdrs["X-Fcvm-Seq"] = str(seq_before)   # the event the list reflects: watch from here (a repeat is harmless, a gap isn't)
         return 200, hdrs, json.dumps(result).encode()
 
     # events (docs/events.md) -----------------------------------------------------------
@@ -646,12 +647,12 @@ class App:
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
                      b"X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n")
         quiet = 0.0
+        tail = events.Tail(since, vm)
         try:
             while not writer.is_closing():
-                new = events.read(since, vm)
-                for e in new:
-                    since = e["seq"]
-                    writer.write(f"id: {e['seq']}\nevent: {e['type']}\ndata: {json.dumps(e)}\n\n".encode())
+                new = tail.poll()
+                for e in new:   # no `event:` field: EventSource.onmessage sees every event (the type is in the data)
+                    writer.write(f"id: {e['seq']}\ndata: {json.dumps(e)}\n\n".encode())
                 quiet = 0.0 if new else quiet + events.POLL
                 if quiet >= 15:
                     writer.write(b": keepalive\n\n")

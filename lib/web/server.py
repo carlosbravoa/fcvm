@@ -43,6 +43,7 @@ import metrics
 from supervisor import Supervisor
 
 sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # lib/
+import events  # noqa: E402  (lib/events.py: the state changes the CLI records)
 import templates  # noqa: E402  (lib/templates.py, shared with the CLI and MCP)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # the code
@@ -89,7 +90,8 @@ async def fcvm(*args, timeout=120, stdin=None, env=None):
     removed from stderr; fcvm_ok is what acts on it."""
     p = await asyncio.create_subprocess_exec(
         FCVM, *map(str, args), stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env={**os.environ, **(env or {})})
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, "FCVM_ACTOR": "serve", **(env or {})})   # FCVM_ACTOR: who events say acted
     try:
         out, err = await asyncio.wait_for(p.communicate(stdin), timeout)
     except asyncio.TimeoutError:
@@ -137,7 +139,8 @@ class Jobs:
 
     async def _run(self, job, args):
         p = await asyncio.create_subprocess_exec(FCVM, *map(str, args), stdin=asyncio.subprocess.DEVNULL,
-                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                                                 env={**os.environ, "FCVM_ACTOR": "serve"})
         # Read in chunks and split lines here: a progress bar redrawn with \r
         # for a long time is one "line" to a StreamReader, and over its limit
         # it raises instead of delivering.
@@ -618,6 +621,8 @@ class App:
             return 200, {"Content-Type": "text/plain; version=0.0.4; charset=utf-8"}, (await self.prometheus()).encode()
         if not path.startswith("/api/"):
             raise HTTPError(404, "not found")
+        if path == "/api/events" and method == "GET":
+            return await self.events(query, headers, writer)
         m = re.fullmatch(r"/api/(vms|builds)/([A-Za-z0-9_][A-Za-z0-9_.-]*)/file", path)
         if m and method == "GET" and m.group(1) == "vms":
             return await self.download(m.group(2), query, writer)
@@ -630,7 +635,46 @@ class App:
             return 200, {"Content-Type": "application/json"}, json.dumps(result).encode()
         data = json.loads(body or b"{}") if body else {}
         result = await self.api(method, path[5:].strip("/").split("/"), query, data)
-        return 200, {"Content-Type": "application/json"}, json.dumps(result).encode()
+        hdrs = {"Content-Type": "application/json"}
+        if path == "/api/vms" and method == "GET":
+            hdrs["X-Fcvm-Seq"] = str(events.last_seq())   # the event this list reflects: watch from here
+        return 200, hdrs, json.dumps(result).encode()
+
+    # events (docs/events.md) -----------------------------------------------------------
+    async def events(self, q, headers, writer):
+        """GET /api/events?since=N[&vm=X][&limit=N]: the state changes after
+        event N, as JSON; with Accept: text/event-stream, kept open and
+        streamed as they happen (Last-Event-ID resumes a dropped stream)."""
+        vm = q.get("vm")
+        if vm and not NAME.match(vm):
+            raise HTTPError(400, "invalid name")
+        since = headers.get("last-event-id") or q.get("since") or "0"
+        since = events.last_seq() if since == "latest" else int(since)
+        oldest = events.oldest_seq()
+        if 0 < since < (oldest or 1) - 1:
+            raise HTTPError(410, f"events before {oldest} are no longer kept; list the VMs again and watch from X-Fcvm-Seq", "gone")
+        if "text/event-stream" not in headers.get("accept", ""):
+            evs = events.read(since, vm, int(q.get("limit") or 0) or None)
+            return 200, {"Content-Type": "application/json", "X-Fcvm-Seq": str(events.last_seq())}, \
+                json.dumps({"events": evs, "next": evs[-1]["seq"] if evs else since}).encode()
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
+                     b"X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n")
+        quiet = 0.0
+        try:
+            while not writer.is_closing():
+                new = events.read(since, vm)
+                for e in new:
+                    since = e["seq"]
+                    writer.write(f"id: {e['seq']}\nevent: {e['type']}\ndata: {json.dumps(e)}\n\n".encode())
+                quiet = 0.0 if new else quiet + events.POLL
+                if quiet >= 15:
+                    writer.write(b": keepalive\n\n")
+                    quiet = 0.0
+                await writer.drain()
+                await asyncio.sleep(events.POLL)
+        except (ConnectionError, asyncio.CancelledError):
+            pass
+        return None
 
     def static(self, rel):
         full = os.path.realpath(os.path.join(STATIC, rel))

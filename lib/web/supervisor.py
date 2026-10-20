@@ -157,7 +157,7 @@ class Supervisor:
     async def cli(self, *args, env=None):
         p = await asyncio.create_subprocess_exec(
             self.fcvm, *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT, env={**os.environ, **(env or {})})
+            stderr=asyncio.subprocess.STDOUT, env={**os.environ, "FCVM_ACTOR": "supervisor", **(env or {})})
         out, _ = await p.communicate()
         return p.returncode, ANSI.sub("", out.decode(errors="replace"))
 
@@ -304,6 +304,8 @@ class Supervisor:
                         f"firecracker status {last.get('fc_status')}"
                     self.log(f"{name}: exited ({why}); restarting in {delay} s (policy {policy})")
                     self.schedule(name, delay)
+                    await self.cli("_event", "vm.restarting", name, f"policy:{policy}",
+                                   json.dumps({"in": delay, "attempt": n + 1}))
             if name in self.pending and now >= self.pending[name]:
                 await self.start(name)
 

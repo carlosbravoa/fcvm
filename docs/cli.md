@@ -69,6 +69,7 @@ These use sudo.
 | `update VM [--restart POLICY] [--ttl D\|none] [--idle-stop D\|none] [--secret SPEC]... [--unset-secret NAME]... [--forward LIST\|none] [--label K=V]... [--unset-label K]...` | changes a VM's restart policy, lifetime, secrets or forwarding (secrets and forwarding apply from the next start) |
 | `rm VM` | deletes a stopped VM and its writable layer (volumes are kept) |
 | `ls [--all] [--json] [--label K=V]` | lists VMs: state, exit code, IP, memory used/allocated, disk, network, ports, volumes, restart policy. `--all` includes build VMs; `--label` only those carrying that label |
+| `events [--since N] [-f] [--json] [VM]` | the state changes fcvm recorded (`vm.created`, `vm.started`, `vm.stopped`, `vm.exited`, `vm.deleted`, ...), oldest first: after event `N`, or the last `N` with `--since -N`; `-f` follows. See [Events](events.md) |
 | `inspect VM` | one VM's details as JSON: its `spec` (the create request, as a template holds it), `status` (`state`, `reason`, `since`), `labels`, its last exit, resource use... see [Listing and inspecting](vms.md#listing-and-inspecting) |
 
 `create` and `run` options:

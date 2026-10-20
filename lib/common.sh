@@ -104,6 +104,34 @@ die_code() {
     exit 1
 }
 die()  { die_code error "$@"; }
+
+# Events: one JSON line per state change, appended to vms/.events.jsonl with a
+# sequence number from vms/.events.seq, both under one lock so numbers are
+# strictly increasing across processes (your commands, the service, the
+# supervisor). `fcvm events` and GET /api/events read them (lib/events.py).
+# The file is rotated at 4 MiB, keeping the previous one. `by` names who
+# acted: FCVM_ACTOR when a program sets it (the service: serve, supervisor),
+# else cli:<user>. A failure to record an event never fails the command.
+emit_event() {   # type vm [reason] [data-json]
+    _emit_event "$@" 2>/dev/null || warn "could not record event $1 for '$2'"
+}
+_emit_event() {
+    local type=$1 vm=$2 reason=${3:-} data=${4:-'{}'} fd seq labels
+    mkdir -p "$VMS_DIR/.locks"
+    exec {fd}>"$VMS_DIR/.locks/events"
+    flock -w 5 "$fd" || return 1
+    seq=$(( $(cat "$VMS_DIR/.events.seq" 2>/dev/null || echo 0) + 1 ))
+    labels=$(jq -c '.labels // {}' "$VMS_DIR/$vm/vm.json" 2>/dev/null) || labels='{}'
+    jq -nc --argjson seq "$seq" --arg type "$type" --arg vm "$vm" --arg reason "$reason" --argjson data "$data" \
+        --arg by "${FCVM_ACTOR:-cli:$(id -un)}" --argjson labels "$labels" \
+        '{seq: $seq, t: now, type: $type, vm: $vm, reason: (if $reason == "" then null else $reason end),
+          by: $by, labels: $labels, data: $data}' >> "$VMS_DIR/.events.jsonl" || return 1
+    echo "$seq" > "$VMS_DIR/.events.seq"
+    if [ "$(stat -c %s "$VMS_DIR/.events.jsonl")" -gt "${FCVM_EVENTS_ROTATE:-4194304}" ]; then
+        mv -f "$VMS_DIR/.events.jsonl" "$VMS_DIR/.events.1.jsonl"
+    fi
+    exec {fd}>&-
+}
 need() {
     local c
     for c; do command -v "$c" >/dev/null || die "missing command '$c' (run: fcvm host-setup)"; done

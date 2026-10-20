@@ -258,8 +258,9 @@ them. It fits well alongside phase 1.
 - **A state store.** State is still JSON files, pid files and markers per
   VM, which is simple and inspectable, but gives no transactions or history.
 - **Remote and multi-user access** (with W2): TLS, real accounts, roles.
-- **Events.** An event stream (VM started, exited, restarted) for the
-  console and for audit (E5).
+- ✅ **Events.** Every state change is recorded with a sequence number
+  (`fcvm events`, `GET /api/events` with server-sent events; the console
+  redraws on them). Still open for audit (E5): who ran what inside VMs.
 - **The long-term move.** The control plane may move to Go or Rust once
   orchestration is on the table, while `fc-init` stays small and static.
 

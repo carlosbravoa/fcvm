@@ -38,6 +38,19 @@ class Service(VMTestCase):
         r = fcvm("inspect", unique("none"), check=False)         # the CLI's line for programs
         self.assertEqual(r.stderr.splitlines()[-1], "fcvm-error: vm_not_found")
 
+    def test_events_api(self):
+        code, body = self.server.api("GET", "events?since=0&limit=1")
+        if code == 404:
+            self.skipTest("the running fcvm service predates events: fcvm service install")
+        self.assertEqual(code, 200, body)
+        vm = self.vm(start=False)
+        code, body = self.server.api("GET", f"events?vm={vm}")
+        self.assertEqual([e["type"] for e in body["events"]], ["vm.created"])
+        self.assertEqual(body["next"], body["events"][-1]["seq"])
+        code, body = self.server.api("GET", f"events?vm={vm}&since={body['next']}")
+        self.assertEqual((code, body["events"]), (200, []))
+        self.assertEqual(self.server.api("GET", "events?since=1&vm=bad/name")[0], 400)
+
     def test_api_update_restart_policy(self):
         vm = self.vm(start=False)
         code, body = self.server.api("POST", f"vms/{vm}/update", {"restart": "on-failure"})

@@ -539,6 +539,7 @@ create() {
     fi
     local SECRETS_DEL=()
     [ ${#secrets[@]} -eq 0 ] || write_secrets "$dir" "${secrets[@]}"
+    emit_event vm.created "$vm" "" "$(jq -nc --arg i "$image" --argjson e "${EPHEMERAL:-false}" '{image: $i, ephemeral: $e}')"
     [ -n "${EPHEMERAL:-}" ] || log "created VM '$vm' from $image ($([ $copy = 1 ] && echo 'private copy' || echo 'shared image + writable layer'))"
 }
 
@@ -940,6 +941,7 @@ start() {
         cat "$DIR/console.log" "$DIR/firecracker.log" >&2
         die "firecracker failed to start"
     fi
+    emit_event vm.started "$vm" "${RESTORE:+fork}" "$(jq -nc --arg pid "$pid" --arg ip "$IP" '{pid: ($pid | tonumber), ip: (if $ip == "" then null else $ip end)}')"
     unlock_vm
     if [ $attach = 1 ]; then
         attach_vm "$vm"
@@ -999,6 +1001,7 @@ stop() {
         fi
         for ((i = 0; i < 50; i++)); do [ -f "$dir/pid" ] || break; sleep 0.1; done   # relay reaps
         [ -n "${QUIET_STOP:-}" ] || log "stopped '$vm'${FCVM_EXPIRED:+ (its ${FCVM_EXPIRED/idle/idle time} ran out)}"
+        emit_event vm.stopped "$vm" "${FCVM_EXPIRED:-$([ -n "${FCVM_SYSTEM_STOP:-}" ] && echo system || echo user)}"
     fi
     [ -f "$dir/pid" ] && reap "$vm"   # relay gone (crash, host reboot): reap here
     return 0
@@ -1029,6 +1032,7 @@ reap() {
     fi
     jq -n --arg code "$app" --arg fcs "$fcs" --argjson stale "$([ -n "${FCVM_STALE:-}" ] && echo true || echo false)" \
         '{code: ($code | tonumber? // null), fc_status: ($fcs | tonumber? // null), stale: $stale, at: now}' > "$dir/last-exit"
+    emit_event vm.exited "$vm" "$(jq -r 'if .stale then "crash" elif .code != null then "exit" elif (.fc_status // 0) != 0 then "crash" else "shutdown" end' "$dir/last-exit")" "$(cat "$dir/last-exit")"
     kill_ours "$(cat "$dir/portfwd.pid" 2>/dev/null)" portfwd.py   # VMs started before 0.7: one forwarder for all ports
     stop_portfwd "$dir"
     kill_ours "$(cat "$dir/share.pid" 2>/dev/null)" share9p.py; rm -f "$dir/share.pid"
@@ -1042,7 +1046,7 @@ reap() {
     if [ -f "$dir/ip" ]; then rm -f "$VMS_DIR/.egress/$(cat "$dir/ip").json"; fi
     rm -f "$dir/fc.sock" "$dir/vsock.sock" "$dir/console.sock" "$dir/portfwd.pid" "$dir/pid" "$dir/pid.id"
     if [ -L "$dir/firecracker.log" ]; then rm -f "$dir/firecracker.log"; fi
-    if [ "$(jq -r .ephemeral "$dir/vm.json")" = true ]; then rm -rf "$dir" "$VMS_DIR/.locks/vm-$vm"; fi
+    if [ "$(jq -r .ephemeral "$dir/vm.json")" = true ]; then emit_event vm.deleted "$vm" ephemeral; rm -rf "$dir" "$VMS_DIR/.locks/vm-$vm"; fi
 }
 
 # fcvm run IMAGE [-d] [opts] [-- CMD...]: throwaway VM, deleted when it stops.
@@ -1688,6 +1692,7 @@ fork_one() {
         jq --arg snap "$snap" --argjson labels "${FORK_LABELS:-{\}}" \
             '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate), labels: $labels}' \
             "$sdir/vm.json" > "$dir/vm.json"
+        emit_event vm.created "$vm" fork "$(jq -nc --arg s "$snap" '{restored_from: $s}')"
         cp --sparse=always "$sdir/$disk" "$dir/$disk"
         RESTORE=$snap QUIET_START=1 start "$vm"
         log "forked '$vm' from '$snap' in $(( ($(date +%s%N) - t0) / 1000000 )) ms (jailed$([ -f "$dir/ip" ] && echo ", ip $(cat "$dir/ip")"))"
@@ -1699,6 +1704,7 @@ fork_one() {
     jq --arg snap "$snap" --argjson labels "${FORK_LABELS:-{\}}" \
         '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate), labels: $labels}' \
         "$sdir/vm.json" > "$dir/vm.json"
+    emit_event vm.created "$vm" fork "$(jq -nc --arg s "$snap" '{restored_from: $s}')"
     cp --sparse=always "$sdir/$disk" "$dir/$disk"
     DIR=$dir IP=""
     mode=$(jq -r '.net.mode // "full"' "$dir/vm.json")
@@ -1754,6 +1760,7 @@ fork_one() {
     local ms=$(( ($(date +%s%N) - t0) / 1000000 ))
     python3 "$FCVM_ROOT/lib/exec_client.py" --netconf "${IP:+$IP/24},$gw,$mac,$vm" "$dir/vsock.sock" ||
         warn "'$vm' could not be re-addressed (was the source VM started with an older fcvm?)"
+    emit_event vm.started "$vm" fork "$(jq -nc --arg pid "$pid" --arg ip "$IP" '{pid: ($pid | tonumber), ip: (if $ip == "" then null else $ip end)}')"
     log "forked '$vm' from '$snap' in ${ms} ms${IP:+ (ip $IP)}"
 }
 
@@ -2055,6 +2062,7 @@ pool_cmd() {
             rm -f "$(pool_file "$name")"
             for vm in $(pool_members "$name"); do
                 QUIET_STOP=1 "$FCVM_ROOT/fcvm" stop "$vm" >/dev/null 2>&1 || true
+                emit_event vm.deleted "$vm" pool
                 rm -rf "$(vm_dir "$vm")" "$VMS_DIR/.locks/vm-$vm"
             done
             log "removed pool '$name' and its unclaimed VMs (claimed ones are ordinary VMs now)" ;;
@@ -2077,6 +2085,7 @@ pool_cmd() {
             rm -f "$d/pooled"; date +%s > "$d/claimed"; touch_activity "$vm"
             exec {plock}>&-
             [ -z "$ttl$idle" ] && [ ${#labels[@]} -eq 0 ] || update "$vm" ${ttl:+--ttl "$ttl"} ${idle:+--idle-stop "$idle"} "${labels[@]}" >/dev/null 2>&1
+            emit_event pool.claimed "$vm" "" "$(jq -nc --arg p "$name" '{pool: $p}')"
             log "claimed '$vm' from pool '$name'"
             echo "$vm" ;;
         _fill)   # one more VM for the pool (the supervisor's job)
@@ -2375,8 +2384,9 @@ update() {
             '.labels = ((.labels // {}) + $set | with_entries(select(.key as $k | $del | index($k) | not)))' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
         what+=("labels $(jq -r '.labels | to_entries | map("\(.key)=\(.value)") | join(" ")' "$f")")
         [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || [ $set_fwd = 1 ] ||
-            { log "'$vm': ${what[*]}"; return 0; }
+            { emit_event vm.updated "$vm" "" "$(json_list "${what[@]}" | jq -c '{what: .}')"; log "'$vm': ${what[*]}"; return 0; }
     fi
+    emit_event vm.updated "$vm" "" "$(json_list "${what[@]}" | jq -c '{what: .}')"
     log "'$vm': $(printf '%s, ' "${what[@]}" | sed 's/, $//') (applied by fcvm serve / the fcvm service)"
 }
 
@@ -2436,6 +2446,7 @@ rm_vm() {
     lock_vm "$vm"
     vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     vm_running "$vm" && die_code vm_running "VM '$vm' is running (fcvm stop $vm first)"
+    emit_event vm.deleted "$vm"
     rm -rf "$(vm_dir "$vm")" "$VMS_DIR/.locks/vm-$vm"
     log "removed '$vm'"
 }
@@ -2478,4 +2489,5 @@ case $cmd in
     update)  update "$@" ;;
     template) template_cmd "$@" ;;
     _shutdown) shutdown_all "$@" ;;
+    _event)  emit_event "$@" ;;   # for the service and the supervisor (lib/web)
 esac

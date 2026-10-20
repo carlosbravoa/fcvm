@@ -14,6 +14,7 @@ validation, the same errors, the same locks.
 - [Files and host directories in a VM](#files-and-host-directories-in-a-vm)
 - [Images, snapshots, volumes](#images-snapshots-volumes)
 - [Background jobs](#background-jobs)
+- [Events](#events)
 - [Build projects](#build-projects)
 - [Terminals (WebSockets)](#terminals-websockets)
 
@@ -205,6 +206,14 @@ Slow operations (image imports, builds) run as jobs:
 |---|---|---|
 | `GET /jobs` | | the 20 most recent jobs, each with the last 3 lines of output |
 | `GET /jobs/{id}` | `?from=N` | `{id, kind, title, status: running\|done\|failed, started, ended, lines: [...], next}`: output lines from offset `N`. Poll with `from=next` |
+
+## Events
+
+| method, path | query | returns |
+|---|---|---|
+| `GET /events` | `?since=N[&vm=NAME][&limit=N]` | `{"events": [...], "next": N}`: the state changes after event `N` (`vm.created`, `vm.started`, `vm.stopped`, `vm.exited`, `vm.deleted`, ...), oldest first; with `Accept: text/event-stream`, streamed as they happen. `410` when `N` is older than what's kept. See [Events](events.md) |
+
+`GET /vms` carries `X-Fcvm-Seq`, the latest event when the list was made.
 
 ## Build projects
 

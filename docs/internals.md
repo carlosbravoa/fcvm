@@ -450,6 +450,14 @@ processes whose command line is still fcvm's.
 - **It uses the CLI** for every action, taking the same per-VM lock as
   your commands.
 
+**Events** ([docs/events.md](events.md)). Every state change the CLI makes
+appends a JSON line to `vms/.events.jsonl` (`emit_event` in
+`lib/common.sh`), numbered from `vms/.events.seq` under one flock, so the
+numbers are strictly increasing across your commands, the service and the
+supervisor. `lib/events.py` reads them for `fcvm events` and
+`GET /api/events`; the console keeps a server-sent events stream open and
+redraws when something arrives, on top of its poll.
+
 **Starting VMs through the daemon.** With the service running, `start`,
 `run -d` and `fork` post to the daemon's API instead of launching the VM
 themselves. The VM then belongs to `fcvm.service`'s cgroup rather than the

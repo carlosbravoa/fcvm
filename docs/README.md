@@ -35,6 +35,8 @@ stop wherever you have what you need.
   them; when to snapshot and when to commit.
 - **[The fcvm service](service.md).** Running at boot, restart policies,
   the supervisor, shutdown and recovery.
+- **[Events](events.md).** The state changes fcvm records: following
+  them from the command line, the API and the console.
 - **[Web console](web-console.md).** The browser UI: what's in it, metrics
   (inside the guest too, 24 h of history, Prometheus), and how it's
   secured.

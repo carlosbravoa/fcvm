@@ -24,6 +24,14 @@ to move across.
   also on `fork` and `pool claim`). `create --if-same-spec` (API:
   `if_same_spec`) makes a repeated create succeed when the VM exists with
   the same spec, so scripts and control planes can retry safely.
+- **Events.** Every state change is recorded in `vms/.events.jsonl`
+  with a sequence number: `vm.created`, `vm.started`, `vm.stopped` (with
+  why: `user`, `ttl`, `idle`, `system`), `vm.exited` (`exit`, `shutdown`,
+  `crash`), `vm.restarting`, `vm.updated`, `vm.deleted`, `pool.claimed`,
+  each saying who acted. `fcvm events [--since N] [-f] [VM]` shows them,
+  `GET /api/events` returns or streams them (server-sent events), the
+  console redraws on them at once, and the MCP server has an `events`
+  tool. See [docs/events.md](docs/events.md).
 - **Packages.** The clients are on PyPI and npm as `fcvm` (`pip install
   fcvm`, `npm install fcvm`). `fcvm-mcp` on PyPI launches the installed
   fcvm's MCP server (`uvx fcvm-mcp`), and lists fcvm in the MCP Registry.

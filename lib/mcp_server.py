@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 
+import events
 import templates
 
 FCVM = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fcvm")
@@ -137,6 +138,11 @@ def t_build_image(context, tag, file=None, build_args=None, network=None, no_cac
 
 def t_list_vms():
     return json.loads(fcvm("ls", "--json")[1])
+
+
+def t_events(since=0, vm=None, limit=100):
+    evs = events.read(int(since or 0), vm or None, int(limit or 100))
+    return {"events": evs, "next": evs[-1]["seq"] if evs else int(since or 0)}
 
 
 def network_args(network):
@@ -410,6 +416,8 @@ TOOLS = {
          "network": {"description": 'network for RUN steps: full (default), "none", or an allowlist', "anyOf": [S, {"type": "array", "items": S}]},
          "no_cache": {"type": "boolean"}}, ["context", "tag"]),
     "list_vms": (t_list_vms, "List VMs with state, IP, image, ports and volumes.", {}, []),
+    "events": (t_events, "State changes fcvm recorded (vm.created, vm.started, vm.stopped, vm.exited, vm.deleted, ...), oldest first, each with a seq; pass next as since to continue.",
+               {"since": {**I, "description": "only events after this seq (0: all kept)"}, "vm": S, "limit": I}, []),
     "templates": (t_templates, "List launch templates: saved recipes (image, vCPUs, memory, network, volumes, process) for create_sandbox's template argument.", {}, []),
     "create_sandbox": (t_create_sandbox,
         "Create and boot a VM from an image or a template. Container images stay up idle for exec unless a command is given (or the template says otherwise). Returns the VM's details (name, ip)."

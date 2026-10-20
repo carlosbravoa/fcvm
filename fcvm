@@ -113,6 +113,9 @@ VMs:
   template save NAME --from VM | IMAGE [create opts] [-- CMD]  [-d DESCRIPTION]
                              save a recipe: create/run --template NAME use it
   inspect VM                 VM details as JSON: its spec, status (state, reason, since), labels...
+  events [--since N] [-f] [--json] [VM]
+                             state changes fcvm recorded (created, started, stopped, exited,
+                             deleted, ...), oldest first; -f follows; --since -20: the last 20
   ls [--all] [--json] [--label K=V]  list VMs (--all: include build VMs; --label: only those tagged so)
   rm VM                      delete a VM
   rmi IMAGE                  delete an image
@@ -149,9 +152,10 @@ case $cmd in
         "$FCVM_ROOT/lib/build-kernel.sh"
         "$FCVM_ROOT/lib/build-init.sh"
         "$FCVM_ROOT/lib/build-base.sh" ;;
-    images|create|start|run|stop|console|logs|ssh|ssh-config|_ssh-proxy|exec|shell|ls|rm|inspect|commit|rmi|squash|export|push|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|balloon|pool|update|template|_reap|_shutdown)
+    images|create|start|run|stop|console|logs|ssh|ssh-config|_ssh-proxy|exec|shell|ls|rm|inspect|commit|rmi|squash|export|push|prune|cp|volume|egress|snapshot|fork|mount|umount|publish|unpublish|jobs|balloon|pool|update|template|_reap|_shutdown|_event)
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     up|down)            exec python3 "$FCVM_ROOT/lib/project.py" "$cmd" "$@" ;;
+    events)             exec python3 "$FCVM_ROOT/lib/events.py" "$@" ;;
     project)            exec python3 "$FCVM_ROOT/lib/project.py" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     serve)              exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;

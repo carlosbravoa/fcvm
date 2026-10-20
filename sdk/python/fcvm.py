@@ -123,8 +123,25 @@ class Client:
     def host(self):
         return self.get("host")
 
-    def vms(self):
-        return [Sandbox(self, v["name"], v) for v in self.get("vms")]
+    def vms(self, label=None, tenant=None):
+        """Every VM; `label="KEY=VALUE"` or `tenant="NAME"` keeps only those."""
+        params = {k: v for k, v in (("label", label), ("tenant", tenant)) if v}
+        return [Sandbox(self, v["name"], v) for v in self.get("vms", **params)]
+
+    # --- tenants (docs/vms.md, Tenants and quotas) --------------------------------------------
+    def tenants(self):
+        """Every tenant with its quota and what it has allocated."""
+        return self.get("tenants")
+
+    def tenant(self, name):
+        return self.get(f"tenants/{name}")
+
+    def set_tenant(self, name, **quota):
+        """Set a tenant's quota: vcpus, mem_mib, vms (each a number, or None for no limit)."""
+        return self.request("PUT", f"tenants/{name}", {"quota": quota})
+
+    def remove_tenant(self, name):
+        return self.delete(f"tenants/{name}")
 
     def sandbox(self, name):
         """An existing VM by name (checked)."""
@@ -153,8 +170,10 @@ class Client:
         """Create (and start) a VM. opts are the fields of POST /vms: vcpus, mem_mib,
         network ("full"|"none"|"restricted"), allow, ports, volumes, idle, command,
         jail, restart, ttl, idle_stop, secrets ({NAME: value}), forward, cache, disk,
-        copy, entrypoint, labels ({KEY: value}), if_same_spec (succeed if the VM
-        exists with the same spec). With a template, its fields come first and opts override."""
+        copy, entrypoint, labels ({KEY: value}), tenant (the tenant label, set once),
+        lease (a Unix time, an ISO 8601 time, or a duration such as "2h"), if_same_spec
+        (succeed if the VM exists with the same spec). With a template, its fields come
+        first and opts override."""
         body = {}
         if template:
             t = next((t for t in self.templates() if t["name"] == template), None)
@@ -178,9 +197,10 @@ class Client:
         body.update({"name": name, "start": start})
         return Sandbox(self, name, self.post("vms", body))
 
-    def claim(self, pool, ttl=None, idle_stop=None):
-        """A ready VM out of a warm pool."""
-        info = self.post(f"pools/{pool}/claim", {k: v for k, v in (("ttl", ttl), ("idle_stop", idle_stop)) if v})
+    def claim(self, pool, ttl=None, idle_stop=None, labels=None, lease=None, tenant=None):
+        """A ready VM out of a warm pool, with these settings applied to it."""
+        body = {k: v for k, v in (("ttl", ttl), ("idle_stop", idle_stop), ("labels", labels), ("lease", lease), ("tenant", tenant)) if v}
+        info = self.post(f"pools/{pool}/claim", body)
         return Sandbox(self, info["name"], info)
 
 
@@ -377,10 +397,11 @@ class Snapshot:
     def __repr__(self):
         return f"Snapshot({self.name!r})"
 
-    def fork(self, name=None, count=1):
+    def fork(self, name=None, count=1, labels=None, lease=None, tenant=None):
         """Running VMs from this snapshot; returns them (name, or name-1..name-N)."""
         before = {v["name"] for v in self.client.get("vms")}
-        self.client.post(f"snapshots/{self.name}/fork", {"count": count, **({"name": name} if name else {})})
+        body = {k: v for k, v in (("name", name), ("labels", labels), ("lease", lease), ("tenant", tenant)) if v}
+        self.client.post(f"snapshots/{self.name}/fork", {"count": count, **body})
         return [Sandbox(self.client, v["name"], v) for v in self.client.get("vms") if v["name"] not in before]
 
     def remove(self):

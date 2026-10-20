@@ -86,7 +86,13 @@ export class Client {
   delete(path, params) { return this.request("DELETE", path, { params }); }
 
   host() { return this.get("host"); }
-  async vms() { return (await this.get("vms")).map((v) => new Sandbox(this, v.name, v)); }
+  async vms({ label, tenant } = {}) {
+    return (await this.get("vms", { ...(label && { label }), ...(tenant && { tenant }) })).map((v) => new Sandbox(this, v.name, v));
+  }
+  tenants() { return this.get("tenants"); }
+  tenant(name) { return this.get(`tenants/${name}`); }
+  setTenant(name, quota) { return this.request("PUT", `tenants/${name}`, { body: { quota } }); }
+  removeTenant(name) { return this.delete(`tenants/${name}`); }
   async sandbox(name) { return new Sandbox(this, name, await this.get(`vms/${name}`)); }
   images() { return this.get("images"); }
   templates() { return this.get("templates"); }
@@ -122,8 +128,9 @@ export class Client {
     return new Sandbox(this, name, await this.post("vms", body));
   }
 
-  async claim(pool, { ttl, idle_stop } = {}) {
-    const info = await this.post(`pools/${pool}/claim`, { ...(ttl && { ttl }), ...(idle_stop && { idle_stop }) });
+  async claim(pool, { ttl, idle_stop, labels, lease, tenant } = {}) {
+    const info = await this.post(`pools/${pool}/claim`,
+      { ...(ttl && { ttl }), ...(idle_stop && { idle_stop }), ...(labels && { labels }), ...(lease && { lease }), ...(tenant && { tenant }) });
     return new Sandbox(this, info.name, info);
   }
 }
@@ -234,9 +241,9 @@ export class Snapshot {
     this.name = name;
     this._info = info;
   }
-  async fork({ name, count = 1 } = {}) {
+  async fork({ name, count = 1, labels, lease, tenant } = {}) {
     const before = new Set((await this.client.get("vms")).map((v) => v.name));
-    await this.client.post(`snapshots/${this.name}/fork`, { count, ...(name && { name }) });
+    await this.client.post(`snapshots/${this.name}/fork`, { count, ...(name && { name }), ...(labels && { labels }), ...(lease && { lease }), ...(tenant && { tenant }) });
     return (await this.client.get("vms")).filter((v) => !before.has(v.name)).map((v) => new Sandbox(this.client, v.name, v));
   }
   remove() { return this.client.delete(`snapshots/${this.name}`); }

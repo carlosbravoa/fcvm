@@ -44,6 +44,7 @@ from supervisor import Supervisor
 
 sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # lib/
 import events  # noqa: E402  (lib/events.py: the state changes the CLI records)
+import node  # noqa: E402  (lib/node.py: tenants, capacity and admission)
 import ops  # noqa: E402  (lib/ops.py: slow commands run detached, their state on disk)
 import templates  # noqa: E402  (lib/templates.py, shared with the CLI and MCP)
 
@@ -78,11 +79,12 @@ class HTTPError(Exception):
 # the status it maps to, with 400 for anything else (invalid input, and
 # failures that have no code yet).
 ERROR_STATUS = {"vm_not_found": 404, "image_not_found": 404, "snapshot_not_found": 404, "volume_not_found": 404,
-                "pool_not_found": 404, "not_found": 404,
+                "pool_not_found": 404, "tenant_not_found": 404, "not_found": 404,
                 "vm_exists": 409, "image_exists": 409, "snapshot_exists": 409, "volume_exists": 409,
                 "vm_running": 409, "vm_not_running": 409, "vm_busy": 409, "in_use": 409, "no_agent": 409,
                 "no_network": 409, "pool_empty": 409,
-                "no_network_slot": 503, "jail_unavailable": 503, "cordoned": 503}
+                "quota_exceeded": 429,
+                "no_network_slot": 503, "jail_unavailable": 503, "cordoned": 503, "node_full": 503}
 ERROR_LINE = re.compile(r"^fcvm-error: ([a-z_]+)$", re.M)
 
 
@@ -406,6 +408,16 @@ def labels_of(d, key="labels"):
     return list(labels.items())
 
 
+def tenant_args(d):
+    """`--tenant NAME` for a request's `tenant` (the label that is set once)."""
+    t = d.get("tenant")
+    if t is None or t == "":
+        return []
+    if not isinstance(t, str) or not NAME.match(t):
+        raise HTTPError(400, "tenant must be a name (letters, digits, . _ -)")
+    return ["--tenant", t]
+
+
 def forward_list(d):
     """The request's forward list (["ssh-agent", "git"]), checked."""
     fwd = d.get("forward") or []
@@ -693,7 +705,31 @@ class App:
                     await fcvm_ok("update", n, "--lease", lease_arg(d["until"]))
                 return {"renewed": names}
             case ("GET", "vms", 1):
-                return [{**v, "supervisor": self.supervisor.status(v["name"])} for v in await fcvm_json("ls", "--json")]
+                flt = []   # ?label=KEY=VALUE or ?tenant=NAME: only those VMs
+                if q.get("label"):
+                    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]{0,62}=.*", q["label"]):
+                        raise HTTPError(400, "label must be KEY=VALUE")
+                    flt = ["--label", q["label"]]
+                elif q.get("tenant"):
+                    flt = tenant_args({"tenant": q["tenant"]})
+                return [{**v, "supervisor": self.supervisor.status(v["name"])} for v in await fcvm_json("ls", "--json", *flt)]
+            case ("GET", "tenants", 1):
+                return await fcvm_json("tenant", "ls", "--json")
+            case ("GET", "tenants", 2):
+                return await fcvm_json("tenant", "show", name)
+            case ("PUT", "tenants", 2):
+                quota = d.get("quota") if "quota" in d else d
+                if not isinstance(quota, dict) or not all(k in node.KEYS and (v is None or (isinstance(v, int) and v >= 0))
+                                                            for k, v in quota.items()):
+                    raise HTTPError(400, 'quota must be an object of vcpus, mem_mib and vms, each a whole number or null (no limit)')
+                args = ["tenant", "set", name]
+                for k, v in quota.items():
+                    args += [{"vcpus": "--vcpus", "mem_mib": "--mem", "vms": "--vms"}[k], "none" if v is None else str(v)]
+                await fcvm_ok(*args)
+                return await fcvm_json("tenant", "show", name)
+            case ("DELETE", "tenants", 2):
+                await fcvm_ok("tenant", "rm", name)
+                return {"removed": name}
             case ("GET", "vms", 2):
                 return {**await fcvm_json("inspect", name), "supervisor": self.supervisor.status(name)}
             case ("POST", "vms", 1):
@@ -771,7 +807,7 @@ class App:
             case ("POST", "snapshots", 3) if parts[2] == "fork":
                 count = int(d.get("count") or 1)
                 args = ["fork", name] + ([d["name"]] if d.get("name") else []) + ["-n", count]
-                args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")]
+                args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")] + tenant_args(d)
                 if d.get("lease"):
                     args += ["--lease", lease_arg(d["lease"])]
                 out, err = await fcvm_ok(*args, timeout=60 + 30 * count)
@@ -809,7 +845,7 @@ class App:
                 for opt in ("ttl", "idle_stop"):
                     if d.get(opt):
                         args += [f"--{opt.replace('_', '-')}", str(d[opt]).strip()]
-                args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")]
+                args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")] + tenant_args(d)
                 if d.get("lease"):
                     args += ["--lease", lease_arg(d["lease"])]
                 out, _ = await fcvm_ok(*args)
@@ -1068,6 +1104,7 @@ class App:
             "disk_total": st.f_blocks * st.f_frsize, "disk_free": st.f_bavail * st.f_frsize,
             "taps_full": taps("fctap"), "taps_restricted": taps("fcrtap"),
             "jail_available": os.path.exists("/run/fcvm/jaild.sock"),
+            "node": {k: v for k, v in node.status().items() if k in ("admission", "capacity", "allocated", "allocatable", "vms", "slots")},
             "history": list(self.stats.host),
             "vm_history": {n: list(s)[-1:] for n, s in self.stats.vms.items()},
         }
@@ -1122,7 +1159,7 @@ class App:
         args += [a for n in secrets for a in ("--secret", n)]   # values through the environment, not argv
         if forward_list(d):
             args += ["--forward", ",".join(forward_list(d))]
-        args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")]
+        args += [a for k, v in labels_of(d) for a in ("--label", f"{k}={v}")] + tenant_args(d)
         if d.get("lease"):
             args += ["--lease", lease_arg(d["lease"])]
         if d.get("if_same_spec"):
@@ -1136,8 +1173,8 @@ class App:
         if d.get("start", True) and not (d.get("if_same_spec") and (await fcvm_json("inspect", name))["state"] == "running"):
             try:
                 await fcvm_ok("start", name, timeout=60)
-            except HTTPError as e:
-                raise HTTPError(400, f"created '{name}', but it failed to start: {e.message}")
+            except HTTPError as e:   # the start's own code and status: a full host or tenant is the caller's cue to retry elsewhere
+                raise HTTPError(e.status, f"created '{name}', but it failed to start: {e.message}", e.code)
         return await fcvm_json("inspect", name)
 
     async def exec(self, name, d):

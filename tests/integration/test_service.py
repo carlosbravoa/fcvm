@@ -228,6 +228,38 @@ class Service(VMTestCase):
         self.assertEqual(left, [])
         self.assertEqual(self.inspect(vm)["state"], "running")               # claimed ones stay
 
+    def test_tenants_api(self):
+        self.new_api("tenants")
+        t = unique("tenant")
+        self.addCleanup(fcvm, "tenant", "rm", t, check=False)
+        code, body = self.server.api("PUT", f"tenants/{t}", {"quota": {"vcpus": 2, "vms": 1}})
+        self.assertEqual((code, body["quota"]), (200, {"vcpus": 2, "mem_mib": None, "vms": 1}), body)
+        code, body = self.server.api("PUT", f"tenants/{t}", {"quota": {"disk": 1}})
+        self.assertEqual(code, 400)
+        code, body = self.server.api("POST", "vms", {"name": unique("vm"), "image": IMAGE, "idle": True, "mem_mib": 256, "vcpus": 1, "tenant": t})
+        self.assertEqual((code, body["labels"]), (200, {"tenant": t}), body)
+        self.addCleanup(self.remove_vm, body["name"])
+        first = body["name"]
+        second = unique("vm")
+        self.addCleanup(fcvm, "rm", second, check=False)
+        code, body = self.server.api("POST", "vms", {"name": second, "image": IMAGE, "idle": True, "mem_mib": 256, "vcpus": 1, "tenant": t})
+        self.assertEqual((code, body["code"]), (429, "quota_exceeded"), body)   # created, but it failed to start
+        code, body = self.server.api("GET", f"vms?tenant={t}")
+        self.assertEqual((code, sorted(v["name"] for v in body)), (200, sorted([first, second])), body)
+        code, body = self.server.api("GET", "vms?label=tenant=nobody")
+        self.assertEqual((code, body), (200, []))
+        code, body = self.server.api("GET", f"tenants/{t}")
+        self.assertEqual((code, body["allocated"]["vms"]), (200, 1), body)
+        code, body = self.server.api("GET", "tenants")
+        self.assertIn(t, [x["name"] for x in body])
+        code, body = self.server.api("GET", "host")
+        self.assertEqual(set(body["node"]), {"admission", "capacity", "allocated", "allocatable", "vms", "slots"})
+        self.assertGreaterEqual(body["node"]["allocated"]["vms"], 1)
+        code, body = self.server.api("DELETE", f"tenants/{t}")
+        self.assertEqual((code, body), (200, {"removed": t}))
+        code, body = self.server.api("GET", f"tenants/{unique('none')}")
+        self.assertEqual((code, body["code"]), (404, "tenant_not_found"), body)
+
     def test_python_sdk(self):
         import os
         import sys

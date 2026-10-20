@@ -28,7 +28,8 @@ These use sudo.
 | `setup [-y]` | the guided setup: checks every step below (plus `firecracker`, `kernel`, and optionally `base`), asks before the optional ones, runs what's missing, and boots a test VM. Safe to re-run. `-y` takes the default answers |
 | `version`, `-V`, `--version` | fcvm's version (`0.5.0`; from a git checkout also the commit, e.g. `0.5.0+12.gabc1234`). `version` also shows where the code, state and settings are |
 | `upgrade [VERSION]` | installs the newest release (or VERSION, also an older one) next to the running one and switches over, then lists what needs refreshing (jailer copies, boot-time network, service). Refuses in a git checkout: use `git pull` |
-| `status [--offline]` | a health check (no sudo): host, components and their versions against the newest releases (kernel with build and release dates, Firecracker), whether the kernel config or initramfs changed since the build, the network, the service and the jailer (including whether their installed copies match this tree), VMs still running older components, then VMs and images. Ends with a to-do list of fixes; exits 1 if something is broken. `--offline` skips the version checks (cached 6 h otherwise) |
+| `status [--offline\|--json]` | a health check (no sudo): host, components and their versions against the newest releases (kernel with build and release dates, Firecracker), whether the kernel config or initramfs changed since the build, the network, the service and the jailer (including whether their installed copies match this tree), VMs still running older components, then VMs and images. Ends with a to-do list of fixes; exits 1 if something is broken. `--offline` skips the version checks (cached 6 h otherwise). `--json` is the node view instead, with no network calls: capacity and what's allocated (vCPUs, memory, VMs), whether admission is enforced, tenants, free taps, versions ([Tenants and quotas](vms.md#tenants-and-quotas)) |
+| `config [--json]` | the settings in effect (`fcvm.conf`, the environment, the defaults) and where the code and state are, as `NAME=value` lines or JSON (values are strings), so a program never parses shell syntax. Credentials aren't shown |
 | `host-setup [--check]` | installs build and runtime packages, checks `/dev/kvm` access, sets up a subuid range. `--check` only reports what's missing |
 | `net-up`, `net-down` | creates (or removes) the bridges `fcbr0` (NAT) and `fcbr1` (restricted), 64 taps each, and the firewall rules. Needed after every reboot, unless the service is installed |
 | `jail-setup [--remove]` | installs (or removes) `fcvm-jaild`, the root helper that runs VMs under the Firecracker jailer. Re-run after updating fcvm or Firecracker |
@@ -69,7 +70,7 @@ These use sudo.
 | `stop VM` | Ctrl-Alt-Del (graceful), killed after 20 s. Restart policies then leave it alone until you start it |
 | `update VM [--restart POLICY] [--ttl D\|none] [--idle-stop D\|none] [--secret SPEC]... [--unset-secret NAME]... [--forward LIST\|none] [--label K=V]... [--unset-label K]... [--lease UNTIL\|none]` | changes a VM's restart policy, lifetime, secrets or forwarding (secrets and forwarding apply from the next start) |
 | `rm VM` | deletes a stopped VM and its writable layer (volumes are kept) |
-| `ls [--all] [--json] [--label K=V]` | lists VMs: state, exit code, IP, memory used/allocated, disk, network, ports, volumes, restart policy. `--all` includes build VMs; `--label` only those carrying that label |
+| `ls [--all] [--json] [--label K=V] [--tenant NAME]` | lists VMs: state, exit code, IP, memory used/allocated, disk, network, ports, volumes, restart policy. `--all` includes build VMs; `--label` only those carrying that label, `--tenant` only that tenant's |
 | `cordon [REASON]`, `uncordon` | refuses new VMs (`create`, `fork`, `pool claim`, pool refills fail with `cordoned`) until uncordoned; running VMs, `start` and restart policies aren't affected. For draining a host |
 | `events [--since N] [-f] [--json] [VM]` | the state changes fcvm recorded (`vm.created`, `vm.started`, `vm.stopped`, `vm.exited`, `vm.deleted`, ...), oldest first: after event `N`, or the last `N` with `--since -N`; `-f` follows. See [Events](events.md) |
 | `inspect VM` | one VM's details as JSON: its `spec` (the create request, as a template holds it), `status` (`state`, `reason`, `since`), `labels`, its last exit, resource use... see [Listing and inspecting](vms.md#listing-and-inspecting) |
@@ -98,6 +99,7 @@ These use sudo.
 | `--secret NAME=VALUE`, `NAME=@FILE`, `NAME` | a [secret](vms.md#secrets): a file in `/run/secrets` (a tmpfs, never on the VM's disk) and an environment variable. `NAME` alone takes it from your environment. Repeatable |
 | `--forward ssh-agent,git` | [forward your credentials](vms.md#forwarding-your-credentials): the host's ssh-agent, and `git credential fill` for the VM's git |
 | `--label KEY=VALUE` | tags the VM (repeatable); `ls --label KEY=VALUE` filters by them, `inspect` shows them. Keys: letters, digits, `.` `_` `-` `/`, not starting with `fcvm.` |
+| `--tenant NAME` | the `tenant` label, which `update` can't change afterwards; the tenant's [quota](vms.md#tenants-and-quotas) applies when the VM starts |
 | `--lease UNTIL` | until when the VM is wanted (a Unix time, an ISO 8601 time, or a duration from now such as `2h`); once it passes, plus `LEASE_GRACE`, the supervisor stops and removes the VM. For programs that manage VMs; see [leases](vms.md#lifetimes---ttl-and---idle-stop) |
 | `--if-same-spec` | if a VM of that name exists with the same spec, succeed without doing anything (a safe retry); a different spec fails with `vm_exists` |
 
@@ -124,7 +126,16 @@ These use sudo.
 |---|---|
 | `pool set NAME (--template T \| --snapshot S) --size N [--jail]` | a [warm pool](templates.md#warm-pools): N VMs booted (or forked) ahead of time, kept full by `fcvm serve` |
 | `pool ls [--json]`, `pool rm NAME` | lists pools (with how many are ready); removes one and its unclaimed VMs |
-| `pool claim NAME [--ttl D] [--idle-stop D] [--label K=V]... [--lease UNTIL]` | takes a ready VM out of the pool and prints its name |
+| `pool claim NAME [--ttl D] [--idle-stop D] [--label K=V]... [--tenant NAME] [--lease UNTIL]` | takes a ready VM out of the pool and prints its name. `--tenant` gives a pooled VM (one without a tenant) to that tenant, within its quota |
+
+## Tenants
+
+| command | what it does |
+|---|---|
+| `tenant set NAME [--vcpus N\|none] [--mem MiB\|none] [--vms N\|none]` | a tenant's quota, enforced when its VMs start, fork or are claimed (`quota_exceeded`). Given limits merge with the ones set before; `none` lifts one. A tenant is just the `tenant` label of its VMs ([Tenants and quotas](vms.md#tenants-and-quotas)) |
+| `tenant ls [--json]` | every tenant (with a quota, or with VMs), what it has allocated and its limits |
+| `tenant show NAME` | one tenant as JSON: `quota`, `allocated` (vCPUs, memory and count of its running VMs), `vms` |
+| `tenant rm NAME` | removes the quota; the tenant's VMs keep their label |
 
 ## Inside a VM
 
@@ -155,7 +166,7 @@ These use sudo.
 | `snapshot VM NAME` | saves a running VM's memory, device state and disk. The VM keeps running (paused ~0.75 s per GB of RAM) |
 | `snapshot ls [--json]`, `snapshot rm NAME` | lists and deletes snapshots |
 | `snapshot export NAME FILE.tar`, `snapshot import FILE.tar [NAME]` | moves a snapshot to another fcvm host, which needs the same images (by name) and a compatible Firecracker ([details](snapshots.md#moving-snapshots-between-hosts)) |
-| `fork SNAPSHOT [NAME] [-n N] [--label K=V]... [--lease UNTIL]` | starts running VMs from a snapshot, ~150 ms each (~1 s jailed), each with its own disk, IP, MAC and hostname |
+| `fork SNAPSHOT [NAME] [-n N] [--label K=V]... [--tenant NAME] [--lease UNTIL]` | starts running VMs from a snapshot, ~150 ms each (~1 s jailed), each with its own disk, IP, MAC and hostname |
 
 ## Network
 

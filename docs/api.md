@@ -74,7 +74,7 @@ wrap this API: `Client().create("box", template="python-sandbox")`, then
 
 | method, path | returns |
 |---|---|
-| `GET /host` | hostname, kernel, CPUs, load, disk and memory, free taps per network, `jail_available`, `cordoned` (the reason, or `null`), and recent host samples |
+| `GET /host` | hostname, kernel, CPUs, load, disk and memory, free taps per network, `jail_available`, `cordoned` (the reason, or `null`), `node` (the node view: `admission`, `capacity`, `allocated`, `allocatable`, `vms`, `slots`, as `fcvm status --json`), and recent host samples |
 | `POST /host/cordon` `{"reason": "..."}`, `POST /host/uncordon` | `fcvm cordon` / `uncordon`: refuse new VMs, or accept them again |
 | `POST /leases/renew` `{"label": "cp=prod", "until": 1760900300}` | `fcvm update --lease` on every VM carrying that label; returns `{"renewed": [names]}` |
 | `GET /presets` | the egress presets (`@pypi`, ...) with their host patterns |
@@ -83,7 +83,7 @@ wrap this API: `Client().create("box", template="python-sandbox")`, then
 
 | method, path | body / query | does |
 |---|---|---|
-| `GET /vms` | | every VM (as `fcvm ls --json`), each with a `supervisor` field |
+| `GET /vms` | `?label=KEY=VALUE` or `?tenant=NAME` | every VM (as `fcvm ls --json`), each with a `supervisor` field; with a filter, only those |
 | `GET /vms/{vm}` | | one VM (as `fcvm inspect`), plus `supervisor` |
 | `POST /vms` | see below | create a VM and start it |
 | `POST /vms/{vm}/start` | `{"lease": 1760900300}` (optional) | `fcvm start`, setting or renewing the lease |
@@ -115,7 +115,7 @@ wrap this API: `Client().create("box", template="python-sandbox")`, then
   "jail": true, "restart": "unless-stopped", "start": true,
   "ttl": "2h", "idle_stop": "30m", "secrets": {"API_KEY": "sk-..."}, "forward": ["ssh-agent", "git"],
   "disk": "16G", "copy": false, "entrypoint": null, "ref": "python:3.13-slim",
-  "labels": {"team": "web"}, "lease": 1760900300, "if_same_spec": false
+  "labels": {"team": "web"}, "tenant": "acme", "lease": 1760900300, "if_same_spec": false
 }
 ```
 
@@ -125,6 +125,10 @@ it's missing. `allow` is used with
 With `if_same_spec`, a VM that already exists with the same spec is
 returned as it is (and started if it isn't running), so a request can be
 retried after a lost reply; a different spec is a 409 `vm_exists`.
+`tenant` sets the [tenant](vms.md#tenants-and-quotas) label, which later
+requests can't change. A VM that is created but refused at its start
+(429 `quota_exceeded`, 503 `node_full`, 503 `cordoned`...) stays, stopped,
+with that code in the reply.
 
 Fields worth knowing in a VM object (as `fcvm inspect`, plus `vm.json`):
 
@@ -133,7 +137,7 @@ Fields worth knowing in a VM object (as `fcvm inspect`, plus `vm.json`):
 | `state` | `running`, `stopped`, or `exited` (an app VM whose process ended; see `exit_code`) |
 | `status` | `{"state", "reason", "since"}`: why it's in that state and since when, see [Listing and inspecting](vms.md#listing-and-inspecting) |
 | `spec` | the create request, normalized (the fields of a template) |
-| `labels` | your tags (`{"team": "web"}`), from `labels` at create or update |
+| `labels` | your tags (`{"team": "web"}`), from `labels` at create or update; `tenant` among them is the [tenant](vms.md#tenants-and-quotas) |
 | `lease_until` | when the VM's [lease](vms.md#lifetimes---ttl-and---idle-stop) ends (Unix time), or `null`; a `lease` in a request is a Unix time, an ISO 8601 time, or a duration such as `"2h"` |
 | `restart` | the restart policy |
 | `stopped_by_user` | stopped with `fcvm stop`, so restart policies leave it alone |
@@ -170,7 +174,7 @@ even one without a shell.
 | `POST /images` | `{"ref": "nginx:latest", "name": "optional"}` | start an import as a [background job](#background-jobs); returns the job |
 | `DELETE /images/{image}` | | `fcvm rmi` |
 | `GET /snapshots` | | `fcvm snapshot ls --json` |
-| `POST /snapshots/{snap}/fork` | `{"name": "optional", "count": 1, "labels": {}, "lease": null}` | `fcvm fork`; returns `{"log": "..."}` |
+| `POST /snapshots/{snap}/fork` | `{"name": "optional", "count": 1, "labels": {}, "tenant": null, "lease": null}` | `fcvm fork`; returns `{"log": "..."}`; 429 `quota_exceeded` when the tenant is full |
 | `DELETE /snapshots/{snap}` | | `fcvm snapshot rm` |
 | `GET /volumes` | | `fcvm volume ls --json` |
 | `DELETE /volumes/{volume}` | | `fcvm volume rm` |
@@ -194,7 +198,19 @@ first.
 | `GET /pools` | | the [pools](templates.md#warm-pools), each with `ready` and its unclaimed `vms` |
 | `POST /pools` | `{"name": "py", "template": "python-sandbox", "size": 3, "jail": true}` (or `"snapshot"`) | `fcvm pool set` |
 | `DELETE /pools/{name}` | | `fcvm pool rm` |
-| `POST /pools/{name}/claim` | `{"ttl": "2h", "idle_stop": "30m", "labels": {}, "lease": null}` (optional) | takes a ready VM; returns it as `GET /vms/{vm}`; 409 `pool_empty` when none is ready |
+| `POST /pools/{name}/claim` | `{"ttl": "2h", "idle_stop": "30m", "labels": {}, "tenant": "acme", "lease": null}` (optional) | takes a ready VM; returns it as `GET /vms/{vm}`; 409 `pool_empty` when none is ready, 429 `quota_exceeded` when the tenant is full |
+
+## Tenants
+
+[Tenants and quotas](vms.md#tenants-and-quotas): a tenant is the `tenant`
+label of its VMs; its quota is checked when they start.
+
+| method, path | body | does |
+|---|---|---|
+| `GET /tenants` | | every tenant: `{name, quota: {vcpus, mem_mib, vms}, allocated: {vcpus, mem_mib, vms}, vms: [names]}` (`fcvm tenant ls --json`) |
+| `GET /tenants/{name}` | | one tenant; 404 `tenant_not_found` if it has neither a quota nor VMs |
+| `PUT /tenants/{name}` | `{"quota": {"vcpus": 8, "mem_mib": 16384, "vms": null}}` | `fcvm tenant set`: the given limits (a whole number, or `null` for none) replace those; others stay. Returns the tenant |
+| `DELETE /tenants/{name}` | | `fcvm tenant rm`: removes the quota; the VMs keep their label |
 
 ## Prometheus
 

@@ -49,7 +49,9 @@ fcvm events --since 4012 --json # as JSON lines, after event 4012
 | `vm.updated` | | `what`: the changes, as `fcvm update` lists them |
 | `vm.deleted` | `ephemeral` (a throwaway VM that ended), `pool` (an unclaimed VM of a removed pool), `lease` (its lease ended) | |
 | `node.cordoned`, `node.uncordoned` (no `vm`) | | `reason` given to `fcvm cordon` |
-| `pool.claimed` | | `pool` |
+| `pool.claimed` | | `pool`; `tenant` when the claim gave the VM one |
+| `pool.set`, `pool.removed` (no `vm`) | | `pool`; `set` also `template` or `snapshot`, `size`, `jail` |
+| `tenant.set`, `tenant.removed` (no `vm`) | | `tenant`; `set` also the new `quota` ([tenants](vms.md#tenants-and-quotas)) |
 | `operation.done` (no `vm`) | `done` or `failed` | `op`, `kind`, `title`, `error`: an [operation](cli.md#operations) ended |
 
 A stop produces both `vm.exited` (the guest ended) and `vm.stopped` (who

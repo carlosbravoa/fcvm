@@ -9,6 +9,7 @@ where.
 - [Network](#network)
 - [Firecracker](#firecracker)
 - [The guest kernel](#the-guest-kernel)
+- [Node](#node)
 - [Egress presets](#egress-presets)
 - [Jailer, service and MCP](#jailer-service-and-mcp)
 - [Per-command variables](#per-command-variables)
@@ -141,6 +142,24 @@ ln -sfn vmlinux-OLD kernels/vmlinux        # point at an earlier build, then res
 Firecracker officially validates guest kernels 5.10, 6.1 and 6.18.
 `KERNEL_CHANNEL=longterm` stays close to that. Notes on what the fragment
 needs, and why, are in [How it works](internals.md#kernel-configuration-notes).
+
+## Node
+
+What this host may hold, for [tenants and quotas](vms.md#tenants-and-quotas)
+and for a program placing VMs on hosts. `fcvm status --json` shows the
+capacity in effect, what's allocated and what's left; `fcvm config --json`
+shows these settings.
+
+| setting | default | |
+|---|---|---|
+| `NODE_ADMIT` | `0` | `1`: a VM that wouldn't fit the capacity below is refused at start, fork or pool refill with `node_full`. Off, the capacity is reported but not enforced |
+| `NODE_VCPUS` | CPUs × `NODE_CPU_OVERCOMMIT` | vCPUs the host may allocate to running VMs |
+| `NODE_MEM_MIB` | (memory − `NODE_RESERVE_MIB`) × `NODE_MEM_OVERCOMMIT` | memory, in MiB, likewise |
+| `NODE_VMS` | | running VMs at once (no limit by default; taps limit them anyway) |
+| `NODE_CPU_OVERCOMMIT`, `NODE_MEM_OVERCOMMIT` | `2`, `1` | factors for the computed defaults |
+| `NODE_RESERVE_MIB` | `1024` | memory kept for the host in the computed default |
+
+Tenant quotas (`fcvm tenant set`) are enforced whatever `NODE_ADMIT` says.
 
 ## Egress presets
 

@@ -51,8 +51,19 @@ export interface CreateOptions {
   ref?: string;
   /** your tags on the VM; keys: letters, digits, . _ - /, not starting with fcvm. */
   labels?: Record<string, string>;
+  /** the tenant label, set once (never changed by update); its quota applies when the VM starts */
+  tenant?: string;
+  /** until when the VM is wanted: a Unix time, an ISO 8601 time, or a duration such as "2h" */
+  lease?: number | string;
   /** succeed if a VM of this name exists with the same spec (a safe retry) instead of failing */
   if_same_spec?: boolean;
+}
+
+export interface Tenant {
+  name: string;
+  quota: { vcpus: number | null; mem_mib: number | null; vms: number | null };
+  allocated: { vcpus: number; mem_mib: number; vms: number };
+  vms: string[];
 }
 
 export interface VmInfo {
@@ -90,7 +101,13 @@ export class Client {
   post(path: string, body?: unknown): Promise<any>;
   delete(path: string, params?: Record<string, unknown>): Promise<any>;
   host(): Promise<Record<string, unknown>>;
-  vms(): Promise<Sandbox[]>;
+  /** every VM; `label: "KEY=VALUE"` or `tenant: "NAME"` keeps only those */
+  vms(opts?: { label?: string; tenant?: string }): Promise<Sandbox[]>;
+  tenants(): Promise<Tenant[]>;
+  tenant(name: string): Promise<Tenant>;
+  /** a tenant's quota: each a number, or null for no limit */
+  setTenant(name: string, quota: Partial<Tenant["quota"]>): Promise<Tenant>;
+  removeTenant(name: string): Promise<{ removed: string }>;
   sandbox(name: string): Promise<Sandbox>;
   images(): Promise<Record<string, unknown>[]>;
   templates(): Promise<Record<string, unknown>[]>;
@@ -99,7 +116,7 @@ export class Client {
   pools(): Promise<Record<string, unknown>[]>;
   importImage(ref: string, name?: string): Promise<ServerJob>;
   create(name: string, opts?: CreateOptions): Promise<Sandbox>;
-  claim(pool: string, opts?: { ttl?: string; idle_stop?: string }): Promise<Sandbox>;
+  claim(pool: string, opts?: { ttl?: string; idle_stop?: string; labels?: Record<string, string>; lease?: number | string; tenant?: string }): Promise<Sandbox>;
 }
 
 export class Sandbox {
@@ -157,6 +174,6 @@ export class ServerJob {
 export class Snapshot {
   client: Client;
   name: string;
-  fork(opts?: { name?: string; count?: number }): Promise<Sandbox[]>;
+  fork(opts?: { name?: string; count?: number; labels?: Record<string, string>; lease?: number | string; tenant?: string }): Promise<Sandbox[]>;
   remove(): Promise<unknown>;
 }

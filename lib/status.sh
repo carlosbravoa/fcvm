@@ -11,8 +11,12 @@
 OFFLINE=0 BROKEN=() NOTES=()
 case ${1:-} in
     --offline) OFFLINE=1 ;;
+    --json)    # the node view (lib/node.py): capacity, allocated, tenants, slots; no network calls
+               FCVM_VERSION=$(fcvm_version) CONTRACT=$CONTRACT \
+               FIRECRACKER_VERSION=$([ -x "$FIRECRACKER" ] && "$FIRECRACKER" --version | head -1 | awk '{print $2}' || true) \
+               exec python3 "$FCVM_ROOT/lib/node.py" status ;;
     "")        ;;
-    *)         die "usage: fcvm status [--offline]" ;;
+    *)         die_code invalid "usage: fcvm status [--offline|--json]" ;;
 esac
 
 ok()   { printf '  \e[32m✓\e[0m %-14s %s\n' "$1" "$2"; }

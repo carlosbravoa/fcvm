@@ -28,6 +28,7 @@ CLI also names the failure's **code**, so they can tell "no such VM" from
 | `snapshot_not_found` | 404 | no snapshot of that name |
 | `volume_not_found` | 404 | no volume of that name |
 | `pool_not_found` | 404 | no warm pool of that name |
+| `tenant_not_found` | 404 | no [tenant](vms.md#tenants-and-quotas) of that name (no quota, no VMs) |
 | `not_found` | 404 | something else named in the request doesn't exist (a job, a mount) |
 | `vm_exists` | 409 | a VM of that name already exists |
 | `image_exists`, `snapshot_exists`, `volume_exists` | 409 | the name is taken |
@@ -38,9 +39,11 @@ CLI also names the failure's **code**, so they can tell "no such VM" from
 | `no_network` | 409 | the VM has `--net none` and the command needs a network (`publish`, `ssh`) |
 | `in_use` | 409 | an image or volume can't be removed or attached because VMs use it |
 | `pool_empty` | 409 | the pool has no ready VM right now |
+| `quota_exceeded` | 429 | the VM's [tenant](vms.md#tenants-and-quotas) would exceed its quota (vCPUs, memory or VMs); retry when one of its VMs stops, or raise the quota |
 | `no_network_slot` | 503 | no free tap on the bridge; the host is at its VM limit for that network |
 | `jail_unavailable` | 503 | the VM is jailed but `fcvm-jaild` isn't running |
 | `cordoned` | 503 | the host is [cordoned](vms.md#lifetimes---ttl-and---idle-stop): no new VMs until `fcvm uncordon` |
+| `node_full` | 503 | with `NODE_ADMIT=1`, the host's [capacity](vms.md#tenants-and-quotas) (`NODE_VCPUS`, `NODE_MEM_MIB`, `NODE_VMS`) would be exceeded; place the VM elsewhere |
 | `timeout` | 504 | the API's call to the CLI took too long (the operation may still complete) |
 | `invalid` | 400 | the request is malformed: an unknown option, a bad name or spec, a missing argument |
 | `error` | 400 | any other failure; the message says what went wrong |

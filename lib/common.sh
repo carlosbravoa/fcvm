@@ -47,6 +47,13 @@ fi
 : "${VM_DISK:=8G}"                              # per-VM writable layer (sparse)
 : "${IMPORT_FREE_MB:=64}"                      # free space added to imported disks (for --copy VMs)
 : "${LEASE_GRACE:=300}"                        # seconds after a lease ends before the VM is removed
+# The node (docs/configuration.md): what this host may hold, for lib/node.py.
+# Empty caps are computed from the host's CPUs and memory; NODE_ADMIT=1 refuses
+# VMs that don't fit (node_full). Tenant quotas (fcvm tenant set) always apply.
+: "${NODE_ADMIT:=0}"
+: "${NODE_VCPUS:=}" "${NODE_MEM_MIB:=}" "${NODE_VMS:=}"
+: "${NODE_CPU_OVERCOMMIT:=2}" "${NODE_MEM_OVERCOMMIT:=1}" "${NODE_RESERVE_MIB:=1024}"
+export NODE_ADMIT NODE_VCPUS NODE_MEM_MIB NODE_VMS NODE_CPU_OVERCOMMIT NODE_MEM_OVERCOMMIT NODE_RESERVE_MIB NET_TAPS
 CONTRACT=1                                     # docs/node-contract.md: what outside programs may rely on
 
 BIN_DIR=$FCVM_HOME/bin
@@ -127,6 +134,9 @@ parse_until() {   # option value
         *) echo "$2" ;;
     esac
 }
+
+# A tenant's name (--tenant): the `tenant` label, which is set once.
+tenant_ok() { [[ $1 =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid tenant name '$1' (letters, digits, . _ -)"; }
 
 # The node is cordoned (fcvm cordon): no new VMs until fcvm uncordon.
 cordoned() { [ -f "$VMS_DIR/.node/cordoned" ]; }

@@ -89,6 +89,7 @@ daemon_api() {   # METHOD PATH [JSON]: prints the reply; 1 = refused (message on
     msg=$(jq -r '.error // .' <<<"$out" 2>/dev/null || echo "$out")
     [[ $msg != "unknown action "* && $msg != "unknown API endpoint" ]] || return 3
     printf '\e[1;31merror:\e[0m %s\n' "$msg" >&2
+    [ -t 2 ] || printf 'fcvm-error: %s\n' "$(jq -r '.code // "error"' <<<"$out" 2>/dev/null || echo error)" >&2   # as die_code does
     return 1
 }
 # After daemon_api returned 3: say the service is behind, and carry on locally.
@@ -137,6 +138,10 @@ label_ok() {
 labels_json() {   # KEY=VALUE... -> {"KEY": "VALUE", ...}
     [ $# -eq 0 ] && echo '{}' || printf '%s\0' "$@" | jq -Rsc 'split("\u0000")[:-1] | map(capture("^(?<k>[^=]*)=(?<v>.*)$") | {key: .k, value: .v}) | from_entries'
 }
+# Admission (lib/node.py): does the VM fit its tenant's quota and, with
+# NODE_ADMIT=1, the host? Fails with quota_exceeded or node_full; otherwise
+# the VM counts as allocated (the `starting` marker) until it records a pid.
+node_admit() { python3 "$FCVM_ROOT/lib/node.py" admit "$@"; }
 
 # fcvm create/run --template NAME [ARGS...]: the template's image and create
 # options, then yours (later options win), then the template's process unless
@@ -376,7 +381,7 @@ exit_code() {
 }
 
 create() {
-    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [--restart POLICY] [--ttl DURATION] [--idle-stop DURATION] [--label KEY=VALUE]... [--lease UNTIL] [--if-same-spec] [-- CMD...]"
+    local usage="usage: fcvm create VM IMAGE [--vcpus N] [--mem MiB] [--disk SIZE] [--copy] [--idle] [--entrypoint CMD] [--net full|none] [--allow HOST,...]... [-p [BIND:]HOST:GUEST]... [-v VOLUME:/PATH[:ro]]... [--restart POLICY] [--ttl DURATION] [--idle-stop DURATION] [--label KEY=VALUE]... [--tenant NAME] [--lease UNTIL] [--if-same-spec] [-- CMD...]"
     local vm=${1:?$usage}
     if [ "${2:-}" = --template ]; then template_expand "${@:3}"; set -- "$vm" "${TEMPLATE_ARGS[@]}"; fi
     local image=${2:?$usage}
@@ -388,6 +393,7 @@ create() {
         case $1 in
             --cache)        cache=1; shift ;;
             --label)        label_ok "${2:?--label wants KEY=VALUE}"; labels+=("$2"); shift 2 ;;
+            --tenant)       tenant_ok "${2:?--tenant wants a name}"; labels+=("tenant=$2"); shift 2 ;;
             --if-same-spec) same_ok=1; shift ;;
             --lease)        lease=$(parse_until --lease "${2:?--lease wants a time or a duration}"); shift 2 ;;
             --secret)       parse_secret "${2:?--secret wants NAME=VALUE, NAME=@FILE or NAME}"; secrets+=("$2"); shift 2 ;;
@@ -704,6 +710,7 @@ start() {
     touch_activity "$vm"   # --idle-stop counts from the boot until the first exec
     [ -x "$FIRECRACKER" ] || die "firecracker not installed (run: fcvm firecracker)"
     sock_room "$vm"
+    node_admit "$vm" || exit 1
     local kernel type vcpus mem image
     DIR=$(vm_dir "$vm")
     kernel=$(default_kernel)
@@ -915,7 +922,7 @@ start() {
     local i pid=""
     for ((i = 0; i < 100; i++)); do pid=$(vm_pid "$vm"); [ -n "$pid" ] && break; sleep 0.02; done
     [ -n "$pid" ] || { cat "$DIR/relay.log" >&2; die "console relay failed to start"; }
-    record_pid_id "$vm" "$pid"
+    record_pid_id "$vm" "$pid"; rm -f "$DIR/starting"
     if [ ${#exports[@]} -gt 0 ] && [ $jailed = 1 ]; then start_shares "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi
     if [ "$secrets" != 0 ] && [ $jailed = 1 ]; then start_secrets "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi
     if [ ${#fwd_args[@]} -gt 0 ] && [ $jailed = 1 ]; then start_forward "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi
@@ -1704,6 +1711,7 @@ fork_one() {
         '. + {ephemeral: false, ports: [], restored_from: $snap, created: (now | todate), labels: $labels}
          | del(.lease_until) + (if $lease == "" then {} else {lease_until: ($lease | tonumber)} end)' \
         "$sdir/vm.json" > "$dir/vm.json"
+    node_admit "$vm" || { rm -rf "$dir"; exit 1; }
     emit_event vm.created "$vm" fork "$(jq -nc --arg s "$snap" '{restored_from: $s}')"
     cp --sparse=always "$sdir/$disk" "$dir/$disk"
     DIR=$dir IP=""
@@ -1728,7 +1736,7 @@ fork_one() {
         </dev/null >"$dir/relay.log" 2>&1 {VM_LOCK}>&- &
     for ((i = 0; i < 100; i++)); do [ -S "$dir/fc.sock" ] && break; sleep 0.01; done
     pid=$(vm_pid "$vm")
-    [ -z "$pid" ] || record_pid_id "$vm" "$pid"
+    [ -z "$pid" ] || record_pid_id "$vm" "$pid"; rm -f "$dir/starting"
     # The snapshot records the source VM's disk path, and loading reopens it
     # before we re-point the drive at the fork's copy. If the source VM is gone,
     # stand in for that path with the snapshot's own disk while loading.
@@ -1765,11 +1773,12 @@ fork_one() {
 }
 
 fork_cmd() {
-    local usage="usage: fcvm fork SNAPSHOT [NAME] [-n COUNT] [--label KEY=VALUE]... [--lease UNTIL]" snap="" name="" count=1 labels=() lease=""
+    local usage="usage: fcvm fork SNAPSHOT [NAME] [-n COUNT] [--label KEY=VALUE]... [--tenant NAME] [--lease UNTIL]" snap="" name="" count=1 labels=() lease=""
     while [ $# -gt 0 ]; do
         case $1 in
             -n|--count) [[ ${2:-} =~ ^[1-9][0-9]*$ ]] || die_code invalid "$usage"; count=$2; shift 2 ;;
             --label)    label_ok "${2:?$usage}"; labels+=("$2"); shift 2 ;;
+            --tenant)   tenant_ok "${2:?$usage}"; labels+=("tenant=$2"); shift 2 ;;
             --lease)    lease=$(parse_until --lease "${2:?$usage}"); shift 2 ;;
             -*)         die_code invalid "unknown option $1 ($usage)" ;;
             *)          if [ -z "$snap" ]; then snap=$1; else name=$1; fi; shift ;;
@@ -2020,7 +2029,7 @@ pool_members() {   # name [running]: pooled VMs, unclaimed
 }
 
 pool_cmd() {
-    local usage="usage: fcvm pool set NAME (--template T | --snapshot S) --size N [--jail] | fcvm pool ls [--json] | fcvm pool rm NAME | fcvm pool claim NAME [--ttl D] [--idle-stop D] [--label KEY=VALUE]..."
+    local usage="usage: fcvm pool set NAME (--template T | --snapshot S) --size N [--jail] | fcvm pool ls [--json] | fcvm pool rm NAME | fcvm pool claim NAME [--ttl D] [--idle-stop D] [--label KEY=VALUE]... [--tenant NAME] [--lease UNTIL]"
     local sub=${1:-ls}; [ $# -eq 0 ] || shift
     case $sub in
         set)
@@ -2046,6 +2055,7 @@ pool_cmd() {
             jq -n --arg name "$name" --arg tpl "$tpl" --arg snap "$snap" --argjson size "$size" --argjson jail "$jail" \
                 '{name: $name, template: (if $tpl == "" then null else $tpl end), snapshot: (if $snap == "" then null else $snap end),
                   size: $size, jail: $jail, created: (now | todate)}' > "$f.tmp" && mv "$f.tmp" "$f"
+            emit_event pool.set "" "" "$(jq -c '{pool: .name, template, snapshot, size, jail}' "$f")"
             log "pool '$name': $size VM(s) from ${tpl:+template $tpl}${snap:+snapshot $snap}$([ "$jail" = true ] && echo ", jailed") (filled by fcvm serve / the fcvm service)" ;;
         ls)
             local f json=0; [ "${1:-}" = --json ] && json=1
@@ -2067,14 +2077,16 @@ pool_cmd() {
                 emit_event vm.deleted "$vm" pool
                 rm -rf "$(vm_dir "$vm")" "$VMS_DIR/.locks/vm-$vm"
             done
+            emit_event pool.removed "" "" "$(jq -nc --arg p "$name" '{pool: $p}')"
             log "removed pool '$name' and its unclaimed VMs (claimed ones are ordinary VMs now)" ;;
         claim)
-            local name=${1:?$usage} ttl="" idle="" vm="" d plock labels=(); shift
+            local name=${1:?$usage} ttl="" idle="" vm="" d plock labels=() tenant="" owner; shift
             while [ $# -gt 0 ]; do
                 case $1 in
                     --ttl)       ttl=${2:?$usage}; shift 2 ;;
                     --idle-stop) idle=${2:?$usage}; shift 2 ;;
                     --label)     label_ok "${2:?$usage}"; labels+=("--label" "$2"); shift 2 ;;
+                    --tenant)    tenant_ok "${2:?$usage}"; tenant=$2; shift 2 ;;
                     --lease)     parse_until --lease "${2:?$usage}" >/dev/null; labels+=("--lease" "$2"); shift 2 ;;
                     *)           die_code invalid "unknown option $1 ($usage)" ;;
                 esac
@@ -2086,11 +2098,19 @@ pool_cmd() {
             for d in $(pool_members "$name" running); do vm=$d; break; done
             [ -n "$vm" ] || die_code pool_empty "pool '$name' has no VM ready right now (fcvm serve fills it to $(jq .size "$(pool_file "$name")")); create one the usual way meanwhile"
             d=$(vm_dir "$vm")
-            # settings first: if they fail, the VM stays in the pool
+            # settings first: if they fail, the VM stays in the pool. A pooled VM
+            # without a tenant is public: the claim gives it one, within that
+            # tenant's quota; one with a tenant goes only to that tenant.
+            if [ -n "$tenant" ]; then
+                owner=$(jq -r '.labels.tenant // empty' "$d/vm.json")
+                [ -z "$owner" ] || [ "$owner" = "$tenant" ] || die_code invalid "pool '$name' belongs to tenant '$owner', not '$tenant'"
+                node_admit --claim --tenant "$tenant" "$vm" || exit 1
+            fi
             [ -z "$ttl$idle" ] && [ ${#labels[@]} -eq 0 ] || QUIET_UPDATE=1 update "$vm" ${ttl:+--ttl "$ttl"} ${idle:+--idle-stop "$idle"} "${labels[@]}"
+            [ -z "$tenant" ] || { jq --arg t "$tenant" '.labels = ((.labels // {}) + {tenant: $t})' "$d/vm.json" > "$d/vm.json.tmp" && mv "$d/vm.json.tmp" "$d/vm.json"; }
             rm -f "$d/pooled"; date +%s > "$d/claimed"; touch_activity "$vm"
             exec {plock}>&-
-            emit_event pool.claimed "$vm" "" "$(jq -nc --arg p "$name" '{pool: $p}')"
+            emit_event pool.claimed "$vm" "" "$(jq -nc --arg p "$name" --arg t "$tenant" '{pool: $p} + (if $t == "" then {} else {tenant: $t} end)')"
             log "claimed '$vm' from pool '$name'"
             echo "$vm" ;;
         _fill)   # one more VM for the pool (the supervisor's job)
@@ -2287,7 +2307,8 @@ list_vms() {
             --all|-a) all=1; shift ;;
             --json)   json=1; shift ;;
             --label)  label_ok "${2:?--label wants KEY=VALUE}"; label=$2; shift 2 ;;
-            *)        die_code invalid "unknown option $1 (usage: fcvm ls [--all] [--json] [--label KEY=VALUE])" ;;
+            --tenant) tenant_ok "${2:?--tenant wants a name}"; label=tenant=$2; shift 2 ;;
+            *)        die_code invalid "unknown option $1 (usage: fcvm ls [--all] [--json] [--label KEY=VALUE] [--tenant NAME])" ;;
         esac
     done
     if [ $json = 1 ]; then
@@ -2374,8 +2395,9 @@ update() {
             --secret)    parse_secret "${2:?$usage}"; secrets+=("$2"); shift 2 ;;
             --unset-secret) SECRETS_DEL+=("${2:?$usage}"); shift 2 ;;
             --forward)   mapfile -t forward < <(parse_forward "${2:?$usage}"); set_fwd=1; shift 2 ;;
-            --label)     label_ok "${2:?$usage}"; labels+=("$2"); shift 2 ;;
-            --unset-label) unlabel+=("${2:?$usage}"); shift 2 ;;
+            --label)     label_ok "${2:?$usage}"; [[ $2 != tenant=* ]] || die_code invalid "a VM's tenant is set at create, fork or pool claim (--tenant) and can't be changed"
+                         labels+=("$2"); shift 2 ;;
+            --unset-label) [ "${2:?$usage}" != tenant ] || die_code invalid "a VM's tenant can't be unset"; unlabel+=("$2"); shift 2 ;;
             --lease)     lease=$(parse_until --lease "${2:?$usage}") set_lease=1; shift 2 ;;
             *)           die_code invalid "unknown option $1 ($usage)" ;;
         esac

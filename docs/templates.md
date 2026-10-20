@@ -121,6 +121,10 @@ fcvm pool rm py                                              # the pool and its 
   and `create --template` works meanwhile. Pooled VMs that died are
   replaced.
 - **`fcvm ls`** shows unclaimed ones as `pool:NAME`.
+- **Tenants.** A pooled VM belongs to nobody until it's claimed:
+  `claim --tenant NAME` gives it to that tenant, within its
+  [quota](vms.md#tenants-and-quotas). A template that sets a `tenant`
+  label makes a pool that tenant's own.
 - **The MCP server** claims from a template's pool whenever the agent
   asks for a sandbox from that template with no other arguments (and the
   pool is jailed if sandboxes must be); `create_sandbox` also takes

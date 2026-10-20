@@ -4,6 +4,33 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## Unreleased
+
+- **Tenants and quotas.** `--tenant NAME` on `create`, `fork` and
+  `pool claim` sets the `tenant` label, which `update` can't change;
+  `fcvm tenant set NAME --vcpus N --mem MiB --vms N` gives the tenant a
+  quota, checked whenever one of its VMs starts, is forked or is claimed
+  (`quota_exceeded`, HTTP 429). `fcvm tenant ls|show|rm`, `ls --tenant`,
+  `GET/PUT/DELETE /api/tenants`, `?tenant=` and `?label=` on `GET /api/vms`,
+  and `tenant` on the SDKs' `create`, `fork` and `claim`. See
+  [Tenants and quotas](docs/vms.md#tenants-and-quotas).
+- **The host's capacity.** `NODE_VCPUS`, `NODE_MEM_MIB` and `NODE_VMS`
+  (computed from the host by default) are reported by `fcvm status --json`
+  and `GET /api/host` (`node`), and enforced with `NODE_ADMIT=1`
+  (`node_full`, 503). Off by default.
+- **`fcvm status --json`** is the node view (capacity, allocated,
+  allocatable, tenants, free slots, versions), and **`fcvm config
+  [--json]`** prints the settings in effect and the paths, so programs
+  never parse `fcvm.conf`.
+- **Events** for pools (`pool.set`, `pool.removed`, a `tenant` on
+  `pool.claimed`) and tenants (`tenant.set`, `tenant.removed`).
+- **Fixed:** a failure relayed from the service (`start`, `fork`,
+  `publish` through `fcvm serve`) now ends with its `fcvm-error: CODE`
+  line like a local one; `POST /api/vms` answers with the start's own
+  code and status when the VM was created but refused at its start.
+- `tests/fresh-ec2.sh` runs on a `c8i.2xlarge` with nested virtualization
+  instead of a bare-metal instance.
+
 ## 0.8.0 (2026-10-19)
 
 Groundwork for driving fcvm from a program, and better answers for

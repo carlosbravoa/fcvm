@@ -32,7 +32,7 @@ tests/run                      # lint + unit tests: seconds, no KVM, no root
 tests/run integration          # real VMs: about 5 minutes on a set-up host
 tests/run lint unit integration -k Snapshots   # a subset, by name
 tests/fresh-machine.sh         # everything on a fresh Ubuntu in Multipass, with a reboot (~15 min)
-tests/fresh-ec2.sh             # the same on a throwaway EC2 bare-metal instance (~45 min, about $4)
+tests/fresh-ec2.sh             # the same on a throwaway EC2 instance (~30 min, well under $1)
 ```
 
 | level | what | needs |
@@ -91,12 +91,13 @@ kill $pid; cp /tmp/serve.bak vms/.serve.json   # back to the service
 CI can't reboot or start from a machine without KVM access set up, which is
 what `tests/fresh-machine.sh` covers. Run it before a release. Without
 Multipass (or without the disk for it), `tests/fresh-ec2.sh` does the same
-on a throwaway `c5.metal` instance with the configured `aws` CLI: its own
-key pair and security group (SSH from your address only), terminated
-afterwards, and self-terminating after two hours whatever happens. It
-reboots from inside the guest: `aws ec2 reboot-instances` hard-resets a
-bare-metal instance that takes long to shut down, which would show as
-VMs not stopped cleanly.
+on a throwaway EC2 instance with the configured `aws` CLI: a `c8i.2xlarge`
+launched with nested virtualization enabled (any 7th or 8th generation
+Intel type works, `--type` picks another), its own key pair and security
+group (SSH from your address only), terminated afterwards, and
+self-terminating after two hours whatever happens. It reboots from inside
+the guest: `aws ec2 reboot-instances` hard-resets an instance that takes
+long to shut down, which would show as VMs not stopped cleanly.
 
 ## Before a release
 

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# tests/fresh-ec2.sh [--keep] [--type c5.metal] [--image 26.04] [--subnet S]: what
-# tests/fresh-machine.sh does, on a throwaway EC2 bare-metal instance instead
-# of a Multipass VM (fcvm needs /dev/kvm, which on AWS only *.metal instances
-# have):
+# tests/fresh-ec2.sh [--keep] [--type c8i.2xlarge] [--image 26.04] [--subnet S]:
+# what tests/fresh-machine.sh does, on a throwaway EC2 instance instead of a
+# Multipass VM. fcvm needs /dev/kvm: EC2 gives a virtual instance one when it
+# is launched with nested virtualization enabled, which the 7th and 8th
+# generation Intel types (c7i, c8i, m8i, r8i, ...) support; *.metal types have
+# it anyway.
 #
 #   1. launch an Ubuntu instance with its own key pair and security group
 #      (SSH from this machine's address only), terminating itself after
@@ -19,20 +21,20 @@
 #      (unless --keep)
 #
 # Needs the aws CLI configured for an account that may run the instance type
-# (c5.metal: 96 vCPUs, about $4 an hour; a run takes 30-45 minutes, most of
-# it the instance's boot and the kernel build). Logs go to the directory
-# printed at the start.
+# (c8i.2xlarge: 8 vCPUs, 16 GB, about $0.40 an hour; a run takes about 30
+# minutes, most of it the kernel build and the tests). Logs go to the
+# directory printed at the start.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-keep=0 type=c5.metal image=26.04 subnet=""
+keep=0 type=c8i.2xlarge image=26.04 subnet=""
 while [ $# -gt 0 ]; do
     case $1 in
         --keep)   keep=1; shift ;;
         --type)   type=$2; shift 2 ;;
         --image)  image=$2; shift 2 ;;
         --subnet) subnet=$2; shift 2 ;;
-        *)        echo "usage: tests/fresh-ec2.sh [--keep] [--type c5.metal] [--image 26.04] [--subnet SUBNET]" >&2; exit 2 ;;
+        *)        echo "usage: tests/fresh-ec2.sh [--keep] [--type c8i.2xlarge] [--image 26.04] [--subnet SUBNET]" >&2; exit 2 ;;
     esac
 done
 command -v aws >/dev/null || { echo "needs the aws CLI" >&2; exit 1; }
@@ -51,6 +53,7 @@ cleanup() {
     if [ -n "$instance" ]; then
         aws ec2 terminate-instances --instance-ids "$instance" >/dev/null 2>&1 || true
         # a metal instance can take over ten minutes to terminate, longer than `aws ec2 wait` allows
+        # (a virtual one is gone in a minute)
         for _ in $(seq 1 60); do
             [ "$(aws ec2 describe-instances --instance-ids "$instance" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)" = terminated ] && break
             sleep 20
@@ -100,8 +103,10 @@ aws ec2 authorize-security-group-ingress --group-id "$sg" --protocol tcp --port 
 echo "ami $ami, $type in $subnet, ssh from $me"
 
 step "launching $type (self-terminates in 2 h)"
+cpu=()
+case $type in *.metal) ;; *) cpu=(--cpu-options NestedVirtualization=enabled) ;; esac   # /dev/kvm on a virtual instance
 # shellcheck disable=SC2016
-instance=$(aws ec2 run-instances --image-id "$ami" --instance-type "$type" --key-name "$run" --security-group-ids "$sg" \
+instance=$(aws ec2 run-instances --image-id "$ami" --instance-type "$type" --key-name "$run" --security-group-ids "$sg" "${cpu[@]}" \
     --subnet-id "$subnet" --associate-public-ip-address --instance-initiated-shutdown-behavior terminate \
     --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":40,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$run},{Key=purpose,Value=fcvm-fresh-machine-test}]" \
@@ -111,7 +116,7 @@ shutdown -h +120' \
 echo "instance $instance"
 aws ec2 wait instance-running --instance-ids "$instance"
 ip=$(aws ec2 describe-instances --instance-ids "$instance" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-echo "running at $ip; waiting for SSH (a metal instance takes several minutes to boot)"
+echo "running at $ip; waiting for SSH (a minute; a metal instance takes several)"
 ssh_opts=(-i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile="$log/known_hosts" -o ConnectTimeout=10 -o ServerAliveInterval=30)
 in_vm() { ssh "${ssh_opts[@]}" "ubuntu@$ip" -- bash -lc "$(printf '%q' "$1")"; }   # a login shell: PATH, groups as a user gets them
 for i in $(seq 1 120); do ssh "${ssh_opts[@]}" "ubuntu@$ip" true 2>/dev/null && break; sleep 10; [ "$i" -lt 120 ] || { echo "no SSH after 20 minutes" >&2; exit 1; }; done

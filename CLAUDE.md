@@ -41,8 +41,9 @@ release checklist. This file is what a session tends to get wrong.
 - Never `pkill -f "some pattern"` from a tool call: the pattern matches the
   shell running it. Kill by pid, or use a `[.]` in the pattern.
 - `tests/fresh-ec2.sh` runs the fresh-machine test on a throwaway EC2
-  bare-metal instance (the `aws` CLI is configured); it cleans up after
-  itself, and `--keep` leaves the instance for inspection.
+  instance (a `c8i.2xlarge` with nested virtualization enabled, not bare
+  metal; the `aws` CLI is configured); it cleans up after itself, and
+  `--keep` leaves the instance for inspection.
 - `tests/fresh-machine.sh` needs Multipass with about 10 GB free on the
   root disk; CI's integration job covers the same minus the reboot.
 

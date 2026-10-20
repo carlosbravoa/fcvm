@@ -39,8 +39,9 @@ page covers the same steps by hand.
 ## Requirements
 
 - **x86_64 Linux with KVM.** Check with `ls -l /dev/kvm`. On a cloud VM,
-  you need nested virtualization or a bare-metal instance. aarch64 isn't
-  supported yet.
+  you need nested virtualization (on EC2, a 7th or 8th generation Intel
+  type launched with `--cpu-options NestedVirtualization=enabled`) or a
+  bare-metal instance. aarch64 isn't supported yet.
 - **A Debian-family host** for the automatic setup (`host-setup` uses apt).
   fcvm is developed on Ubuntu 26.04, and CI runs on Ubuntu 24.04 LTS. On other distributions, install the
   equivalent packages by hand (listed in `lib/host-setup.sh`).

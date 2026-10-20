@@ -15,6 +15,7 @@ list in short form. Pages under "Using fcvm" in the
 - [Storage](#storage)
 - [Snapshots](#snapshots)
 - [Network](#network)
+- [Operations](#operations)
 - [Interfaces](#interfaces)
 - [Conventions](#conventions)
 
@@ -159,6 +160,30 @@ These use sudo.
 | command | what it does |
 |---|---|
 | `egress VM [--allow H,...] [--deny H,...] [-n N \| -f]` | a restricted VM's allowlist and its recent allowed and denied requests. Changes apply live |
+
+## Operations
+
+Slow commands (`import`, `build`, `export`, `push`, `snapshot`, `commit`)
+take `--op`: the command runs detached, its id is printed at once, and its
+state and output are kept in `vms/.ops/` (for a week after it ends), so a
+script, the console or another host can ask how it went. The [API](api.md#background-jobs)
+exposes the same as jobs.
+
+```sh
+fcvm import python:3.13 --op       # prints op-k2j9x7d4qa
+fcvm ops                           # recent operations: id, when, status, how long, what
+fcvm ops op-k2j9x7d4qa -f          # its output, followed until it ends; exits 1 if it failed
+fcvm ops op-k2j9x7d4qa --json      # the record: status, exit, error, command, lines
+```
+
+| command | what it does |
+|---|---|
+| `COMMAND ... --op` | runs the command as an operation and prints its id |
+| `ops [--json]` | the recent operations |
+| `ops ID [-f] [--json]` | one operation's record and output; `-f` follows a running one |
+
+An operation whose process is gone without having ended (the host rebooted,
+the process was killed) shows as `failed` with the error `interrupted`.
 
 ## Interfaces
 

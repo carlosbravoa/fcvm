@@ -44,6 +44,7 @@ from supervisor import Supervisor
 
 sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # lib/
 import events  # noqa: E402  (lib/events.py: the state changes the CLI records)
+import ops  # noqa: E402  (lib/ops.py: slow commands run detached, their state on disk)
 import templates  # noqa: E402  (lib/templates.py, shared with the CLI and MCP)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # the code
@@ -122,55 +123,31 @@ async def fcvm_json(*args):
     return json.loads((await fcvm_ok(*args))[0] or "null")
 
 
-# --- background jobs (slow operations such as image imports) -------------------------
+# --- background jobs: operations (lib/ops.py) ------------------------------------------
 
 class Jobs:
-    def __init__(self):
-        self.jobs = {}
-        self.seq = 0
+    """Slow commands (imports, builds) as operations: `fcvm ... --op` runs them
+    detached, and vms/.ops/ keeps their state and output across restarts of
+    this server. Ids are strings (op-...)."""
 
-    def start(self, kind, title, args):
-        self.seq += 1
-        job = {"id": self.seq, "kind": kind, "title": title, "status": "running", "log": [], "base": 0,
-               "started": time.time(), "ended": None}
-        self.jobs[self.seq] = job
-        asyncio.get_running_loop().create_task(self._run(job, args))
-        return job
-
-    async def _run(self, job, args):
-        p = await asyncio.create_subprocess_exec(FCVM, *map(str, args), stdin=asyncio.subprocess.DEVNULL,
-                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                                                 env={**os.environ, "FCVM_ACTOR": "serve"})
-        # Read in chunks and split lines here: a progress bar redrawn with \r
-        # for a long time is one "line" to a StreamReader, and over its limit
-        # it raises instead of delivering.
-        buf = b""
-        while chunk := await p.stdout.read(65536):
-            buf += chunk
-            *lines, buf = re.split(rb"\r\n|\n|\r", buf)
-            for line in lines:
-                self._add(job, line)
-        if buf:
-            self._add(job, buf)
-        job["status"] = "done" if await p.wait() == 0 else "failed"
-        job["ended"] = time.time()
+    async def start(self, kind, title, args):
+        out, _ = await fcvm_ok("ops", "start", "--title", title, kind, *args)
+        return self.get(out.strip(), 0)
 
     @staticmethod
-    def _add(job, line):
-        job["log"].append(ANSI.sub("", line.decode(errors="replace")).rstrip())
-        if len(job["log"]) > 2000:                  # keep the tail; offsets stay absolute
-            job["base"] += len(job["log"]) - 2000
-            del job["log"][:-2000]
+    def list():
+        return ops.list_ops()
 
-    def list(self):
-        return [{**j, "log": j["log"][-3:]} for j in sorted(self.jobs.values(), key=lambda j: -j["id"])[:20]]
-
-    def get(self, jid, since):
-        j = self.jobs.get(jid)
+    @staticmethod
+    def get(jid, since):
+        j = ops.get(jid, since)
         if not j:
-            raise HTTPError(404, "no such job")
-        start = max(since - j["base"], 0)
-        return {**{k: v for k, v in j.items() if k != "log"}, "lines": j["log"][start:], "next": j["base"] + len(j["log"])}
+            raise HTTPError(404, "no such job", "not_found")
+        return j
+
+    @staticmethod
+    def meta(jid):
+        return ops.meta(jid)
 
 
 # --- stats ----------------------------------------------------------------------------
@@ -750,7 +727,7 @@ class App:
                 if not ref or ref.startswith("-"):
                     raise HTTPError(400, "image reference required")
                 args = ["import", ref] + ([d["name"]] if d.get("name") else [])
-                return self.jobs.start("import", f"import {ref}", args)
+                return await self.jobs.start("import", f"import {ref}", args)
             case ("DELETE", "images", 2):
                 await fcvm_ok("rmi", name)
                 return {"removed": name}
@@ -815,7 +792,12 @@ class App:
             case ("GET", "jobs", 1):
                 return self.jobs.list()
             case ("GET", "jobs", 2):
-                return self.jobs.get(int(parts[1]), int(q.get("from", 0)))
+                if not ops.ID.match(parts[1]):
+                    raise HTTPError(404, "no such job", "not_found")
+                deadline = time.time() + min(int(q.get("wait") or 0), 600)   # ?wait=N: until it ends, at most N s
+                while (j := self.jobs.get(parts[1], int(q.get("from", 0))))["status"] == "running" and time.time() < deadline:
+                    await asyncio.sleep(0.5)
+                return j
             # --- files in a running VM (W4)
             case ("GET", "vms", 3) if parts[2] == "files":
                 path = guest_path(q)
@@ -889,7 +871,7 @@ class App:
                 shutil.rmtree(full) if os.path.isdir(full) else os.unlink(full)
                 return {"removed": q["path"]}
             case ("POST", "builds", 3) if parts[2] == "build":
-                return self.start_build(name, d)
+                return await self.start_build(name, d)
             case ("GET", "presets", 1):
                 return self.presets()
         raise HTTPError(404, "unknown API endpoint")
@@ -914,7 +896,7 @@ class App:
             except (HTTPError, OSError, ValueError, KeyError):
                 continue
             last = self.last_builds.get(n)
-            job = self.jobs.jobs.get(last["job"]) if last else None
+            job = self.jobs.meta(last["job"]) if last else None
             out.append({"name": n, "path": root, "external": external,
                         "dockerfile": next((f for f in ("Fcvmfile", "Dockerfile") if os.path.exists(os.path.join(root, f))), None),
                         "last": {**last, "status": job["status"] if job else "unknown"} if last else None})
@@ -958,7 +940,7 @@ class App:
                     return {"root": root, "files": files, "truncated": True}
         return {"root": root, "files": files, "truncated": False}
 
-    def start_build(self, name, d):
+    async def start_build(self, name, d):
         root, _ = project_root(name)
         tag = (d.get("tag") or name).strip()
         if not NAME.match(tag):
@@ -976,7 +958,7 @@ class App:
             if not allow:
                 raise HTTPError(400, "a restricted build network needs at least one allowed host or preset")
             args += ["--allow", ",".join(allow)]
-        job = self.jobs.start("build", f"build {name} → {tag}", args + [root])
+        job = await self.jobs.start("build", f"build {name} → {tag}", args + [root])
         self.last_builds[name] = {"job": job["id"], "tag": tag, "started": job["started"]}
         return job
 

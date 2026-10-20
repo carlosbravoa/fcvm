@@ -200,12 +200,14 @@ the Prometheus text format. See [Metrics](web-console.md#metrics).
 
 ## Background jobs
 
-Slow operations (image imports, builds) run as jobs:
+Slow operations (image imports, builds) run as jobs: `fcvm ... --op`
+operations ([Operations](cli.md#operations)), whose state and output live
+in `vms/.ops/` and survive a restart of the server.
 
 | method, path | query | returns |
 |---|---|---|
-| `GET /jobs` | | the 20 most recent jobs, each with the last 3 lines of output |
-| `GET /jobs/{id}` | `?from=N` | `{id, kind, title, status: running\|done\|failed, started, ended, lines: [...], next}`: output lines from offset `N`. Poll with `from=next` |
+| `GET /jobs` | | the 20 most recent jobs, each with the last 3 lines of output as `log` |
+| `GET /jobs/{id}` | `?from=N[&wait=S]` | `{id, kind, title, command, status: running\|done\|failed, started, ended, exit, error, code, lines: [...], next}`: output lines from offset `N`. Poll with `from=next`, or `wait=S` to block until it ends (at most `S` seconds). A job that was running when the server or the host went down is `failed` with the error `interrupted` |
 
 ## Events
 

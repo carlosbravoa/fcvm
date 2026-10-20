@@ -32,6 +32,13 @@ to move across.
   `GET /api/events` returns or streams them (server-sent events), the
   console redraws on them at once, and the MCP server has an `events`
   tool. See [docs/events.md](docs/events.md).
+- **Operations.** `import`, `build`, `export`, `push`, `snapshot` and
+  `commit` take `--op`: the command runs detached, prints an id, and
+  `fcvm ops [ID] [-f]` shows its state and output, kept in `vms/.ops/` for
+  a week. The console's jobs (`GET /api/jobs`) are these operations now:
+  their ids are strings, they survive a restart of the service (one cut
+  short is `failed` with `interrupted`), and `GET /api/jobs/{id}?wait=S`
+  blocks until the job ends. An `operation.done` event closes each one.
 - **Packages.** The clients are on PyPI and npm as `fcvm` (`pip install
   fcvm`, `npm install fcvm`). `fcvm-mcp` on PyPI launches the installed
   fcvm's MCP server (`uvx fcvm-mcp`), and lists fcvm in the MCP Registry.

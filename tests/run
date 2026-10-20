@@ -43,6 +43,15 @@ for p in sorted(pathlib.Path(".").glob("lib/**/*.py")) + sorted(pathlib.Path("te
         compile(p.read_text(), str(p), "exec")      # syntax only; writes no .pyc
     except SyntaxError as e:
         print(f"syntax: {e}"); bad += 1
+# compile() accepts an await outside an async function; importing doesn't
+import importlib.util
+for name, path in (("server", "lib/web/server.py"), ("supervisor", "lib/web/supervisor.py")):
+    sys.path[:0] = ["lib", "lib/web"]
+    spec = importlib.util.spec_from_file_location(name, path)
+    try:
+        spec.loader.exec_module(importlib.util.module_from_spec(spec))
+    except SyntaxError as e:
+        print(f"syntax: {e}"); bad += 1
 sys.exit(1 if bad else 0)
 EOF
     if command -v shellcheck >/dev/null; then

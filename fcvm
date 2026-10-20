@@ -116,6 +116,8 @@ VMs:
   events [--since N] [-f] [--json] [VM]
                              state changes fcvm recorded (created, started, stopped, exited,
                              deleted, ...), oldest first; -f follows; --since -20: the last 20
+  ops [ID] [-f] [--json]     operations: slow commands (import, build, export, push, snapshot,
+                             commit) run detached with --op; their state and output are kept
   ls [--all] [--json] [--label K=V]  list VMs (--all: include build VMs; --label: only those tagged so)
   rm VM                      delete a VM
   rmi IMAGE                  delete an image
@@ -130,6 +132,14 @@ EOF
 }
 
 cmd=${1:-help}; shift || true
+# --op: run a slow command detached as an operation (fcvm ops), printing its id.
+if [[ " $* " == *" --op "* ]]; then
+    case $cmd in
+        import|build|export|push|snapshot|commit)
+            args=(); for a in "$@"; do [ "$a" = --op ] || args+=("$a"); done
+            exec python3 "$FCVM_ROOT/lib/ops.py" start "$cmd" "$cmd" "${args[@]}" ;;
+    esac
+fi
 case $cmd in
     -V|--version)       echo "fcvm $(fcvm_version)" ;;
     version)            printf 'fcvm %s\ncode   %s\nstate  %s\nconfig %s%s\n' "$(fcvm_version)" "$FCVM_ROOT" \
@@ -156,6 +166,7 @@ case $cmd in
                         exec "$FCVM_ROOT/lib/vm.sh" "$cmd" "$@" ;;
     up|down)            exec python3 "$FCVM_ROOT/lib/project.py" "$cmd" "$@" ;;
     events)             exec python3 "$FCVM_ROOT/lib/events.py" "$@" ;;
+    ops)                exec python3 "$FCVM_ROOT/lib/ops.py" "$@" ;;
     project)            exec python3 "$FCVM_ROOT/lib/project.py" "$@" ;;
     mcp)                exec python3 "$FCVM_ROOT/lib/mcp_server.py" "$@" ;;
     serve)              exec python3 "$FCVM_ROOT/lib/web/server.py" --r-prefix "$NET_R_PREFIX" "$@" ;;

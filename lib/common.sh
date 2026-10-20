@@ -124,7 +124,7 @@ _emit_event() {
     labels=$(jq -c '.labels // {}' "$VMS_DIR/$vm/vm.json" 2>/dev/null) || labels='{}'
     jq -nc --argjson seq "$seq" --arg type "$type" --arg vm "$vm" --arg reason "$reason" --argjson data "$data" \
         --arg by "${FCVM_ACTOR:-cli:$(id -un)}" --argjson labels "$labels" \
-        '{seq: $seq, t: now, type: $type, vm: $vm, reason: (if $reason == "" then null else $reason end),
+        '{seq: $seq, t: now, type: $type, vm: (if $vm == "" then null else $vm end), reason: (if $reason == "" then null else $reason end),
           by: $by, labels: $labels, data: $data}' >> "$VMS_DIR/.events.jsonl" || return 1
     echo "$seq" > "$VMS_DIR/.events.seq"
     if [ "$(stat -c %s "$VMS_DIR/.events.jsonl")" -gt "${FCVM_EVENTS_ROTATE:-4194304}" ]; then

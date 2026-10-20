@@ -49,6 +49,7 @@ fcvm events --since 4012 --json # as JSON lines, after event 4012
 | `vm.updated` | | `what`: the changes, as `fcvm update` lists them |
 | `vm.deleted` | `ephemeral` (a throwaway VM that ended), `pool` (an unclaimed VM of a removed pool) | |
 | `pool.claimed` | | `pool` |
+| `operation.done` (no `vm`) | `done` or `failed` | `op`, `kind`, `title`, `error`: an [operation](cli.md#operations) ended |
 
 A stop produces both `vm.exited` (the guest ended) and `vm.stopped` (who
 asked for it, and why). Releases may add types and reasons; they don't

@@ -80,6 +80,12 @@ the MCP server are jailed automatically once `fcvm-jaild` is installed, and
 you can pin their network with `FCVM_MCP_NETWORK` (see
 [Web console and MCP server](#web-console-and-mcp-server)).
 
+For a host that serves several [tenants](vms.md#tenants-and-quotas) through
+a program, `NODE=1` ([node mode](configuration.md#node-mode)) turns these
+into rules the CLI enforces for every interface: every VM jailed, no host
+paths or host credentials in VMs, isolation pinned, a restricted network
+by default, admission against quotas and capacity.
+
 ## The virtual machine boundary
 
 Every fcvm guest is a Firecracker microVM: its own kernel, running under
@@ -517,6 +523,8 @@ mode 0600.
 | `JAIL_UID_BASE` | `900000` | `jail-setup` | first jail uid (256 are used) |
 | `FCVM_MCP_JAIL` | `1` | `mcp` | `0`: MCP sandboxes aren't jailed |
 | `FCVM_MCP_NETWORK` | unset | `mcp` | pins the sandboxes' network policy |
+| `NODE` | `0` | everything | `1`: [node mode](configuration.md#node-mode): the above pinned (`JAIL=1`, `NET_ISOLATE=1`, `NET_HOST_ACCESS=0`), no host paths or `--forward`, restricted network by default |
+| `NODE_PATHS`, `NODE_NETWORKS` | `builds/`, all three modes | everything | the host paths and network modes node mode allows |
 
 After changing a `net-up` or `jail-setup` variable, re-run the command with
 it set (both use sudo), for example:

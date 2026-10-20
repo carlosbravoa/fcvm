@@ -457,6 +457,7 @@ def status():
         "contract": int(os.environ.get("CONTRACT") or 1),
         "hostname": os.uname().nodename,
         "cordoned": read(os.path.join(VMS, ".node", "cordoned")).strip() or None,
+        "node_mode": os.environ.get("NODE", "").strip() == "1",
         "admission": enforced(),
         "host": {**host, "load": [float(x) for x in load] if len(load) == 3 else None,
                  "mem_available_mib": meminfo("MemAvailable")},

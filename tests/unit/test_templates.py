@@ -15,7 +15,7 @@ class Validate(unittest.TestCase):
 
     def test_rejects(self):
         for bad in ({}, {"image": "../x"}, {"image": "a", "vcpus": 0}, {"image": "a", "network": "open"},
-                    {"image": "a", "network": "restricted"}, {"image": "a", "process": "command"},
+                    {"image": "a", "network": "full", "cache": True}, {"image": "a", "process": "command"},
                     {"image": "a", "restart": "sometimes"}, {"image": "a", "jail": "yes"},
                     {"image": "a", "ports": "8080:80"}, {"image": "a", "colour": "red"}):
             with self.assertRaises(tp.Invalid, msg=bad):
@@ -42,9 +42,10 @@ class Arguments(unittest.TestCase):
                          "volumes": ["cache:/c", "~/src"], "network": "restricted", "allow": ["@pypi", "x.org"],
                          "jail": False, "restart": "always"})
         self.assertEqual(tp.options(t), ["--vcpus", "2", "--mem", "2048", "--disk", "4G", "--copy", "-p", "8080:80",
-                                         "-v", "cache:/c", "-v", "~/src", "--allow", "@pypi,x.org", "--no-jail",
+                                         "-v", "cache:/c", "-v", "~/src", "--net", "restricted", "--allow", "@pypi,x.org", "--no-jail",
                                          "--restart", "always"])
         self.assertEqual(tp.options(tp.validate({"image": "a", "network": "none"})), ["--net", "none"])
+        self.assertEqual(tp.options(tp.validate({"image": "a", "network": "restricted"})), ["--net", "restricted"])   # nothing out
 
     def test_process(self):
         self.assertEqual(tp.process(tp.validate({"image": "a"})), [])

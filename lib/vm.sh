@@ -108,6 +108,7 @@ parse_share() {
     host=${host/#\~/$HOME}
     [ -d "$host" ] || die "not a directory: $host"
     host=$(realpath "$host") home=$(realpath "$HOME")
+    host_path_ok "$host" "a host directory in a VM"
     if [ -z "$guest" ]; then
         if [ "$host" = "$home" ]; then guest="~"
         elif [[ $host == "$home"/* ]]; then guest="~/${host#"$home"/}"
@@ -247,6 +248,7 @@ parse_secret() {
         SECRET_VALUE=${!SECRET_NAME}
     elif [[ ${spec#*=} == @* ]]; then
         local f=${spec#*=@}
+        host_path_ok "$f" "--secret NAME=@FILE"
         [ -f "$f" ] || die "--secret $SECRET_NAME: no such file: $f"
         SECRET_VALUE=$(cat "$f"; echo x); SECRET_VALUE=${SECRET_VALUE%x}   # keep a final newline as is
     else
@@ -403,7 +405,7 @@ create() {
     if [ "${2:-}" = --template ]; then template_expand "${@:3}"; set -- "$vm" "${TEMPLATE_ARGS[@]}"; fi
     local image=${2:?$usage}
     shift 2
-    local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full allow=()
+    local vcpus=$VM_VCPUS mem=$VM_MEM_MIB disk="" copy=0 idle=0 ports=() vols=() shares=() argv=() netmode=full net_set=0 allow=()
     local entrypoint=() set_entrypoint=0 jail=${JAIL:-0} jail_set="" vcpus_set=null mem_set=null restart=no agent=1
     local ttl="" idle_stop="" ttl_raw="" idle_raw="" secrets=() forward=() cache=0 labels=() same_ok=0 lease=""
     while [ $# -gt 0 ]; do
@@ -422,7 +424,7 @@ create() {
             --idle)         idle=1; shift ;;
             --jail)         jail=1 jail_set=1; shift ;;
             --no-agent)     agent=0; shift ;;
-            --no-jail)      jail=0 jail_set=0; shift ;;
+            --no-jail)      node_refuse "every VM is jailed (--no-jail)"; jail=0 jail_set=0; shift ;;
             --restart)      valid_restart "${2:-}"; restart=$2; shift 2 ;;
             --ttl)          ttl=$(duration_s --ttl "${2:?--ttl wants a duration}") ttl_raw=$2; shift 2 ;;
             --idle-stop)    idle_stop=$(duration_s --idle-stop "${2:?--idle-stop wants a duration}") idle_raw=$2; shift 2 ;;
@@ -432,8 +434,8 @@ create() {
                                 /*|./*|../*|~*) shares+=("$2") ;;   # a host directory, mounted live
                                 *)              vols+=("$2") ;;     # a named volume
                             esac; shift 2 ;;
-            --net)          [[ ${2:-} =~ ^(full|none)$ ]] || die_code invalid "--net wants full or none (use --allow for a restricted network)"
-                            netmode=$2; shift 2 ;;
+            --net)          [[ ${2:-} =~ ^(full|none|restricted)$ ]] || die_code invalid "--net wants full, none or restricted (--allow adds hosts to a restricted network)"
+                            netmode=$2 net_set=1; shift 2 ;;
             --allow)        IFS=, read -ra _a <<<"${2:?--allow wants HOST[,HOST...]}"; allow+=("${_a[@]}"); shift 2 ;;
             --)             shift; argv=("$@"); break ;;
             *)              die_code invalid "unknown option $1 ($usage)" ;;
@@ -471,12 +473,16 @@ create() {
     [ $copy = 0 ] || [ -z "$(jq -r '.parent // empty' "$meta")" ] || die "--copy needs a base image; '$image' is a committed layer"
     local layer
     for layer in $(image_chain "$image"); do own_ok "$tenant" image "$layer" "$(image_tenant "$layer")"; done
+    [ ${#forward[@]} -eq 0 ] || node_refuse "the host's credentials stay on the host (--forward)"
     if [ ${#allow[@]} -gt 0 ]; then
-        [ "$netmode" = full ] || die "--allow and --net none are mutually exclusive"
+        [ "$netmode" != none ] || die "--allow and --net none are mutually exclusive"
         netmode=restricted
         expand_allow "${allow[@]}" >/dev/null   # validate now, expand at start
+    elif [ $net_set = 0 ] && node_mode; then
+        netmode=restricted   # a node's default: nothing out until the allowlist says so (fcvm egress --allow)
     fi
-    [ $cache = 0 ] || [ "$netmode" = restricted ] || die "--cache is the egress mirror of a restricted network: it needs --allow"
+    [[ ",$NODE_NETWORKS," == *",$netmode,"* ]] || die_code policy "network '$netmode' isn't allowed on this host (NODE_NETWORKS=$NODE_NETWORKS)"
+    [ $cache = 0 ] || [ "$netmode" = restricted ] || die "--cache is the egress mirror of a restricted network: it needs --allow or --net restricted"
     [ "$netmode" != none ] || [ ${#ports[@]} -eq 0 ] || die "-p needs a network; the VM has --net none"
     local p
     for p in "${ports[@]}"; do
@@ -733,6 +739,7 @@ start() {
     lock_vm "$vm"
     vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     vm_running "$vm" && die_code vm_running "VM '$vm' is already running (pid $(vm_pid "$vm"))"
+    vm_jailed "$vm" || node_refuse "'$vm' isn't jailed (created before node mode?); every VM runs jailed here: recreate it"
     rm -f "$VMS_DIR/$vm/stopped" "$VMS_DIR/$vm/resume" "$VMS_DIR/$vm/expired" "$VMS_DIR/$vm/claimed"
     touch_activity "$vm"   # --idle-stop counts from the boot until the first exec
     [ -x "$FIRECRACKER" ] || die "firecracker not installed (run: fcvm firecracker)"
@@ -1536,6 +1543,7 @@ export_layout() {   # image out-dir
 export_cmd() {
     local usage="usage: fcvm export IMAGE FILE.tar" image=${1:?$usage} file=${2:?$usage} dir
     image_json "$image" >/dev/null
+    host_path_ok "$file" "export"
     [ ! -e "$file" ] || die "$file exists"
     dir=$(mktemp -d -p "$BUILD_DIR" oci.XXXXXX)
     export_layout "$image" "$dir"
@@ -1647,6 +1655,7 @@ cp_cmd() {
     if [[ $dst == *:* && $src != *:* ]]; then          # host -> VM
         vm=${dst%%:*} path=${dst#*:}
         need_agent "$vm" cp
+        host_path_ok "$src" "cp"
         [ -e "$src" ] || die "no such file: $src"
         vm_running "$vm" || die_code vm_not_running "VM '$vm' is not running"
         src=$(realpath -s "$src"); base=$(basename "$src"); parent=$(dirname "$src")
@@ -1661,6 +1670,7 @@ cp_cmd() {
             die "copy failed (the image needs sh and tar)"
     elif [[ $src == *:* && $dst != *:* ]]; then        # VM -> host
         vm=${src%%:*} path=${src#*:}
+        host_path_ok "$dst" "cp"
         vm_running "$vm" || die_code vm_not_running "VM '$vm' is not running"
         need_agent "$vm" cp
         path=${path%/}; base=$(basename "$path"); parent=$(dirname "$path")
@@ -1847,6 +1857,8 @@ fork_cmd() {
     local owner tenant; owner=$(snapshot_tenant "$snap") tenant=$(labels_tenant "${labels[@]}")
     if [ -n "$owner" ] && [ -z "$tenant" ]; then labels+=("tenant=$owner")
     else own_ok "$tenant" snapshot "$snap" "$owner"; fi
+    [ "$(jq -r '.jail // false' "$SNAPSHOTS_DIR/$snap/meta.json")" = true ] ||
+        node_refuse "snapshot '$snap' is of an unjailed VM, and its forks would run unjailed"
     [ "$(jq '.ports | length' "$SNAPSHOTS_DIR/$snap/vm.json")" = 0 ] || use_daemon ||   # (the service's log says it)
         warn "published ports aren't carried over to forks (they'd conflict with the source)"
     if use_daemon; then
@@ -1875,6 +1887,7 @@ snapshot_export() {
     local usage="usage: fcvm snapshot export NAME FILE.tar" name=${1:?$usage} file=${2:?$usage} dir
     dir=$SNAPSHOTS_DIR/$name
     [ -f "$dir/meta.json" ] || die_code snapshot_not_found "no snapshot '$name' (see: fcvm snapshot ls)"
+    host_path_ok "$file" "snapshot export"
     [ ! -e "$file" ] || die "$file exists"
     local chain=() i
     mapfile -t chain < <(image_chain "$(jq -r .image "$dir/vm.json")")
@@ -1898,6 +1911,7 @@ snapshot_import() {
         esac
     done
     [ -n "$file" ] || die_code invalid "$usage"
+    host_path_ok "$file" "snapshot import"
     [ -f "$file" ] || die "no such file: $file"
     tmp=$(mktemp -d -p "$SNAPSHOTS_DIR" .import.XXXXXX) || { mkdir -p "$SNAPSHOTS_DIR"; tmp=$(mktemp -d -p "$SNAPSHOTS_DIR" .import.XXXXXX); }
     tar -S -C "$tmp" -xf "$file" 2>/dev/null && [ -f "$tmp/export.json" ] && [ -f "$tmp/meta.json" ] ||
@@ -2499,6 +2513,7 @@ update() {
     vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     local f=$VMS_DIR/$vm/vm.json
     if [ $set_fwd = 1 ]; then
+        [ ${#forward[@]} -eq 0 ] || node_refuse "the host's credentials stay on the host (--forward)"
         jq --argjson fwd "$(json_list "${forward[@]}")" --arg sock "${SSH_AUTH_SOCK:-}" \
             'del(.forward, .ssh_auth_sock) + (if ($fwd | length) == 0 then {} else {forward: $fwd} end)
              + (if ($fwd | index("ssh-agent")) then {ssh_auth_sock: $sock} else {} end)' "$f" > "$f.tmp" && mv "$f.tmp" "$f"

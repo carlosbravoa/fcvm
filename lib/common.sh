@@ -54,6 +54,16 @@ fi
 : "${NODE_VCPUS:=}" "${NODE_MEM_MIB:=}" "${NODE_VMS:=}" "${NODE_DISK_MIB:=}"
 : "${NODE_CPU_OVERCOMMIT:=2}" "${NODE_MEM_OVERCOMMIT:=1}" "${NODE_RESERVE_MIB:=1024}"
 export NODE_ADMIT NODE_VCPUS NODE_MEM_MIB NODE_VMS NODE_DISK_MIB NODE_CPU_OVERCOMMIT NODE_MEM_OVERCOMMIT NODE_RESERVE_MIB NET_TAPS
+# Node mode (docs/configuration.md, Node): NODE=1 makes this host a node of a
+# fleet that a program drives. Enforced here, in the CLI, so the API, the MCP
+# server and scripts all obey: admission on, every VM jailed, no host paths
+# (outside NODE_PATHS) and no host credentials in VMs, isolation pinned, a
+# restricted network unless asked otherwise, and only NODE_NETWORKS.
+: "${NODE:=0}"
+: "${NODE_NETWORKS:=full,restricted,none}"     # the network modes create accepts (policy otherwise)
+: "${NODE_PATHS:=$FCVM_HOME/builds}"            # in node mode, host paths must lie under one of these (colon-separated)
+if [ "$NODE" = 1 ]; then NODE_ADMIT=1 NET_ISOLATE=1 NET_HOST_ACCESS=0 JAIL=1; fi
+export NODE NODE_NETWORKS NODE_PATHS
 CONTRACT=1                                     # docs/node-contract.md: what outside programs may rely on
 
 BIN_DIR=$FCVM_HOME/bin
@@ -137,6 +147,21 @@ parse_until() {   # option value
 
 # A tenant's name (--tenant): the `tenant` label, which is set once.
 tenant_ok() { [[ $1 =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid tenant name '$1' (letters, digits, . _ -)"; }
+
+# Node mode's refusals (code `policy`). node_refuse WHAT fails in node mode;
+# host_path_ok PATH [WHAT] fails in node mode when a path a command was given
+# (a directory to share, a file to copy, import or export, a build context,
+# a --secret @FILE) doesn't lie under NODE_PATHS.
+node_mode() { [ "$NODE" = 1 ]; }
+node_refuse() { ! node_mode || die_code policy "node mode (NODE=1): $1"; }
+host_path_ok() {   # path [what]
+    node_mode || return 0
+    local p d; p=$(realpath -m -- "$1")
+    while IFS= read -r -d: d || [ -n "$d" ]; do
+        [ -z "$d" ] || { d=$(realpath -m -- "$d"); [ "$p" != "$d" ] && [[ $p != "$d"/* ]]; } || return 0
+    done <<<"$NODE_PATHS:"
+    die_code policy "node mode (NODE=1): host paths are refused${2:+ for $2}; $1 is not under NODE_PATHS ($NODE_PATHS)"
+}
 
 # The node is cordoned (fcvm cordon): no new VMs until fcvm uncordon.
 cordoned() { [ -f "$VMS_DIR/.node/cordoned" ]; }

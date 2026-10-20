@@ -181,7 +181,12 @@ even one without a shell.
 | `DELETE /volumes/{volume}` | | `fcvm volume rm` |
 
 A VM that names another tenant's image, snapshot or volume is refused
-with 403 `policy` ([Tenants and quotas](vms.md#tenants-and-quotas)).
+with 403 `policy` ([Tenants and quotas](vms.md#tenants-and-quotas)), as is
+anything [node mode](configuration.md#node-mode) forbids: a host directory
+in `volumes` or `POST /vms/{vm}/mounts`, `forward`, `"jail": false`, a
+build project outside `builds/`. In node mode a VM whose body names no
+`network` gets a restricted one with an empty allowlist; `"network":
+"restricted"` with no `allow` means the same anywhere.
 
 ## Templates
 

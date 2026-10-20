@@ -44,9 +44,23 @@ def log(msg):
     print(f"\033[1;34m==>\033[0m {msg}", file=sys.stderr, flush=True)
 
 
-def die(msg):
+def die(msg, code="error"):
     print(f"\033[1;31merror:\033[0m {msg}", file=sys.stderr)
+    if not sys.stderr.isatty():
+        print(f"fcvm-error: {code}", file=sys.stderr)   # docs/errors.md, as lib/common.sh's die_code
     sys.exit(1)
+
+
+def host_path_ok(path, what):
+    """Node mode (NODE=1, lib/common.sh host_path_ok): a host path a build
+    reads must lie under NODE_PATHS."""
+    if os.environ.get("NODE") != "1":
+        return
+    p = os.path.realpath(path)
+    for d in os.environ.get("NODE_PATHS", "").split(":"):
+        if d and (p == os.path.realpath(d) or p.startswith(os.path.realpath(d) + os.sep)):
+            return
+    die(f"node mode (NODE=1): host paths are refused for {what}; {path} is not under NODE_PATHS ({os.environ.get('NODE_PATHS', '')})", "policy")
 
 
 def fcvm(*args, check=True, quiet=True, **kw):
@@ -526,6 +540,9 @@ def main():
     args = ap.parse_args()
     if args.tenant and not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$", args.tenant):
         die(f"invalid tenant name '{args.tenant}'")
+    host_path_ok(args.context, "a build context")
+    if args.file:
+        host_path_ok(args.file, "a build file")
     if not os.path.isdir(args.context):
         die(f"build context {args.context} is not a directory")
     args.tag = args.tag or re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(os.path.abspath(args.context)))

@@ -16,6 +16,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -n "$ref" ] || die_code invalid "$usage"
+# A local image (an archive or an OCI layout) is a host path: node mode's rules apply
+case $ref in
+    docker-archive:*|oci-archive:*|oci:*) p=${ref#*:}; [ -e "$p" ] || p=${p%:*}; host_path_ok "$p" "a local image" ;;
+    *) [ ! -e "$ref" ] || host_path_ok "$ref" "a local image" ;;
+esac
 [ -n "$name" ] || name=$(python3 "$FCVM_ROOT/lib/oci_import.py" --suggest-name "$ref")
 users=$(image_users "$name" | tr "\n" " ")
 [ -z "$users" ] || die "image '$name' is the shared base of VMs: $users (remove them, or import under another name)"

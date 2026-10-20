@@ -64,8 +64,6 @@ def validate(t):
             raise Invalid(f"{k} must be a positive number")
     if out["network"] not in ("full", "none", "restricted"):
         raise Invalid("network must be full, none or restricted")
-    if out["network"] == "restricted" and not out["allow"]:
-        raise Invalid("a restricted network needs an allowlist")
     if out["cache"] and out["network"] != "restricted":
         raise Invalid("cache (the egress mirror) needs a restricted network")
     for k in ("allow", "ports", "volumes", "command", "secrets", "forward"):
@@ -161,7 +159,7 @@ def options(t):
     if t["network"] == "none":
         a += ["--net", "none"]
     elif t["network"] == "restricted":
-        a += ["--allow", ",".join(t["allow"])]
+        a += ["--net", "restricted"] + (["--allow", ",".join(t["allow"])] if t["allow"] else [])   # an empty allowlist: nothing out
         if t["cache"]:
             a.append("--cache")
     if t["jail"] is not None:

@@ -145,7 +145,7 @@ Then pick how you want to drive it:
 | **Keep it running:** network and console at boot; VMs with a restart policy come back | `fcvm service install` (offered by `setup`) |
 | **Stronger isolation:** run VMs under the Firecracker jailer | `fcvm jail-setup` (offered by `setup`), then `--jail` |
 | **Your own tooling:** labels, leases, events, operations and error codes, so scripts and a control plane can drive a host | `fcvm events -f`, `fcvm create ... --label --lease`, [the node contract](docs/node-contract.md) |
-| **Several tenants on one host:** quotas per tenant, the host's capacity, and a node view for whatever places VMs | `fcvm tenant set acme --vcpus 8`, `fcvm create ... --tenant acme`, `fcvm status --json` |
+| **Several tenants on one host:** quotas per tenant (vCPUs, memory, VMs, disk), tenant-owned images, snapshots and volumes, the host's capacity, a node view for whatever places VMs, and a node mode that locks the host down for them | `fcvm tenant set acme --vcpus 8 --disk 102400`, `fcvm create ... --tenant acme`, `fcvm status --json`, `NODE=1` |
 
 A few everyday commands:
 

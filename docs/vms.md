@@ -392,6 +392,12 @@ fcvm tenant show acme                                # quota, allocated, vms, im
   point. `fcvm status --json` shows capacity, allocated and allocatable
   either way, and the console's host line shows the share.
 
+- **Node mode** (`NODE=1` in `fcvm.conf`) is the setting for a host that
+  serves tenants it doesn't trust with the host itself: admission on,
+  every VM jailed, no host directories, files or credentials in VMs, a
+  restricted network by default. What it refuses fails with `policy`.
+  See [Node mode](configuration.md#node-mode).
+
 Tenants and quotas are a node's side of a fleet: who may do what, and
 which tenant a token belongs to, is the control plane's. [The node
 contract](node-contract.md) lists what it may rely on.

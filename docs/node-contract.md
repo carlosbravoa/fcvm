@@ -103,7 +103,7 @@ process is gone without an end is `failed` with `error: "interrupted"`.
 - `vms/.node/cordoned` exists while the host refuses new VMs
   (`fcvm cordon`); its content is the reason.
 - `fcvm status --json`: `{version, contract, hostname, cordoned,
-  admission, host: {cpus, mem_mib, mem_available_mib, disk_mib,
+  node_mode, admission, host: {cpus, mem_mib, mem_available_mib, disk_mib,
   disk_free_mib, load}, capacity, allocated, allocatable (each {vcpus,
   mem_mib, vms, disk_mib}), vms: {running, starting, stopped}, objects:
   {images, snapshots, volumes}, tenants, slots: {taps_full,
@@ -127,7 +127,20 @@ variables in [Configuration](configuration.md). The ones this contract
 adds: `LEASE_GRACE` (seconds, default 300), and the
 [node settings](configuration.md#node) `NODE_ADMIT`, `NODE_VCPUS`,
 `NODE_MEM_MIB`, `NODE_VMS`, `NODE_DISK_MIB`, `NODE_CPU_OVERCOMMIT`,
-`NODE_MEM_OVERCOMMIT`, `NODE_RESERVE_MIB`.
+`NODE_MEM_OVERCOMMIT`, `NODE_RESERVE_MIB`, and [node
+mode](configuration.md#node-mode)'s `NODE`, `NODE_PATHS`, `NODE_NETWORKS`.
+
+### Node mode
+
+`NODE=1` is the setting a fleet's host runs with. It pins `NODE_ADMIT=1`,
+`JAIL=1`, `NET_ISOLATE=1` and `NET_HOST_ACCESS=0`, makes `restricted`
+the default network, and refuses with `policy`: `--no-jail`, starting an
+unjailed VM or forking an unjailed snapshot, `--forward`, a network mode
+outside `NODE_NETWORKS`, and any host path outside `NODE_PATHS` (`-v
+HOST/DIR`, `mount`, `cp`, `--secret NAME=@FILE`, a build context, a local
+image or snapshot to import, a file to export to). `fcvm status --json`
+reports `node_mode`. A program driving a node uses the API's uploads and
+the exec agent for files, never host paths.
 
 ## What a release may change
 

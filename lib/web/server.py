@@ -1137,16 +1137,18 @@ class App:
             args += ["--disk", str(d["disk"])]
         if d.get("copy"):
             args.append("--copy")
-        net = d.get("network", "full")
+        net = d.get("network")   # none: the host's default (full, or restricted in node mode)
         if net == "none":
             args += ["--net", "none"]
         elif net == "restricted":
             allow = [a.strip() for a in d.get("allow", []) if a.strip()]
-            if not allow:
-                raise HTTPError(400, "a restricted network needs at least one allowed host or preset")
-            args += ["--allow", ",".join(allow)]
+            args += ["--net", "restricted"] + (["--allow", ",".join(allow)] if allow else [])   # empty: nothing out until egress --allow
             if d.get("cache"):
                 args.append("--cache")
+        elif net == "full":
+            args += ["--net", "full"]
+        elif net:
+            raise HTTPError(400, "network must be full, restricted or none")
         for p in d.get("ports", []):
             if p.strip():
                 args += ["-p", p.strip()]

@@ -86,12 +86,13 @@ These use sudo.
 | `-v NAME:/PATH[:ro]` | a named volume, created on first use. Repeatable |
 | `-v HOST/DIR[:GUEST/PATH][:ro]` | a live host directory (any value starting with `/`, `./`, `../` or `~`). Without a guest path, a directory in your home goes to the same place in the image user's home, any other to the same path. A guest path is `/PATH` or `~/PATH`. Repeatable |
 | `--net none` | no network card |
+| `--net restricted` | the egress proxy with an empty allowlist: nothing out until `fcvm egress VM --allow` (the default in [node mode](configuration.md#node-mode)) |
 | `--allow HOST,*.DOMAIN,HOST:PORT,@PRESET` | restricted network: only these, through the egress proxy. Repeatable |
 | `--cache` | with `--allow`: pip and npm fetch through the proxy's [package mirror](networking.md#the-package-mirror), which keeps the files for the next VM |
 | `--idle` | app images: run nothing, stay up for `exec` |
 | `-- CMD...` | app images: replaces the image's CMD, keeps its ENTRYPOINT |
 | `--entrypoint CMD` | app images: replaces the ENTRYPOINT (`""` clears it) |
-| `--jail`, `--no-jail` | run under the Firecracker jailer (default: `JAIL`, 0) |
+| `--jail`, `--no-jail` | run under the Firecracker jailer (default: `JAIL`, 0; always in [node mode](configuration.md#node-mode)) |
 | `--no-agent` | no exec agent in the VM: no `exec`, `cp`, snapshots or guest metrics. Says what you lose and asks first ([details](vms.md#without-the-exec-agent)) |
 | `--restart POLICY` | `no`, `on-failure`, `unless-stopped`, `always` (`create` only) |
 | `--ttl DURATION` | stop the VM that long after each boot (`90s`, `30m`, `2h`, `1d`); applied by `fcvm serve` ([lifetimes](vms.md#lifetimes---ttl-and---idle-stop)) |
@@ -218,3 +219,6 @@ the process was killed) shows as `failed` with the error `interrupted`.
   through the guest's exit code.
 - **Settings.** They come from `fcvm.conf` and the environment. See
   [Configuration](configuration.md).
+- **Node mode.** With `NODE=1`, commands that would put a host path, the
+  host's credentials or an unjailed VM in play fail with `policy`
+  ([Node mode](configuration.md#node-mode)).

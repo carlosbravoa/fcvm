@@ -39,7 +39,7 @@ CLI also names the failure's **code**, so they can tell "no such VM" from
 | `no_network` | 409 | the VM has `--net none` and the command needs a network (`publish`, `ssh`) |
 | `in_use` | 409 | an image or volume can't be removed or attached because VMs use it |
 | `pool_empty` | 409 | the pool has no ready VM right now |
-| `policy` | 403 | the host's policy refuses the request: a VM naming another [tenant's](vms.md#tenants-and-quotas) image, snapshot or volume |
+| `policy` | 403 | the host's policy refuses the request: a VM naming another [tenant's](vms.md#tenants-and-quotas) image, snapshot or volume; in [node mode](configuration.md#node-mode), a host path, `--forward`, `--no-jail`, an unjailed VM or snapshot, or a network mode outside `NODE_NETWORKS` |
 | `quota_exceeded` | 429 | the [tenant](vms.md#tenants-and-quotas) would exceed its quota (vCPUs, memory, VMs, or disk); retry when one of its VMs stops or something of its is removed, or raise the quota |
 | `no_network_slot` | 503 | no free tap on the bridge; the host is at its VM limit for that network |
 | `jail_unavailable` | 503 | the VM is jailed but `fcvm-jaild` isn't running |

@@ -171,8 +171,15 @@ if [ -S /run/fcvm/jaild.sock ]; then
     fi
 elif systemctl is-enabled -q fcvm-jaild.service 2>/dev/null; then
     bad jailer "fcvm-jaild installed but not running" "sudo systemctl start fcvm-jaild (see: journalctl -u fcvm-jaild)"
+elif [ "$NODE" = 1 ]; then
+    bad jailer "not installed, and node mode jails every VM" "fcvm jail-setup"
 else
     info jailer "not installed (optional: fcvm jail-setup)"
+fi
+if [ "$NODE" = 1 ]; then
+    ok "node mode" "NODE=1: admission on, every VM jailed, host paths only under $NODE_PATHS, networks $NODE_NETWORKS (restricted by default)"
+elif [ "$NODE_ADMIT" = 1 ]; then
+    ok admission "NODE_ADMIT=1: VMs that don't fit the host's capacity are refused (fcvm status --json)"
 fi
 
 # --- running VMs on old components ---------------------------------------------------------

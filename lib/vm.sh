@@ -51,7 +51,7 @@ lock_vm() {
     [ "$VM_LOCKED" = "$1" ] && return 0
     mkdir -p "$VMS_DIR/.locks"
     exec {VM_LOCK}>&- {VM_LOCK}>"$VMS_DIR/.locks/vm-$1"
-    flock -w 30 "$VM_LOCK" || die "VM '$1' is busy (another fcvm command is changing it)"
+    flock -w 30 "$VM_LOCK" || die_code vm_busy "VM '$1' is busy (another fcvm command is changing it)"
     VM_LOCKED=$1
 }
 unlock_vm() { exec {VM_LOCK}>&- {VM_LOCK}</dev/null; VM_LOCKED=""; }
@@ -112,7 +112,7 @@ parse_share() {
         elif [[ $host == "$home"/* ]]; then guest="~/${host#"$home"/}"
         else guest=$host; fi
     fi
-    [[ $guest =~ $re ]] && [ "$guest" != / ] || die "bad guest path '$guest' (want /PATH, ~ or ~/PATH)"
+    [[ $guest =~ $re ]] && [ "$guest" != / ] || die_code invalid "bad guest path '$guest' (want /PATH, ~ or ~/PATH)"
     SHARE_HOST=$host SHARE_GUEST=${guest%/} SHARE_RO=$ro
 }
 # The guest path a user means by ARG: as given (/PATH, ~/PATH), or for a
@@ -166,7 +166,7 @@ template_expand() {
 # VMs created with --no-agent have no exec agent: refuse what needs it, clearly.
 need_agent() {   # vm what
     jq -e '.agent == false' "$(vm_dir "$1")/vm.json" >/dev/null 2>&1 &&
-        die "'$1' was created with --no-agent: $2 needs the exec agent" || true
+        die_code no_agent "'$1' was created with --no-agent: $2 needs the exec agent" || true
 }
 
 # create --no-agent: say what goes, and ask (FCVM_NO_AGENT_OK=1 answers yes, for scripts).
@@ -189,14 +189,14 @@ EOF2
 }
 
 RESTART_POLICIES="no on-failure unless-stopped always"
-valid_restart() { [[ " $RESTART_POLICIES " == *" $1 "* ]] || die "--restart wants one of: $RESTART_POLICIES"; }
+valid_restart() { [[ " $RESTART_POLICIES " == *" $1 "* ]] || die_code invalid "--restart wants one of: $RESTART_POLICIES"; }
 
 # A duration (90, 90s, 30m, 2h, 1d) in seconds; "0" and "none" mean unset
 # (prints nothing). For --ttl and --idle-stop.
 duration_s() {   # option value
     local v=$2
     [ "$v" != 0 ] && [ "$v" != none ] || return 0
-    [[ $v =~ ^([0-9]+)([smhd])?$ ]] || die "$1 wants a duration such as 90s, 30m, 2h or 1d (0 or none to unset)"
+    [[ $v =~ ^([0-9]+)([smhd])?$ ]] || die_code invalid "$1 wants a duration such as 90s, 30m, 2h or 1d (0 or none to unset)"
     case ${BASH_REMATCH[2]:-s} in s) echo "${BASH_REMATCH[1]}" ;; m) echo $((BASH_REMATCH[1] * 60)) ;;
                                 h) echo $((BASH_REMATCH[1] * 3600)) ;; d) echo $((BASH_REMATCH[1] * 86400)) ;; esac
 }
@@ -212,7 +212,7 @@ touch_activity() { touch "$VMS_DIR/$1/activity" 2>/dev/null || true; }
 # guest at boot over vsock into a tmpfs (never on its disk). A spec is
 # NAME=VALUE, NAME=@FILE (the file's content) or NAME (from this environment).
 SECRETS_PORT=9000
-secret_name_ok() { [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "bad secret name '$1' (letters, digits and _)"; }
+secret_name_ok() { [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die_code invalid "bad secret name '$1' (letters, digits and _)"; }
 # Sets SECRET_NAME and SECRET_VALUE from a spec.
 parse_secret() {
     local spec=$1
@@ -253,7 +253,7 @@ parse_forward() {   # LIST[,LIST...] ("none" clears)
         case $f in
             ssh-agent|git) [[ " ${out[*]:-} " == *" $f "* ]] || out+=("$f") ;;
             none|"")       ;;
-            *)             die "--forward wants ssh-agent and/or git (comma-separated), or none" ;;
+            *)             die_code invalid "--forward wants ssh-agent and/or git (comma-separated), or none" ;;
         esac
     done
     printf '%s\n' "${out[@]:-}" | sed '/^$/d'
@@ -274,7 +274,7 @@ r = json.loads(s.makefile().readline())
 print(json.dumps(r)); sys.exit(0 if r.get("ok") else 1)
 PY
 }
-image_json() { local f=$IMAGES_DIR/$1.json; [ -f "$f" ] || die "no image '$1' (see: fcvm images)"; echo "$f"; }
+image_json() { local f=$IMAGES_DIR/$1.json; [ -f "$f" ] || die_code image_not_found "no image '$1' (see: fcvm images)"; echo "$f"; }
 
 # Writable layer: sparse ext4 holding overlay upper/ and work/ (root-owned via
 # tar, no root needed). Optional args replace the container command.
@@ -404,18 +404,18 @@ create() {
                                 /*|./*|../*|~*) shares+=("$2") ;;   # a host directory, mounted live
                                 *)              vols+=("$2") ;;     # a named volume
                             esac; shift 2 ;;
-            --net)          [[ ${2:-} =~ ^(full|none)$ ]] || die "--net wants full or none (use --allow for a restricted network)"
+            --net)          [[ ${2:-} =~ ^(full|none)$ ]] || die_code invalid "--net wants full or none (use --allow for a restricted network)"
                             netmode=$2; shift 2 ;;
             --allow)        IFS=, read -ra _a <<<"${2:?--allow wants HOST[,HOST...]}"; allow+=("${_a[@]}"); shift 2 ;;
             --)             shift; argv=("$@"); break ;;
-            *)              die "unknown option $1 ($usage)" ;;
+            *)              die_code invalid "unknown option $1 ($usage)" ;;
         esac
     done
-    [[ $vm =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid VM name '$vm'"
+    [[ $vm =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid VM name '$vm'"
     [[ $vcpus =~ ^[1-9][0-9]*$ && $mem =~ ^[1-9][0-9]*$ ]] || die "--vcpus and --mem want positive numbers"
     sock_room "$vm"
     lock_vm "$vm"
-    vm_exists "$vm" && die "VM '$vm' already exists"
+    vm_exists "$vm" && die_code vm_exists "VM '$vm' already exists"
     [ "$restart" = no ] || [ -z "${EPHEMERAL:-}" ] || die "--restart doesn't apply to throwaway VMs (fcvm run); use create"
     local meta type raw_cmd=("${argv[@]}") raw_ep=("${entrypoint[@]}")
     meta=$(image_json "$image")
@@ -442,7 +442,7 @@ create() {
     [ "$netmode" != none ] || [ ${#ports[@]} -eq 0 ] || die "-p needs a network; the VM has --net none"
     local p
     for p in "${ports[@]}"; do
-        [[ $p =~ ^(([0-9.]+):)?[0-9]+:[0-9]+(/tcp)?$ ]] || die "bad port spec '$p' (want [BIND:]HOSTPORT:GUESTPORT, TCP only)"
+        [[ $p =~ ^(([0-9.]+):)?[0-9]+:[0-9]+(/tcp)?$ ]] || die_code invalid "bad port spec '$p' (want [BIND:]HOSTPORT:GUESTPORT, TCP only)"
     done
     local sharejson='[]' hdir gpath sro
     for p in "${shares[@]}"; do
@@ -452,7 +452,7 @@ create() {
             '. + [{host: $h, path: $g, ro: $ro}]' <<<"$sharejson")
     done
     for p in "${vols[@]}"; do
-        [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:,]*(:ro)?$ ]] || die "bad volume spec '$p' (want NAME:/PATH[:ro] for a named volume, or HOST/DIR[:GUEST/PATH][:ro] for a host directory)"
+        [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:,]*(:ro)?$ ]] || die_code invalid "bad volume spec '$p' (want NAME:/PATH[:ro] for a named volume, or HOST/DIR[:GUEST/PATH][:ro] for a host directory)"
         [ -n "${FCVM_TEMPLATE_OUT:-}" ] || [ -f "$VOLUMES_DIR/${p%%:*}.ext4" ] || volume_create "${p%%:*}"
     done
     [ -z "${FCVM_TEMPLATE_OUT:-}" ] || [ $agent = 1 ] || die "--no-agent can't be saved in a template"
@@ -548,10 +548,10 @@ expand_allow() {
     for e in "$@"; do
         if [[ $e == @* ]]; then
             hosts=$(awk -v p="$e" '$1 == p {for (i = 2; i <= NF; i++) print $i}' "$FCVM_ROOT/lib/egress-presets.conf")
-            [ -n "$hosts" ] || die "unknown egress preset '$e' (see lib/egress-presets.conf)"
+            [ -n "$hosts" ] || die_code invalid "unknown egress preset '$e' (see lib/egress-presets.conf)"
             echo "$hosts"
         else
-            [[ $e =~ ^(\*\.)?[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die "bad allowlist entry '$e' (want host, *.domain, host:port or @preset)"
+            [[ $e =~ ^(\*\.)?[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die_code invalid "bad allowlist entry '$e' (want host, *.domain, host:port or @preset)"
             echo "$e"
         fi
     done
@@ -641,11 +641,11 @@ start() {
         case $1 in
             -a|--attach) attach=1; shift ;;
             -d)          shift ;;   # background is the default now
-            -*)          die "unknown option $1 ($usage)" ;;
+            -*)          die_code invalid "unknown option $1 ($usage)" ;;
             *)           vm=$1; shift ;;
         esac
     done
-    [ -n "$vm" ] || die "$usage"
+    [ -n "$vm" ] || die_code invalid "$usage"
     if [ -n "${VIA_DAEMON:-}" ] && [ -z "${RESTORE:-}" ] && use_daemon; then
         local reply rc=0
         reply=$(daemon_api POST "vms/$vm/start") || rc=$?
@@ -658,8 +658,8 @@ start() {
         warn "the fcvm service isn't answering; starting '$vm' from this terminal"
     fi
     lock_vm "$vm"
-    vm_exists "$vm" || die "no VM '$vm'"
-    vm_running "$vm" && die "VM '$vm' is already running (pid $(vm_pid "$vm"))"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
+    vm_running "$vm" && die_code vm_running "VM '$vm' is already running (pid $(vm_pid "$vm"))"
     rm -f "$VMS_DIR/$vm/stopped" "$VMS_DIR/$vm/resume" "$VMS_DIR/$vm/expired" "$VMS_DIR/$vm/claimed"
     touch_activity "$vm"   # --idle-stop counts from the boot until the first exec
     [ -x "$FIRECRACKER" ] || die "firecracker not installed (run: fcvm firecracker)"
@@ -681,7 +681,7 @@ start() {
     case $mode in
         none) ;;
         restricted)
-            claim_tap fcrtap || die "no free restricted tap (fcrtap*); run: fcvm net-up"
+            claim_tap fcrtap || die_code no_network_slot "no free restricted tap (fcrtap*); run: fcvm net-up"
             IP=$NET_R_PREFIX.$((10 + TAP_INDEX))
             local proxy=http://$NET_R_PREFIX.1:$EGRESS_PORT v
             args+=" ip=$IP::$NET_R_PREFIX.1:255.255.255.0:$vm:eth0:off:$NET_R_PREFIX.1 fcvm.proxy=$proxy"
@@ -744,7 +744,7 @@ start() {
         [ -f "$VOLUMES_DIR/$vname.ext4" ] || die "volume '$vname' is gone"
         if [[ $vol != *:ro ]]; then
             busy=$(volume_users "$vname" running rw | grep -vx -- "$vm" || true)
-            [ -z "$busy" ] || die "volume '$vname' is in use by running VM(s): $busy"
+            [ -z "$busy" ] || die_code in_use "volume '$vname' is in use by running VM(s): $busy"
         fi
         add_drive "vol-$vname" "$VOLUMES_DIR/$vname.ext4" "$([[ $vol == *:ro ]] && echo true || echo false)"
         vols+=("$dev:${vol#*:}")
@@ -799,7 +799,7 @@ start() {
     local jailed=0
     if vm_jailed "$vm"; then
         jailed=1
-        [ -S /run/fcvm/jaild.sock ] || die "'$vm' runs jailed, but fcvm-jaild isn't running (run: fcvm jail-setup)"
+        [ -S /run/fcvm/jaild.sock ] || die_code jail_unavailable "'$vm' runs jailed, but fcvm-jaild isn't running (run: fcvm jail-setup)"
         [ "$(/usr/local/lib/fcvm/firecracker --version 2>/dev/null | head -1)" = "$("$FIRECRACKER" --version | head -1)" ] ||
             warn "fcvm-jaild has a different Firecracker than bin/ (re-run fcvm jail-setup)"
         # The helper re-validates everything in this request (paths, ownership, writability).
@@ -933,7 +933,7 @@ attach_vm() {
 stop() {
     local vm=${1:?usage: fcvm stop VM} dir pid i
     lock_vm "$vm"
-    vm_exists "$vm" || die "no VM '$vm'"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     dir=$(vm_dir "$vm")
     # Stopped by you: restart policies leave it alone until you start it again.
     # A stop for host shutdown (fcvm _shutdown) marks it to resume instead. A
@@ -1052,8 +1052,8 @@ run() {
 # fcvm console VM: attach to the live serial console (Ctrl-] detaches).
 console() {
     local vm=${1:?usage: fcvm console VM}
-    vm_exists "$vm" || die "no VM '$vm'"
-    vm_running "$vm" || die "VM '$vm' is not running (see: fcvm logs $vm)"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
+    vm_running "$vm" || die_code vm_not_running "VM '$vm' is not running (see: fcvm logs $vm)"
     attach_vm "$vm" tail
 }
 
@@ -1064,7 +1064,7 @@ logs() {
         case $1 in -f|--follow) follow=1 ;; *) vm=$1 ;; esac
         shift
     done
-    [ -n "$vm" ] || die "usage: fcvm logs [-f] VM"
+    [ -n "$vm" ] || die_code invalid "usage: fcvm logs [-f] VM"
     local f; f=$(vm_dir "$vm")/console.log
     [ -f "$f" ] || die "no console log for '$vm'"
     if [ $follow = 1 ]; then tail -n +1 -f "$f"; else cat "$f"; fi
@@ -1072,7 +1072,7 @@ logs() {
 
 ssh_vm() {
     local vm=${1:?usage: fcvm ssh VM [args]}; shift
-    local ip; ip=$(cat "$(vm_dir "$vm")/ip" 2>/dev/null) || die "VM '$vm' has no network"
+    local ip; ip=$(cat "$(vm_dir "$vm")/ip" 2>/dev/null) || die_code no_network "VM '$vm' has no network"
     local hostkey; hostkey=$(jq -r '.ssh_host_key // empty' "$(vm_dir "$vm")/vm.json")
     if [ -z "$hostkey" ]; then   # created before fcvm 0.6.1: its host key was made at first boot, unknown here
         warn "'$vm' predates per-VM host keys, so its host key isn't checked (recreate it to get one)"
@@ -1092,7 +1092,7 @@ ssh_vm() {
 # it from ~/.ssh/config.
 ssh_config_cmd() {
     local usage="usage: fcvm ssh-config [VM...] [--install]" install=0 names=() a d vm out=""
-    for a; do case $a in --install) install=1 ;; -*) die "unknown option $a ($usage)" ;; *) names+=("$a") ;; esac; done
+    for a; do case $a in --install) install=1 ;; -*) die_code invalid "unknown option $a ($usage)" ;; *) names+=("$a") ;; esac; done
     if [ ${#names[@]} -eq 0 ]; then
         for d in "$VMS_DIR"/*/; do
             [ -f "$d/vm.json" ] && [[ $(basename "$d") != _* ]] && [ "$(jq -r .type "$d/vm.json")" = system ] || continue
@@ -1101,7 +1101,7 @@ ssh_config_cmd() {
         [ ${#names[@]} -gt 0 ] || die "no system VMs (app VMs have no sshd: use fcvm shell)"
     fi
     for vm in "${names[@]}"; do
-        vm_exists "$vm" || die "no VM '$vm'"
+        vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
         if [ "$(jq -r .type "$(vm_dir "$vm")/vm.json")" != system ]; then warn "'$vm' is an app VM without sshd (use fcvm shell); skipped"; continue; fi
         out+="$(ssh_config_entry "$vm")"$'\n\n'
     done
@@ -1138,10 +1138,10 @@ EOF
 # (retrying for a few seconds while sshd comes up after a start).
 ssh_proxy() {
     local vm=${1:?usage: fcvm _ssh-proxy VM} ip hostkey dir
-    vm_exists "$vm" || die "no VM '$vm'"
-    vm_running "$vm" || die "VM '$vm' is not running (fcvm start $vm)"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
+    vm_running "$vm" || die_code vm_not_running "VM '$vm' is not running (fcvm start $vm)"
     dir=$(vm_dir "$vm")
-    ip=$(cat "$dir/ip" 2>/dev/null) || die "VM '$vm' has no network"
+    ip=$(cat "$dir/ip" 2>/dev/null) || die_code no_network "VM '$vm' has no network"
     hostkey=$(jq -r '.ssh_host_key // empty' "$dir/vm.json")
     [ -z "$hostkey" ] || echo "fcvm-$vm $hostkey" > "$dir/known_hosts"   # current, even if the VM was recreated
     exec python3 "$FCVM_ROOT/lib/ssh_proxy.py" "$ip"   # stdin/stdout stay ssh's
@@ -1155,16 +1155,16 @@ exec_vm() {
         case $1 in
             -u|--user)     flags+=(-u "${2:?$usage}"); shift 2 ;;
             -w|--workdir)  flags+=(-w "${2:?$usage}"); shift 2 ;;
-            -e|--env)      [[ ${2:-} == *=* ]] || die "-e wants KEY=VALUE"; flags+=(-e "$2"); shift 2 ;;
-            --timeout)     [[ ${2:-} =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--timeout wants seconds"; flags+=(--timeout "$2"); shift 2 ;;
+            -e|--env)      [[ ${2:-} == *=* ]] || die_code invalid "-e wants KEY=VALUE"; flags+=(-e "$2"); shift 2 ;;
+            --timeout)     [[ ${2:-} =~ ^[0-9]+([.][0-9]+)?$ ]] || die_code invalid "--timeout wants seconds"; flags+=(--timeout "$2"); shift 2 ;;
             -d|--detach)   detach=1; shift ;;
             -i|-t|-it|-ti) [[ $1 == *i* ]] && flags+=(-i); [[ $1 == *t* ]] && flags+=(-t); shift ;;
-            *)             die "unknown option $1 ($usage)" ;;
+            *)             die_code invalid "unknown option $1 ($usage)" ;;
         esac
     done
     local vm=${1:?$usage}; shift
-    vm_exists "$vm" || die "no VM '$vm'"
-    vm_running "$vm" || die "VM '$vm' is not running"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
+    vm_running "$vm" || die_code vm_not_running "VM '$vm' is not running"
     need_agent "$vm" exec
     [ "$(jq -r '.net.mode // "full"' "$(vm_dir "$vm")/vm.json")" != restricted ] || ensure_proxy
     touch_activity "$vm"
@@ -1221,7 +1221,7 @@ job_json() {   # jobs-dir id
 jobs_cmd() {
     local usage="usage: fcvm jobs VM [--json] | fcvm jobs VM ID [-f] | fcvm jobs VM ID --kill | fcvm jobs VM --clear"
     local vm=${1:?$usage} jd f id; shift
-    vm_exists "$vm" || die "no VM '$vm'"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     jd=$(vm_dir "$vm")/jobs
     case ${1:-} in
         ""|--json)
@@ -1237,7 +1237,7 @@ jobs_cmd() {
             log "removed $n finished job(s) of '$vm'" ;;
         *)
             id=$1; shift
-            [ -f "$jd/$id.json" ] || die "no job '$id' in '$vm' (see: fcvm jobs $vm)"
+            [ -f "$jd/$id.json" ] || die_code not_found "no job '$id' in '$vm' (see: fcvm jobs $vm)"
             case ${1:-} in
                 --kill)
                     [ ! -f "$jd/$id.status" ] || die "job $id has already ended"
@@ -1248,7 +1248,7 @@ jobs_cmd() {
                     cat "$jd/$id.err" >&2 ;;
                 "") cat "$jd/$id.out"; cat "$jd/$id.err" >&2
                     [ ! -f "$jd/$id.status" ] || exit "$(cat "$jd/$id.status")" ;;
-                *)  die "$usage" ;;
+                *)  die_code invalid "$usage" ;;
             esac ;;
     esac
 }
@@ -1259,11 +1259,11 @@ shell_vm() {
     while [ $# -gt 0 ]; do
         case $1 in
             -u|--user) user=(-u "${2:?$usage}"); shift 2 ;;
-            -*)        die "unknown option $1 ($usage)" ;;
+            -*)        die_code invalid "unknown option $1 ($usage)" ;;
             *)         vm=$1; shift ;;
         esac
     done
-    [ -n "$vm" ] || die "$usage"
+    [ -n "$vm" ] || die_code invalid "$usage"
     if [ -t 0 ]; then exec_vm -it "${user[@]}" "$vm"; else exec_vm -i "${user[@]}" "$vm"; fi
 }
 
@@ -1271,9 +1271,9 @@ shell_vm() {
 
 volume_create() {
     local name=${1:?usage: fcvm volume create NAME [SIZE]} size=${2:-$VOLUME_SIZE}
-    [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid volume name '$name'"
+    [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid volume name '$name'"
     local f=$VOLUMES_DIR/$name.ext4
-    [ ! -e "$f" ] || die "volume '$name' already exists"
+    [ ! -e "$f" ] || die_code volume_exists "volume '$name' already exists"
     mkdir -p "$VOLUMES_DIR"
     truncate -s "$size" "$f"
     mkfs.ext4 -q -F -L "vol-${name:0:12}" -E lazy_itable_init=1,lazy_journal_init=1,root_owner=0:0 "$f"
@@ -1315,12 +1315,12 @@ volume_cmd() {
                     "\(.used_bytes / 1048576 | floor)M", (.vms | join(","))] | @tsv)' | column -t -s $'\t'; fi ;;
         rm)
             local name=${1:?usage: fcvm volume rm NAME} users
-            [ -f "$VOLUMES_DIR/$name.ext4" ] || die "no volume '$name'"
+            [ -f "$VOLUMES_DIR/$name.ext4" ] || die_code volume_not_found "no volume '$name'"
             users=$(volume_users "$name" | tr '\n' ' ')
-            [ -z "$users" ] || die "volume '$name' is used by VM(s): $users"
+            [ -z "$users" ] || die_code in_use "volume '$name' is used by VM(s): $users"
             rm -f "$VOLUMES_DIR/$name.ext4"
             log "removed volume '$name'" ;;
-        *) die "usage: fcvm volume create NAME [SIZE] | ls [--json] | rm NAME" ;;
+        *) die_code invalid "usage: fcvm volume create NAME [SIZE] | ls [--json] | rm NAME" ;;
     esac
 }
 
@@ -1332,10 +1332,10 @@ volume_cmd() {
 commit() {
     local vm=${1:?usage: fcvm commit VM IMAGE} image=${2:?usage: fcvm commit VM IMAGE}
     lock_vm "$vm"
-    vm_exists "$vm" || die "no VM '$vm'"
-    vm_running "$vm" && die "VM '$vm' is running; stop it first (fcvm stop $vm)"
-    [[ $image =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid image name '$image'"
-    [ ! -e "$IMAGES_DIR/$image.json" ] || die "image '$image' already exists"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
+    vm_running "$vm" && die_code vm_running "VM '$vm' is running; stop it first (fcvm stop $vm)"
+    [[ $image =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid image name '$image'"
+    [ ! -e "$IMAGES_DIR/$image.json" ] || die_code image_exists "image '$image' already exists"
     local dir parent src out rc=0
     dir=$(vm_dir "$vm")
     parent=$(jq -r .image "$dir/vm.json")
@@ -1458,8 +1458,8 @@ push_cmd() {
 squash() {
     local image=${1:?usage: fcvm squash IMAGE NEW} new=${2:?usage: fcvm squash IMAGE NEW}
     image_json "$image" >/dev/null
-    [[ $new =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid image name '$new'"
-    [ ! -e "$IMAGES_DIR/$new.json" ] || die "image '$new' already exists"
+    [[ $new =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid image name '$new'"
+    [ ! -e "$IMAGES_DIR/$new.json" ] || die_code image_exists "image '$new' already exists"
     local chain=() layers=() i
     mapfile -t chain < <(image_chain "$image")
     [ ${#chain[@]} -gt 2 ] || die "'$image' has ${#chain[@]} level(s); nothing to squash"
@@ -1527,7 +1527,7 @@ rmi() {
     local image=${1:?usage: fcvm rmi IMAGE} users
     image_json "$image" >/dev/null
     users=$(image_users "$image" | tr '\n' ' ')
-    [ -z "$users" ] || die "image '$image' is used by: $users"
+    [ -z "$users" ] || die_code in_use "image '$image' is used by: $users"
     rm -f "$IMAGES_DIR/$image.ext4" "$IMAGES_DIR/$image.json"
     log "removed image '$image'"
 }
@@ -1545,7 +1545,7 @@ cp_cmd() {
         vm=${dst%%:*} path=${dst#*:}
         need_agent "$vm" cp
         [ -e "$src" ] || die "no such file: $src"
-        vm_running "$vm" || die "VM '$vm' is not running"
+        vm_running "$vm" || die_code vm_not_running "VM '$vm' is not running"
         src=$(realpath -s "$src"); base=$(basename "$src"); parent=$(dirname "$src")
         if exec_vm "$vm" test -d "$path" 2>/dev/null; then
             xform=() newbase=$base; dst=$path
@@ -1558,7 +1558,7 @@ cp_cmd() {
             die "copy failed (the image needs sh and tar)"
     elif [[ $src == *:* && $dst != *:* ]]; then        # VM -> host
         vm=${src%%:*} path=${src#*:}
-        vm_running "$vm" || die "VM '$vm' is not running"
+        vm_running "$vm" || die_code vm_not_running "VM '$vm' is not running"
         need_agent "$vm" cp
         path=${path%/}; base=$(basename "$path"); parent=$(dirname "$path")
         if [ -d "$dst" ]; then
@@ -1571,7 +1571,7 @@ cp_cmd() {
             tar -xf - -C "$dst" --no-same-owner "${xform[@]}" ||
             die "copy failed (does $path exist? the image needs sh and tar)"
     else
-        die "$usage"
+        die_code invalid "$usage"
     fi
 }
 
@@ -1591,12 +1591,12 @@ fc_api() {   # socket method path [json]
 snapshot_create() {
     local vm=${1:?usage: fcvm snapshot VM NAME} name=${2:?usage: fcvm snapshot VM NAME}
     lock_vm "$vm"
-    vm_exists "$vm" || die "no VM '$vm'"
-    vm_running "$vm" || die "VM '$vm' is not running (snapshots capture a running VM's memory)"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
+    vm_running "$vm" || die_code vm_not_running "VM '$vm' is not running (snapshots capture a running VM's memory)"
     need_agent "$vm" "a snapshot (its forks)"
-    [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid snapshot name '$name'"
+    [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid snapshot name '$name'"
     local dir=$SNAPSHOTS_DIR/$name vdir disk drive t0 ms
-    [ ! -e "$dir" ] || die "snapshot '$name' already exists"
+    [ ! -e "$dir" ] || die_code snapshot_exists "snapshot '$name' already exists"
     vdir=$(vm_dir "$vm")
     if jq -e '[.volumes[]? | select(endswith(":ro") | not)] | length > 0' "$vdir/vm.json" >/dev/null; then
         die "VM '$vm' has read-write volumes; a fork can't share them (use :ro volumes, or copy the data in)"
@@ -1637,7 +1637,7 @@ fork_one() {
     dir=$(vm_dir "$vm")
     sock_room "$vm"
     lock_vm "$vm"
-    vm_exists "$vm" && die "VM '$vm' already exists"
+    vm_exists "$vm" && die_code vm_exists "VM '$vm' already exists"
     if [ "$(jq -r '.jail // false' "$sdir/meta.json")" = true ]; then
         # Inside a jail every path is the same (/driveN.ext4, /vsock.sock, tap0 in
         # its own netns), so a fresh jail with this VM's own disk restores as is.
@@ -1661,13 +1661,13 @@ fork_one() {
     mode=$(jq -r '.net.mode // "full"' "$dir/vm.json")
     case $mode in
         restricted)
-            claim_tap fcrtap || { rm -rf "$dir"; die "no free restricted tap; run: fcvm net-up"; }
+            claim_tap fcrtap || { rm -rf "$dir"; die_code no_network_slot "no free restricted tap; run: fcvm net-up"; }
             IP=$NET_R_PREFIX.$((10 + TAP_INDEX)) gw=$NET_R_PREFIX.1 tap=fcrtap$TAP_INDEX
             mac=$(printf '06:01:%02x:%02x:%02x:%02x' ${IP//./ })
             write_policy "$vm" "$IP"; ensure_proxy ;;
         none) ;;
         *)
-            claim_tap fctap || { rm -rf "$dir"; die "no free tap; run: fcvm net-up"; }
+            claim_tap fctap || { rm -rf "$dir"; die_code no_network_slot "no free tap; run: fcvm net-up"; }
             IP=$NET_PREFIX.$((10 + TAP_INDEX)) gw=$NET_PREFIX.1 tap=fctap$TAP_INDEX
             mac=$(printf '06:00:%02x:%02x:%02x:%02x' ${IP//./ }) ;;
     esac
@@ -1718,13 +1718,13 @@ fork_cmd() {
     local usage="usage: fcvm fork SNAPSHOT [NAME] [-n COUNT]" snap="" name="" count=1
     while [ $# -gt 0 ]; do
         case $1 in
-            -n|--count) [[ ${2:-} =~ ^[1-9][0-9]*$ ]] || die "$usage"; count=$2; shift 2 ;;
-            -*)         die "unknown option $1 ($usage)" ;;
+            -n|--count) [[ ${2:-} =~ ^[1-9][0-9]*$ ]] || die_code invalid "$usage"; count=$2; shift 2 ;;
+            -*)         die_code invalid "unknown option $1 ($usage)" ;;
             *)          if [ -z "$snap" ]; then snap=$1; else name=$1; fi; shift ;;
         esac
     done
-    [ -n "$snap" ] || die "$usage"
-    [ -f "$SNAPSHOTS_DIR/$snap/meta.json" ] || die "no snapshot '$snap' (see: fcvm snapshot ls)"
+    [ -n "$snap" ] || die_code invalid "$usage"
+    [ -f "$SNAPSHOTS_DIR/$snap/meta.json" ] || die_code snapshot_not_found "no snapshot '$snap' (see: fcvm snapshot ls)"
     [ "$(jq '.ports | length' "$SNAPSHOTS_DIR/$snap/vm.json")" = 0 ] || use_daemon ||   # (the service's log says it)
         warn "published ports aren't carried over to forks (they'd conflict with the source)"
     if use_daemon; then
@@ -1750,7 +1750,7 @@ fork_cmd() {
 snapshot_export() {
     local usage="usage: fcvm snapshot export NAME FILE.tar" name=${1:?$usage} file=${2:?$usage} dir
     dir=$SNAPSHOTS_DIR/$name
-    [ -f "$dir/meta.json" ] || die "no snapshot '$name' (see: fcvm snapshot ls)"
+    [ -f "$dir/meta.json" ] || die_code snapshot_not_found "no snapshot '$name' (see: fcvm snapshot ls)"
     [ ! -e "$file" ] || die "$file exists"
     local chain=() i
     mapfile -t chain < <(image_chain "$(jq -r .image "$dir/vm.json")")
@@ -1771,8 +1771,8 @@ snapshot_import() {
     tar -S -C "$tmp" -xf "$file" 2>/dev/null && [ -f "$tmp/export.json" ] && [ -f "$tmp/meta.json" ] ||
         { rm -rf "$tmp"; die "$file isn't an fcvm snapshot export"; }
     [ -n "$name" ] || name=$(basename "${file%.tar}")
-    [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || { rm -rf "$tmp"; die "invalid snapshot name '$name'"; }
-    [ ! -e "$SNAPSHOTS_DIR/$name" ] || { rm -rf "$tmp"; die "snapshot '$name' already exists"; }
+    [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || { rm -rf "$tmp"; die_code invalid "invalid snapshot name '$name'"; }
+    [ ! -e "$SNAPSHOTS_DIR/$name" ] || { rm -rf "$tmp"; die_code snapshot_exists "snapshot '$name' already exists"; }
     local img missing=()
     for img in $(jq -r '.images[]' "$tmp/export.json"); do [ -f "$IMAGES_DIR/$img.json" ] || missing+=("$img"); done
     [ ${#missing[@]} -eq 0 ] || { rm -rf "$tmp"; die "the snapshot's VM boots from image(s) not present here: ${missing[*]} (fcvm import them under those names first)"; }
@@ -1811,9 +1811,9 @@ snapshot_cmd() {
                             "\(.disk_bytes / 1048576 | floor)M", .created] | @tsv)' | column -t -s $'\t'; fi ;;
         rm)
             local name=${2:?usage: fcvm snapshot rm NAME}
-            [ -d "$SNAPSHOTS_DIR/$name" ] || die "no snapshot '$name'"
+            [ -d "$SNAPSHOTS_DIR/$name" ] || die_code snapshot_not_found "no snapshot '$name'"
             rm -rf "${SNAPSHOTS_DIR:?}/$name"; log "removed snapshot '$name'" ;;
-        ""|-h|--help) die "usage: fcvm snapshot VM NAME | fcvm snapshot ls [--json] | fcvm snapshot rm NAME | fcvm snapshot export NAME FILE.tar | fcvm snapshot import FILE.tar [NAME]" ;;
+        ""|-h|--help) die_code invalid "usage: fcvm snapshot VM NAME | fcvm snapshot ls [--json] | fcvm snapshot rm NAME | fcvm snapshot export NAME FILE.tar | fcvm snapshot import FILE.tar [NAME]" ;;
         *) snapshot_create "$@" ;;
     esac
 }
@@ -1832,7 +1832,7 @@ vsock_prefix() {
 mount_cmd() {
     local usage="usage: fcvm mount VM HOST/DIR[:GUEST/PATH][:ro]"
     local vm=${1:?$usage} spec=${2:?$usage} dir hdir gpath ro port pid i
-    vm_exists "$vm" || die "no VM '$vm'"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     parse_share "$spec"
     hdir=$SHARE_HOST gpath=$SHARE_GUEST ro=""
     [ "$SHARE_RO" = false ] || ro=true
@@ -1865,7 +1865,7 @@ mount_cmd() {
 umount_cmd() {
     local usage="usage: fcvm umount VM GUEST/PATH|HOST/DIR"
     local vm=${1:?$usage} arg=${2:?$usage} dir line gpath
-    vm_exists "$vm" || die "no VM '$vm'"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     dir=$(vm_dir "$vm")
     # by guest path (as given, or a home directory in its ~/ form), or by host directory
     gpath=$(jq -r --arg g "$arg" --arg gh "$(guest_arg "$arg")" --arg h "$(realpath -m "${arg/#\~/$HOME}")" \
@@ -1897,8 +1897,8 @@ umount_cmd() {
 publish_cmd() {
     local usage="usage: fcvm publish VM [BIND:][HOSTPORT]:GUESTPORT   (no HOSTPORT: a free one is picked)"
     local vm=${1:?$usage} spec=${2:?$usage} dir bind hport gport
-    vm_exists "$vm" || die "no VM '$vm'"
-    [[ $spec =~ ^(([0-9.]+):)?([0-9]*):([0-9]+)(/tcp)?$ ]] || die "bad port spec '$spec' ($usage)"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
+    [[ $spec =~ ^(([0-9.]+):)?([0-9]*):([0-9]+)(/tcp)?$ ]] || die_code invalid "bad port spec '$spec' ($usage)"
     bind=${BASH_REMATCH[2]} hport=${BASH_REMATCH[3]} gport=${BASH_REMATCH[4]}
     if [ -z "${FCVM_DAEMON:-}" ] && vm_running "$vm" && use_daemon; then   # its forwarder must live where the VM does
         local reply rc=0
@@ -1909,7 +1909,7 @@ publish_cmd() {
     fi
     lock_vm "$vm"
     dir=$(vm_dir "$vm")
-    [ "$(jq -r '.net.mode // "full"' "$dir/vm.json")" != none ] || die "'$vm' has no network (--net none); nothing to publish"
+    [ "$(jq -r '.net.mode // "full"' "$dir/vm.json")" != none ] || die_code no_network "'$vm' has no network (--net none); nothing to publish"
     if [ -z "$hport" ]; then
         hport=$(python3 -c 'import socket, sys; s = socket.socket(); s.bind((sys.argv[1], 0)); print(s.getsockname()[1])' "${bind:-127.0.0.1}") ||
             die "cannot pick a free port on ${bind:-127.0.0.1}"
@@ -1918,7 +1918,7 @@ publish_cmd() {
     jq -e --arg p "$spec" '.ports | index($p)' "$dir/vm.json" >/dev/null && die "'$vm' already publishes $spec"
     local live=""
     if vm_running "$vm"; then
-        [ -s "$dir/ip" ] || die "'$vm' is running without a network; nothing to publish"
+        [ -s "$dir/ip" ] || die_code no_network "'$vm' is running without a network; nothing to publish"
         DIR=$dir forward_port "$(vm_pid "$vm")" "$(cat "$dir/ip")" "$spec" || die "cannot publish $spec"
         live=" (live)"
     fi
@@ -1931,7 +1931,7 @@ publish_cmd() {
 unpublish_cmd() {
     local usage="usage: fcvm unpublish VM HOSTPORT|[BIND:]HOSTPORT:GUESTPORT"
     local vm=${1:?$usage} arg=${2:?$usage} dir spec
-    vm_exists "$vm" || die "no VM '$vm'"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     if [ -z "${FCVM_DAEMON:-}" ] && vm_running "$vm" && use_daemon; then
         local rc=0
         daemon_api DELETE "vms/$vm/ports?port=$arg" >/dev/null || rc=$?
@@ -1971,23 +1971,23 @@ pool_cmd() {
     case $sub in
         set)
             local name=${1:?$usage} tpl="" snap="" size="" jail=false f; shift
-            [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid pool name '$name'"
+            [[ $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die_code invalid "invalid pool name '$name'"
             while [ $# -gt 0 ]; do
                 case $1 in
                     --template) tpl=${2:?$usage}; shift 2 ;;
                     --snapshot) snap=${2:?$usage}; shift 2 ;;
-                    --size)     [[ ${2:-} =~ ^[0-9]+$ ]] || die "--size wants a number"; size=$2; shift 2 ;;
+                    --size)     [[ ${2:-} =~ ^[0-9]+$ ]] || die_code invalid "--size wants a number"; size=$2; shift 2 ;;
                     --jail)     jail=true; shift ;;
-                    *)          die "unknown option $1 ($usage)" ;;
+                    *)          die_code invalid "unknown option $1 ($usage)" ;;
                 esac
             done
             f=$(pool_file "$name")
             [ -n "$tpl$snap" ] || tpl=$(jq -r '.template // empty' "$f" 2>/dev/null) snap=$(jq -r '.snapshot // empty' "$f" 2>/dev/null)
             [ -n "$size" ] || size=$(jq -r '.size // empty' "$f" 2>/dev/null)
-            [ -n "$tpl$snap" ] && [ -n "$size" ] || die "$usage"
+            [ -n "$tpl$snap" ] && [ -n "$size" ] || die_code invalid "$usage"
             [ -z "$tpl" ] || [ -z "$snap" ] || die "a pool is from a template or a snapshot, not both"
             [ -z "$tpl" ] || python3 "$FCVM_ROOT/lib/templates.py" show "$tpl" >/dev/null || exit 1
-            [ -z "$snap" ] || [ -f "$SNAPSHOTS_DIR/$snap/meta.json" ] || die "no snapshot '$snap'"
+            [ -z "$snap" ] || [ -f "$SNAPSHOTS_DIR/$snap/meta.json" ] || die_code snapshot_not_found "no snapshot '$snap'"
             mkdir -p "$VMS_DIR/.pools"
             jq -n --arg name "$name" --arg tpl "$tpl" --arg snap "$snap" --argjson size "$size" --argjson jail "$jail" \
                 '{name: $name, template: (if $tpl == "" then null else $tpl end), snapshot: (if $snap == "" then null else $snap end),
@@ -2006,7 +2006,7 @@ pool_cmd() {
                 column -t -s $'\t'; fi ;;
         rm)
             local name=${1:?$usage} vm
-            [ -f "$(pool_file "$name")" ] || die "no pool '$name'"
+            [ -f "$(pool_file "$name")" ] || die_code pool_not_found "no pool '$name'"
             rm -f "$(pool_file "$name")"
             for vm in $(pool_members "$name"); do
                 QUIET_STOP=1 "$FCVM_ROOT/fcvm" stop "$vm" >/dev/null 2>&1 || true
@@ -2019,14 +2019,14 @@ pool_cmd() {
                 case $1 in
                     --ttl)       ttl=${2:?$usage}; shift 2 ;;
                     --idle-stop) idle=${2:?$usage}; shift 2 ;;
-                    *)           die "unknown option $1 ($usage)" ;;
+                    *)           die_code invalid "unknown option $1 ($usage)" ;;
                 esac
             done
-            [ -f "$(pool_file "$name")" ] || die "no pool '$name' (see: fcvm pool ls)"
+            [ -f "$(pool_file "$name")" ] || die_code pool_not_found "no pool '$name' (see: fcvm pool ls)"
             mkdir -p "$VMS_DIR/.locks"
             exec {plock}>"$VMS_DIR/.locks/pool-$name"; flock "$plock"
             for d in $(pool_members "$name" running); do vm=$d; break; done
-            [ -n "$vm" ] || die "pool '$name' has no VM ready right now (fcvm serve fills it to $(jq .size "$(pool_file "$name")")); create one the usual way meanwhile"
+            [ -n "$vm" ] || die_code pool_empty "pool '$name' has no VM ready right now (fcvm serve fills it to $(jq .size "$(pool_file "$name")")); create one the usual way meanwhile"
             d=$(vm_dir "$vm")
             rm -f "$d/pooled"; date +%s > "$d/claimed"; touch_activity "$vm"
             exec {plock}>&-
@@ -2035,7 +2035,7 @@ pool_cmd() {
             echo "$vm" ;;
         _fill)   # one more VM for the pool (the supervisor's job)
             local name=${1:?$usage} f tpl snap jail vm opts=()
-            f=$(pool_file "$name"); [ -f "$f" ] || die "no pool '$name'"
+            f=$(pool_file "$name"); [ -f "$f" ] || die_code pool_not_found "no pool '$name'"
             tpl=$(jq -r '.template // empty' "$f"); snap=$(jq -r '.snapshot // empty' "$f"); jail=$(jq -r '.jail // false' "$f")
             vm="$name-$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')"
             [ "$jail" != true ] || opts+=(--jail)
@@ -2048,7 +2048,7 @@ pool_cmd() {
                 QUIET_START=1 start "$vm" >/dev/null
             fi
             echo "$vm" ;;
-        *) die "$usage" ;;
+        *) die_code invalid "$usage" ;;
     esac
 }
 
@@ -2059,8 +2059,8 @@ pool_cmd() {
 # return it with 0. Without a size: the balloon and the guest's memory view.
 balloon_cmd() {
     local usage="usage: fcvm balloon VM [MiB|0]" vm=${1:?$usage} mib=${2:-} dir mem cur
-    vm_exists "$vm" || die "no VM '$vm'"
-    vm_running "$vm" || die "VM '$vm' is not running"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
+    vm_running "$vm" || die_code vm_not_running "VM '$vm' is not running"
     dir=$(vm_dir "$vm")
     if ! cur=$(fc_api_get "$dir/fc.sock" /balloon 2>/dev/null); then
         die "'$vm' has no balloon device (started by an fcvm before 0.7); restart it to get one"
@@ -2074,7 +2074,7 @@ balloon_cmd() {
                            available_mib: (.available_memory / 1048576 | floor)} else null end)}'
         return
     fi
-    [[ $mib =~ ^[0-9]+$ ]] && [ "$mib" -lt "$mem" ] || die "balloon size wants MiB below the VM's memory ($mem)"
+    [[ $mib =~ ^[0-9]+$ ]] && [ "$mib" -lt "$mem" ] || die_code invalid "balloon size wants MiB below the VM's memory ($mem)"
     fc_api "$dir/fc.sock" PATCH /balloon "$(jq -n --argjson m "$mib" '{amount_mib: $m}')" || die "cannot resize the balloon"
     if [ "$mib" = 0 ]; then log "'$vm': balloon deflated; it has its full $mem MiB again"
     else log "'$vm': balloon at $mib MiB ($((mem - mib)) MiB left to the guest; the host frees the rest as the guest gives it up)"; fi
@@ -2131,7 +2131,7 @@ inspect_json() {
 
 inspect() {
     local vm=${1:?usage: fcvm inspect VM}
-    vm_exists "$vm" || die "no VM '$vm'"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     inspect_json "$vm"
 }
 
@@ -2146,12 +2146,12 @@ egress() {
             --deny)  IFS=, read -ra _a <<<"${2:?$usage}"; del+=("${_a[@]}"); shift 2 ;;
             -n)      lines=${2:?$usage}; shift 2 ;;
             -f)      follow=1; shift ;;
-            -*)      die "unknown option $1 ($usage)" ;;
+            -*)      die_code invalid "unknown option $1 ($usage)" ;;
             *)       vm=$1; shift ;;
         esac
     done
-    [ -n "$vm" ] || die "$usage"
-    vm_exists "$vm" || die "no VM '$vm'"
+    [ -n "$vm" ] || die_code invalid "$usage"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     local dir; dir=$(vm_dir "$vm")
     local mode; mode=$(jq -r '.net.mode // "full"' "$dir/vm.json")
     if [ ${#add[@]} -gt 0 ] || [ ${#del[@]} -gt 0 ]; then
@@ -2250,7 +2250,7 @@ list_images() {
 update() {
     local usage="usage: fcvm update VM [--restart no|on-failure|unless-stopped|always] [--ttl DURATION|none] [--idle-stop DURATION|none] [--secret SPEC]... [--unset-secret NAME]... [--forward ssh-agent,git|none]"
     local vm=${1:-} restart="" ttl="" idle="" set_ttl=0 set_idle=0 what=() secrets=() SECRETS_DEL=() forward=() set_fwd=0
-    [ -n "$vm" ] || die "$usage"; shift
+    [ -n "$vm" ] || die_code invalid "$usage"; shift
     while [ $# -gt 0 ]; do
         case $1 in
             --restart)   valid_restart "${2:-}"; restart=$2; shift 2 ;;
@@ -2259,12 +2259,12 @@ update() {
             --secret)    parse_secret "${2:?$usage}"; secrets+=("$2"); shift 2 ;;
             --unset-secret) SECRETS_DEL+=("${2:?$usage}"); shift 2 ;;
             --forward)   mapfile -t forward < <(parse_forward "${2:?$usage}"); set_fwd=1; shift 2 ;;
-            *)           die "unknown option $1 ($usage)" ;;
+            *)           die_code invalid "unknown option $1 ($usage)" ;;
         esac
     done
-    [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || [ $set_fwd = 1 ] || die "$usage"
+    [ -n "$restart" ] || [ $set_ttl = 1 ] || [ $set_idle = 1 ] || [ ${#secrets[@]} -gt 0 ] || [ ${#SECRETS_DEL[@]} -gt 0 ] || [ $set_fwd = 1 ] || die_code invalid "$usage"
     lock_vm "$vm"
-    vm_exists "$vm" || die "no VM '$vm'"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
     local f=$VMS_DIR/$vm/vm.json
     if [ $set_fwd = 1 ]; then
         jq --argjson fwd "$(json_list "${forward[@]}")" --arg sock "${SSH_AUTH_SOCK:-}" \
@@ -2332,22 +2332,22 @@ template_cmd() {
             if [ -n "$from" ]; then
                 json=$(python3 "$FCVM_ROOT/lib/templates.py" from-vm "$name" "$from" "$desc") || exit 1
             else
-                [ ${#args[@]} -gt 0 ] || die "$usage"
+                [ ${#args[@]} -gt 0 ] || die_code invalid "$usage"
                 out=$(mktemp)
                 (FCVM_TEMPLATE_OUT=$out create "_template-$$" "${args[@]}") || { rm -f "$out"; exit 1; }
                 json=$(jq --arg d "$desc" '.description = $d' "$out"); rm -f "$out"
             fi
             python3 "$FCVM_ROOT/lib/templates.py" save "$name" <<<"$json" >/dev/null
             log "saved template '$name'. Use it: fcvm create VM --template $name" ;;
-        *) die "$usage" ;;
+        *) die_code invalid "$usage" ;;
     esac
 }
 
 rm_vm() {
     local vm=${1:?usage: fcvm rm VM}
     lock_vm "$vm"
-    vm_exists "$vm" || die "no VM '$vm'"
-    vm_running "$vm" && die "VM '$vm' is running (fcvm stop $vm first)"
+    vm_exists "$vm" || die_code vm_not_found "no VM '$vm'"
+    vm_running "$vm" && die_code vm_running "VM '$vm' is running (fcvm stop $vm first)"
     rm -rf "$(vm_dir "$vm")" "$VMS_DIR/.locks/vm-$vm"
     log "removed '$vm'"
 }

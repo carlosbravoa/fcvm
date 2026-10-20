@@ -60,9 +60,12 @@ wrap this API: `Client().create("box", template="python-sandbox")`, then
   noted.
 - Names (VMs, images, snapshots, volumes, projects) match
   `[A-Za-z0-9_][A-Za-z0-9_.-]*`.
-- Errors come back as `{"error": "message"}` with a 4xx or 5xx status. A CLI
-  error is a 400 carrying the CLI's message, for example
-  `{"error": "VM 'web' is running (fcvm stop web first)"}`. A command that
+- Errors come back as `{"error": "message", "code": "CODE"}` with a 4xx or
+  5xx status, for example `409 {"error": "VM 'web' is running (fcvm stop web
+  first)", "code": "vm_running"}`. The codes and their statuses are listed in
+  [Error codes](errors.md): 404 for something that doesn't exist, 409 for a
+  conflict with the VM's state, 503 when the host can't take the VM right
+  now, 400 for invalid input and for failures without a code. A command that
   takes too long returns 504.
 - Paths below are relative to `/api`.
 

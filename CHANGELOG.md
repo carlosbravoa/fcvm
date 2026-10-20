@@ -6,6 +6,15 @@ to move across.
 
 ## Unreleased
 
+- **Error codes.** Every failure now has a code (`vm_not_found`,
+  `vm_running`, `image_exists`, ... see [docs/errors.md](docs/errors.md)).
+  The CLI prints it on a `fcvm-error: CODE` line after the `error:` line
+  when stderr isn't a terminal; the API replies `{"error", "code"}` with a
+  status that follows the code (404 for things that don't exist, 409 for
+  state conflicts, 503 when the host can't take the VM) instead of 400 for
+  everything; `FcvmError` in both client libraries has `.code`. Scripts that
+  matched the API's 400 for "no such VM" or "already running" see 404 and
+  409 now.
 - **Packages.** The clients are on PyPI and npm as `fcvm` (`pip install
   fcvm`, `npm install fcvm`). `fcvm-mcp` on PyPI launches the installed
   fcvm's MCP server (`uvx fcvm-mcp`), and lists fcvm in the MCP Registry.

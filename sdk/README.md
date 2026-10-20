@@ -45,7 +45,8 @@ background)`, `run(command)` (raises on failure, returns stdout),
 `update(ttl=..., ...)`, `snapshot(name)`, `commit(image)`, `logs()`,
 `egress()`, `balloon(mib)`, `processes()`, `stats()`.
 
-Errors are `FcvmError` with `.status` (the HTTP status) and the server's
+Errors are `FcvmError` with `.status` (the HTTP status), `.code` (fcvm's
+[error code](../docs/errors.md), e.g. `vm_not_found`) and the server's
 message.
 
 ## Node / TypeScript

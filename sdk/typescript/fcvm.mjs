@@ -16,10 +16,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export class FcvmError extends Error {
-  constructor(status, message) {
+  /** `status` is the HTTP status, `code` fcvm's error code (`vm_not_found`,
+   *  `vm_running`, ...; see docs/errors.md), "error" when it has none. */
+  constructor(status, message, code = "error") {
     super(message);
     this.name = "FcvmError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -69,9 +72,9 @@ export class Client {
       throw new FcvmError(0, `cannot reach ${this.url}: ${e.message}`);
     }
     if (!r.ok) {
-      let message = `HTTP ${r.status}`;
-      try { message = (await r.json()).error || message; } catch {}
-      throw new FcvmError(r.status, message);
+      let message = `HTTP ${r.status}`, code = "error";
+      try { const e = await r.json(); message = e.error || message; code = e.code || code; } catch {}
+      throw new FcvmError(r.status, message, code);
     }
     if (raw) return Buffer.from(await r.arrayBuffer());
     const text = await r.text();

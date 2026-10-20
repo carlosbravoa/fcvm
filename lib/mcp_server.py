@@ -81,6 +81,7 @@ def fcvm(*args, input=None, timeout=None, check=True):
     except subprocess.TimeoutExpired:
         raise ToolError(f"fcvm {args[0]} timed out after {timeout}s")
     out, err = p.stdout.decode(errors="replace"), ANSI.sub("", p.stderr.decode(errors="replace"))
+    err = re.sub(r"^fcvm-error: [a-z_]+\n?", "", err, flags=re.M)   # the code's line (docs/errors.md): for programs
     if check and p.returncode != 0:
         raise ToolError(err.strip() or f"fcvm {args[0]} failed with status {p.returncode}")
     return p.returncode, out, err

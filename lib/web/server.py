@@ -66,13 +66,27 @@ R_PREFIX = "172.30.1"   # restricted network prefix (fcvm passes NET_R_PREFIX)
 
 
 class HTTPError(Exception):
-    def __init__(self, status, message):
-        self.status, self.message = status, message
+    def __init__(self, status, message, code=None):
+        self.status, self.message, self.code = status, message, code
 
 
 # --- fcvm CLI ------------------------------------------------------------------------
 
+# The CLI names each failure's code (docs/errors.md) on a `fcvm-error:` line;
+# the status it maps to, with 400 for anything else (invalid input, and
+# failures that have no code yet).
+ERROR_STATUS = {"vm_not_found": 404, "image_not_found": 404, "snapshot_not_found": 404, "volume_not_found": 404,
+                "pool_not_found": 404, "not_found": 404,
+                "vm_exists": 409, "image_exists": 409, "snapshot_exists": 409, "volume_exists": 409,
+                "vm_running": 409, "vm_not_running": 409, "vm_busy": 409, "in_use": 409, "no_agent": 409,
+                "no_network": 409, "pool_empty": 409,
+                "no_network_slot": 503, "jail_unavailable": 503}
+ERROR_LINE = re.compile(r"^fcvm-error: ([a-z_]+)$", re.M)
+
+
 async def fcvm(*args, timeout=120, stdin=None, env=None):
+    """Run the CLI: (exit status, stdout, stderr). The error code's line is
+    removed from stderr; fcvm_ok is what acts on it."""
     p = await asyncio.create_subprocess_exec(
         FCVM, *map(str, args), stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env={**os.environ, **(env or {})})
@@ -80,19 +94,26 @@ async def fcvm(*args, timeout=120, stdin=None, env=None):
         out, err = await asyncio.wait_for(p.communicate(stdin), timeout)
     except asyncio.TimeoutError:
         p.kill()
-        raise HTTPError(504, f"fcvm {args[0]} timed out")
+        raise HTTPError(504, f"fcvm {args[0]} timed out", "timeout")
     return p.returncode, out.decode(errors="replace"), ANSI.sub("", err.decode(errors="replace"))
+
+
+def cli_error(err, status):
+    """An HTTPError for a failed CLI call: the error line plus any detail
+    printed before it (e.g. Firecracker's own fault message), progress lines
+    (==>) left out, and the status its code maps to."""
+    m = ERROR_LINE.search(err)
+    code = m.group(1) if m else "error"
+    lines = [l for l in ERROR_LINE.sub("", err).splitlines() if l.strip() and not l.startswith("==>")]
+    msg = "\n".join(lines) or f"exit {status}"
+    return HTTPError(ERROR_STATUS.get(code, 400), msg.replace("error: ", ""), code)
 
 
 async def fcvm_ok(*args, **kw):
     code, out, err = await fcvm(*args, **kw)
     if code != 0:
-        # The error line, plus any detail printed before it (e.g. Firecracker's
-        # own fault message); progress lines (==>) left out.
-        lines = [l for l in err.splitlines() if l.strip() and not l.startswith("==>")]
-        msg = "\n".join(lines) or f"exit {code}"
-        raise HTTPError(400, msg.replace("error: ", ""))
-    return out, err
+        raise cli_error(err, code)
+    return out, ERROR_LINE.sub("", err)
 
 
 async def fcvm_json(*args):
@@ -1233,15 +1254,17 @@ class App:
                     body = await reader.readexactly(n) if n else b""
                 result = await self.route(method, url.path, query, headers, body, reader, writer)
             except HTTPError as e:
-                result = e.status, {"Content-Type": "application/json"}, json.dumps({"error": e.message}).encode()
+                result = e.status, {"Content-Type": "application/json"}, \
+                    json.dumps({"error": e.message, "code": e.code or "error"}).encode()
             except (json.JSONDecodeError, ValueError, KeyError) as e:
-                result = 400, {"Content-Type": "application/json"}, json.dumps({"error": f"bad request: {e}"}).encode()
+                result = 400, {"Content-Type": "application/json"}, \
+                    json.dumps({"error": f"bad request: {e}", "code": "invalid"}).encode()
             if result is None:                  # a WebSocket took over the connection
                 return
             status, hdrs, data = result
             reason = {200: "OK", 302: "Found", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
                       404: "Not Found", 409: "Conflict", 413: "Payload Too Large", 502: "Bad Gateway",
-                      504: "Gateway Timeout"}.get(status, "Error")
+                      503: "Service Unavailable", 504: "Gateway Timeout"}.get(status, "Error")
             hdrs = {**hdrs, "Content-Length": str(len(data)), "Connection": "close",
                     "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
                     "Content-Security-Policy": "default-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'"}

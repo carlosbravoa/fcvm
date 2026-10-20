@@ -39,7 +39,7 @@ class Fake(http.server.BaseHTTPRequestHandler):
         if self.path == "/api/vms/box/jobs/abc?tail=200":
             return self.reply(200, {"id": "abc", "status": "exited", "exit_code": 0, "stdout": "done"})
         if self.path == "/api/vms/nope":
-            return self.reply(404, {"error": "no VM 'nope'"})
+            return self.reply(404, {"error": "no VM 'nope'", "code": "vm_not_found"})
         return self.reply(200, {"name": "box", "state": "running"})
 
     def do_POST(self):
@@ -137,7 +137,7 @@ class SDK(unittest.TestCase):
     def test_errors_and_context_manager(self):
         with self.assertRaises(sdk.FcvmError) as cm:
             self.c.sandbox("nope")
-        self.assertEqual((cm.exception.status, str(cm.exception)), (404, "no VM 'nope'"))
+        self.assertEqual((cm.exception.status, cm.exception.code, str(cm.exception)), (404, "vm_not_found", "no VM 'nope'"))
         with self.assertRaises(sdk.FcvmError) as cm:
             sdk.Client(self.url, "wrong").vms()
         self.assertEqual(cm.exception.status, 401)

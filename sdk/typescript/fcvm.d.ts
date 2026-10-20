@@ -2,7 +2,9 @@
 
 export class FcvmError extends Error {
   status: number;
-  constructor(status: number, message: string);
+  /** fcvm's error code (`vm_not_found`, `vm_running`, ...; docs/errors.md), "error" when it has none */
+  code: string;
+  constructor(status: number, message: string, code?: string);
 }
 
 export function discover(): { url: string; token: string };

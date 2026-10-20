@@ -178,7 +178,7 @@ class Supervisor:
             return
         n = self.tries.get(name, 0) + 1
         self.tries[name] = n
-        err = [l for l in out.splitlines() if "error" in l.lower()]
+        err = [l for l in out.splitlines() if "error" in l.lower() and not l.startswith("fcvm-error:")]
         self.errors[name] = (err[-1] if err else out.strip()[-300:]).replace("error: ", "")
         if "already running" in out:
             self.errors.pop(name, None)

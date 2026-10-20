@@ -171,7 +171,9 @@ These use sudo.
   VMs and cache), hidden unless you pass `--all`.
 - **Output.** Commands print progress on stderr and results on stdout, so
   `--json` output can be piped.
-- **Exit codes.** Failures exit non-zero with an `error:` line. `run`,
-  `start -a` and `exec` pass through the guest's exit code.
+- **Exit codes.** Failures exit non-zero with an `error:` line, followed,
+  when stderr isn't a terminal, by `fcvm-error: CODE` naming the failure
+  for scripts ([Error codes](errors.md)). `run`, `start -a` and `exec` pass
+  through the guest's exit code.
 - **Settings.** They come from `fcvm.conf` and the environment. See
   [Configuration](configuration.md).

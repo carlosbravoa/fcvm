@@ -93,7 +93,17 @@ fcvm_version() {
 
 log()  { printf '\e[1;34m==>\e[0m %s\n' "$*" >&2; }
 warn() { printf '\e[1;33mwarning:\e[0m %s\n' "$*" >&2; }
-die()  { printf '\e[1;31merror:\e[0m %s\n' "$*" >&2; exit 1; }
+# Failures print one `error:` line. For programs (the console, the MCP server,
+# scripts: anything whose stderr isn't a terminal), die_code adds a line naming
+# the error's code from docs/errors.md, so they can tell "no such VM" from
+# "already running" without parsing prose. A plain die has the code `error`.
+die_code() {
+    local code=$1; shift
+    printf '\e[1;31merror:\e[0m %s\n' "$*" >&2
+    [ -t 2 ] || printf 'fcvm-error: %s\n' "$code" >&2
+    exit 1
+}
+die()  { die_code error "$@"; }
 need() {
     local c
     for c; do command -v "$c" >/dev/null || die "missing command '$c' (run: fcvm host-setup)"; done

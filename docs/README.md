@@ -47,6 +47,8 @@ stop wherever you have what you need.
 - **[Configuration](configuration.md).** Every setting, `fcvm.conf`,
   customizing the kernel, egress presets, the base image.
 - **[HTTP API](api.md).** Endpoints, authentication, objects.
+- **[Error codes](errors.md).** What a failed command or request reports,
+  for scripts and clients.
 
 ## 4. In depth
 

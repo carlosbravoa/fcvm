@@ -28,11 +28,13 @@ __version__ = "0.7.0"
 
 
 class FcvmError(Exception):
-    """An error from the server: `status` is the HTTP status, the message fcvm's."""
+    """An error from the server: `status` is the HTTP status, the message
+    fcvm's, and `code` its error code (`vm_not_found`, `vm_running`, ...; see
+    docs/errors.md), `error` when it has none."""
 
-    def __init__(self, status, message):
+    def __init__(self, status, message, code="error"):
         super().__init__(message)
-        self.status = status
+        self.status, self.code = status, code
 
 
 class ExecResult:
@@ -97,10 +99,11 @@ class Client:
                 content = r.read()
         except urllib.error.HTTPError as e:
             try:
-                message = json.loads(e.read().decode())["error"]
+                body = json.loads(e.read().decode())
+                message, code = body["error"], body.get("code", "error")
             except (ValueError, KeyError):
-                message = f"HTTP {e.code}"
-            raise FcvmError(e.code, message) from None
+                message, code = f"HTTP {e.code}", "error"
+            raise FcvmError(e.code, message, code) from None
         except urllib.error.URLError as e:
             raise FcvmError(0, f"cannot reach {self.url}: {e.reason}") from None
         if raw:

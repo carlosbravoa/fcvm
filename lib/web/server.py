@@ -1358,7 +1358,7 @@ class App:
             query = dict(urllib.parse.parse_qsl(url.query))
             n = int(headers.get("content-length") or 0)
             try:
-                if method == "PUT":                 # uploads stream from the socket
+                if method == "PUT" and url.path.endswith("/file"):   # uploads stream from the socket
                     body = b""
                 elif n > 1 << 20:
                     raise HTTPError(413, "request too large")

@@ -4,7 +4,13 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
-## Unreleased
+## 0.9.0 (2026-10-20)
+
+A host that several teams, customers or agents share: VMs say whose they
+are, each tenant has a quota, the host knows its own capacity, and the
+event stream says who ran what. All of it is opt-in: nothing changes for
+a host with no tenants and `NODE_ADMIT` unset. After `fcvm upgrade`,
+`fcvm service install` so the API serves tenants and the node view.
 
 - **Tenants and quotas.** `--tenant NAME` on `create`, `fork` and
   `pool claim` sets the `tenant` label, which `update` can't change;

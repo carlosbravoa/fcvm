@@ -51,6 +51,8 @@ stop wherever you have what you need.
 - **[HTTP API](api.md).** Endpoints, authentication, objects.
 - **[Error codes](errors.md).** What a failed command or request reports,
   for scripts and clients.
+- **[The node contract](node-contract.md).** The files, flags and codes a
+  program that manages fcvm hosts may rely on, and its version.
 
 ## 4. In depth
 

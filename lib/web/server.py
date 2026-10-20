@@ -1062,6 +1062,7 @@ class App:
             "hostname": os.uname().nodename, "cpus": os.cpu_count(), "load": [float(x) for x in load],
             "user": self.user, "version": self.version,
             "cordoned": read(os.path.join(VMS, ".node", "cordoned")).strip() or None,
+            "contract": 1,   # docs/node-contract.md
             "kernel": os.path.basename(os.path.realpath(os.path.join(STATE, "kernels", "vmlinux"))),
             "disk_total": st.f_blocks * st.f_frsize, "disk_free": st.f_bavail * st.f_frsize,
             "taps_full": taps("fctap"), "taps_restricted": taps("fcrtap"),

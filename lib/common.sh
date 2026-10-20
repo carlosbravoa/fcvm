@@ -47,6 +47,7 @@ fi
 : "${VM_DISK:=8G}"                              # per-VM writable layer (sparse)
 : "${IMPORT_FREE_MB:=64}"                      # free space added to imported disks (for --copy VMs)
 : "${LEASE_GRACE:=300}"                        # seconds after a lease ends before the VM is removed
+CONTRACT=1                                     # docs/node-contract.md: what outside programs may rely on
 
 BIN_DIR=$FCVM_HOME/bin
 BUILD_DIR=$FCVM_HOME/build

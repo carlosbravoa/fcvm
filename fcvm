@@ -146,8 +146,8 @@ if [[ " $* " == *" --op "* ]]; then
 fi
 case $cmd in
     -V|--version)       echo "fcvm $(fcvm_version)" ;;
-    version)            printf 'fcvm %s\ncode   %s\nstate  %s\nconfig %s%s\n' "$(fcvm_version)" "$FCVM_ROOT" \
-                            "$FCVM_HOME" "$FCVM_CONF" "$([ -f "$FCVM_CONF" ] || echo ' (none)')" ;;
+    version)            printf 'fcvm %s\ncode   %s\nstate  %s\nconfig %s%s\ncontract %s\n' "$(fcvm_version)" "$FCVM_ROOT" \
+                            "$FCVM_HOME" "$FCVM_CONF" "$([ -f "$FCVM_CONF" ] || echo ' (none)')" "$CONTRACT" ;;
     upgrade)            exec "$FCVM_ROOT/lib/upgrade.sh" "$@" ;;
     setup)              exec "$FCVM_ROOT/lib/setup.sh" "$@" ;;
     status)             exec "$FCVM_ROOT/lib/status.sh" "$@" ;;

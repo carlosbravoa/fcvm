@@ -530,6 +530,8 @@ lib/mkfs-tar.sh         ext4 from a tarball, owners kept, without root (mkfs.ext
 lib/tar2ext4.py         the same for e2fsprogs < 1.47.1: unpack, mkfs -d DIR, fix metadata with debugfs
 lib/build.py            fcvm build (Dockerfile subset)
 lib/vm.sh               VM lifecycle
+lib/events.py           reads the events the CLI records (fcvm events, GET /api/events)
+lib/ops.py              operations: slow commands run detached (--op, fcvm ops)
 lib/console.py          per-VM serial console relay (attach/detach, logs, reaping)
 lib/exec_client.py      host side of exec / shell / file operations (vsock)
 lib/portfwd.py          rootless TCP port publishing

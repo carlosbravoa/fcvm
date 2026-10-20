@@ -4,7 +4,16 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
-## Unreleased
+## 0.8.0 (2026-10-19)
+
+Groundwork for driving fcvm from a program, and better answers for
+people too: every failure has a code, every state change leaves an event,
+slow commands can run detached, a VM says why it's in its state, and VMs
+can carry labels and leases. Nothing changes for existing VMs or
+commands; after `fcvm upgrade`, `fcvm service install` so the supervisor
+applies leases and the console serves events. [The node
+contract](docs/node-contract.md) lists what outside programs may rely on
+from here (contract version 1).
 
 - **Error codes.** Every failure now has a code (`vm_not_found`,
   `vm_running`, `image_exists`, ... see [docs/errors.md](docs/errors.md)).

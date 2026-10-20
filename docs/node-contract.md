@@ -1,0 +1,94 @@
+# The node contract
+
+**Contract version: 1** (fcvm 0.8.0). `fcvm version` and `GET /api/host`
+report it as `contract`.
+
+A program that manages fcvm hosts from outside (a control plane, a fleet
+agent, your own scripts) can rely on everything on this page, and on
+nothing else about fcvm's files. Changing anything here bumps the contract
+version, in a minor fcvm release, with a CHANGELOG entry; additions don't.
+Everything is relative to the state directory (`fcvm version` prints it).
+
+## How to drive fcvm
+
+- **Every change goes through the `fcvm` command** (or the [HTTP
+  API](api.md), which runs it). Never write the files below; read them.
+- **Failures** exit non-zero with an `error:` line and, when stderr isn't
+  a terminal, `fcvm-error: CODE` ([Error codes](errors.md)). The codes and
+  their meanings are part of the contract; messages aren't.
+- **`FCVM_ACTOR`** in the environment names who acts in events and logs
+  (`serve`, `supervisor`, or your program's name).
+- **`FCVM_DAEMON=1`** makes `start`, `fork` and `publish` act locally
+  instead of delegating to the running service.
+- **Locks.** A command that changes a VM holds `vms/.locks/vm-NAME`
+  (flock) while it does; it waits 30 s for it and fails with `vm_busy`
+  otherwise. Readers don't lock.
+
+## Flags
+
+| flag | on | meaning |
+|---|---|---|
+| `--label KEY=VALUE` | `create`, `update`, `fork`, `pool claim` | tags; `ls --label KEY=VALUE` filters; fcvm never reads them |
+| `--unset-label KEY` | `update` | |
+| `--if-same-spec` | `create` | succeed if the VM exists with the same `spec`; `vm_exists` if it differs |
+| `--lease UNTIL` | `create`, `start`, `update`, `fork`, `pool claim` | a Unix time, ISO 8601 time, or duration from now; `none` clears |
+| `--op` | `import`, `build`, `export`, `push`, `snapshot`, `commit` | run detached; prints an operation id |
+| `--json` | `ls`, `inspect` (always JSON), `images`, `snapshot ls`, `volume ls`, `pool ls`, `template ls`, `events`, `ops` | machine output on stdout |
+
+## Objects
+
+### A VM: `vms/NAME/vm.json` and `fcvm inspect NAME`
+
+`inspect` returns `vm.json`'s fields plus the live ones. Contract fields:
+
+| field | meaning |
+|---|---|
+| `spec` | the create request, normalized: the fields of a [template](templates.md#managing-templates) (`image`, `vcpus`, `mem_mib`, `disk`, `copy`, `network`, `allow`, `ports`, `volumes`, `process`, `command`, `entrypoint`, `jail`, `restart`, `ttl`, `idle_stop`, `secrets` (names), `forward`, `cache`) |
+| `status` | `{"state": "running\|stopped\|exited", "reason", "since"}`; reasons: `start`, `user`, `ttl`, `idle`, `lease`, `exit`, `shutdown`, `crash`, `created` |
+| `labels` | `{KEY: VALUE}` |
+| `lease_until` | Unix time, or `null` |
+| `state`, `pid`, `ip`, `image`, `type`, `jail`, `restart`, `ports`, `volumes`, `shares`, `net`, `ttl_s`, `idle_stop_s`, `expires_at`, `idle_expires_at`, `expired`, `last_exit`, `stopped_by_user`, `pooled`, `claimed_at`, `restored_from`, `created`, `mem_used_bytes`, `disk_used_bytes` | as [the API describes them](api.md#vms) |
+
+Markers next to `vm.json`, readable for liveness and reasons: `pid` and
+`pid.id` (boot id and process start time: the VM runs iff `/proc/PID`
+exists and matches), `stopped`, `expired` (its content is the reason),
+`last-exit` (JSON `{code, fc_status, stale, at}`), `pooled` (the pool's
+name), `claimed` (Unix time), `activity` (its mtime is the idle clock).
+
+### Events: `vms/.events.jsonl`, `vms/.events.1.jsonl`, `vms/.events.seq`
+
+One JSON object per line, appended under `vms/.locks/events`; `seq`
+strictly increasing; rotated at 4 MiB into `.events.1.jsonl`. Fields and
+types: [Events](events.md). Read the older file first; a line may be cut
+while it's being written. `fcvm events --since N --json` and
+`GET /api/events` (JSON or server-sent events) read them for you.
+
+### Operations: `vms/.ops/ID.json` and `vms/.ops/ID.log`
+
+`{id, kind, title, command, status: running|done|failed, started, ended,
+exit, error, code, pid, boot_id}`; the log is the command's output. Ids
+match `op-[a-z0-9]{10}`. `fcvm ops ID --json` adds `lines` and `next`;
+`GET /api/jobs/ID?wait=S` waits. Kept a week after the end; one whose
+process is gone without an end is `failed` with `error: "interrupted"`.
+
+### The host
+
+- `vms/.node/cordoned` exists while the host refuses new VMs
+  (`fcvm cordon`); its content is the reason.
+- `vms/.serve.json`: `{url, token, port, pid}` of the running service
+  (mode 0600).
+- `vms/.pools/NAME.json`: `{name, template|snapshot, size, jail}`.
+- `images/NAME.json`, `snapshots/NAME/meta.json`, `volumes/NAME.ext4`:
+  the objects `fcvm images|snapshot ls|volume ls --json` list.
+
+### Settings
+
+`fcvm.conf` (shell syntax; `fcvm version` says which file) with the
+variables in [Configuration](configuration.md). The ones this contract
+adds: `LEASE_GRACE` (seconds, default 300).
+
+## What a release may change
+
+Field *additions* to any object or event, new event types and reasons,
+new error codes, new flags. Renames and removals of anything above bump
+the contract version.

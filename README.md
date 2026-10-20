@@ -144,6 +144,7 @@ Then pick how you want to drive it:
 | **Your coding agent:** sandboxes as MCP tools (Claude Code shown; any MCP client works) | `claude mcp add fcvm -- "$(command -v fcvm)" mcp` |
 | **Keep it running:** network and console at boot; VMs with a restart policy come back | `fcvm service install` (offered by `setup`) |
 | **Stronger isolation:** run VMs under the Firecracker jailer | `fcvm jail-setup` (offered by `setup`), then `--jail` |
+| **Your own tooling:** labels, leases, events, operations and error codes, so scripts and a control plane can drive a host | `fcvm events -f`, `fcvm create ... --label --lease`, [the node contract](docs/node-contract.md) |
 
 A few everyday commands:
 
@@ -163,8 +164,8 @@ Start with **[Getting started](docs/getting-started.md)** and
 
 | | |
 |---|---|
-| **Using fcvm** | [Images](docs/images.md) · [Running VMs](docs/vms.md) · [Networking and egress](docs/networking.md) · [Templates](docs/templates.md) · [Project files](docs/projects.md) · [Snapshots and fork](docs/snapshots.md) · [The fcvm service](docs/service.md) · [Web console](docs/web-console.md) · [Agents (MCP)](docs/agents.md) |
-| **Reference** | [Commands](docs/cli.md) · [Configuration](docs/configuration.md) · [HTTP API](docs/api.md) · [Changelog](CHANGELOG.md) |
+| **Using fcvm** | [Images](docs/images.md) · [Running VMs](docs/vms.md) · [Networking and egress](docs/networking.md) · [Templates](docs/templates.md) · [Project files](docs/projects.md) · [Snapshots and fork](docs/snapshots.md) · [The fcvm service](docs/service.md) · [Events](docs/events.md) · [Web console](docs/web-console.md) · [Agents (MCP)](docs/agents.md) |
+| **Reference** | [Commands](docs/cli.md) · [Configuration](docs/configuration.md) · [HTTP API](docs/api.md) · [Error codes](docs/errors.md) · [The node contract](docs/node-contract.md) · [Changelog](CHANGELOG.md) |
 | **In depth** | [How it works](docs/internals.md) · [Security and isolation](docs/security.md) · [Roadmap](docs/roadmap.md) |
 
 The [documentation index](docs/README.md) describes each page.

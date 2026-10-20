@@ -96,7 +96,11 @@ what `tests/fresh-machine.sh` covers. Run it before a release.
    CI is green.
 2. Bump `VERSION`, and the same version in the packages under `sdk/`
    (`tests/run lint` lists any it missed). Move the changelog's
-   "Unreleased" notes under the new version.
+   "Unreleased" notes under the new version. If a file, field, flag or
+   code listed in [docs/node-contract.md](docs/node-contract.md) was
+   renamed or removed, bump the contract version there, in `CONTRACT`
+   (`lib/common.sh`) and in `host_info` (`lib/web/server.py`), and say so
+   in the changelog.
 3. Commit, tag `vX.Y.Z` (annotated), push the commit and the tag. The
    installer and `fcvm upgrade` pick up the highest `vX.Y.Z` tag.
 4. Publish the packages, below.

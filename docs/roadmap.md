@@ -257,6 +257,8 @@ them. It fits well alongside phase 1.
 **Still open:**
 - **A state store.** State is still JSON files, pid files and markers per
   VM, which is simple and inspectable, but gives no transactions or history.
+  Since 0.8.0 the files, flags and codes an outside program may rely on
+  are listed and versioned in [the node contract](node-contract.md).
 - **Remote and multi-user access** (with W2): TLS, real accounts, roles.
 - ✅ **Events.** Every state change is recorded with a sequence number
   (`fcvm events`, `GET /api/events` with server-sent events; the console

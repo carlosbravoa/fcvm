@@ -135,6 +135,22 @@ class Tenants(VMTestCase):
         self.assertEqual((shown["images"], shown["snapshots"], shown["volumes"]), ([img], [snap], [vol]))
         self.assertGreaterEqual(shown["allocated"]["disk_mib"], 1024 * 3 + 256)   # VM layers, the fork's, the snapshot, the volume
 
+    def test_build_for_a_tenant(self):
+        import tempfile
+        t, other = self.tenant(), self.tenant()
+        ctx = tempfile.mkdtemp(prefix="fcvmtest-ctx-")
+        with open(os.path.join(ctx, "Dockerfile"), "w") as f:
+            f.write(f"FROM {IMAGE}\nRUN echo built > /built\n")
+        img = self.image_name()
+        fcvm("build", "-t", img, "--net", "none", "--tenant", t, ctx, timeout=600)
+        images = {i["name"]: i for i in json.loads(fcvm("images", "--json", "--all").stdout)}
+        self.assertEqual(images[img]["tenant"], t)
+        self.assertTrue(any(i["tenant"] == t for n, i in images.items() if n.startswith("_bc-")), "cache layers are the tenant's")
+        r = fcvm("create", unique("vm"), img, "--idle", "--tenant", other, check=False)
+        self.assertEqual(r.stderr.splitlines()[-1], "fcvm-error: policy", r.stderr)
+        self.vm("--tenant", t, image=img, start=False)
+        fcvm("prune")
+
     def test_disk_quota(self):
         t = self.tenant("--disk", "2048")
         a = self.vm("--tenant", t, "--mem", "256", "--disk", "1G", start=False)

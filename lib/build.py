@@ -519,8 +519,8 @@ class Builder:
             "env": [f"{k}={v}" for k, v in cfg["env"].items()], "workdir": cfg["workdir"],
             "user": cfg["user"] or "root", "exposed_ports": cfg["exposed"],
         })
-        if a.tenant:
-            meta["tenant"] = a.tenant
+        if self.args.tenant:
+            meta["tenant"] = self.args.tenant
         with open(os.path.join(IMAGES, f"{tag}.json"), "w") as f:
             json.dump(meta, f, indent=2)
         size = subprocess.run(["du", "-h", out], capture_output=True, text=True).stdout.split()[0]

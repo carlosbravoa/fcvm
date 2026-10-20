@@ -117,8 +117,10 @@ class Service(VMTestCase):
         self.new_api("templates")
         name = unique("tpl")
         self.addCleanup(fcvm, "template", "rm", name, check=False)
+        code, body = self.server.api("POST", "templates", {"name": name, "image": IMAGE, "network": "open"})
+        self.assertEqual(code, 400)                                   # not a network mode
         code, body = self.server.api("POST", "templates", {"name": name, "image": IMAGE, "network": "restricted"})
-        self.assertEqual(code, 400)                                   # an allowlist is required
+        self.assertEqual((code, body["allow"]), (200, []), body)      # an empty allowlist: nothing out
         code, body = self.server.api("POST", "templates", {"name": name, "image": IMAGE, "mem_mib": 256})
         self.assertEqual((code, body["mem_mib"]), (200, 256), body)
         self.assertIn(name, [t["name"] for t in self.server.api("GET", "templates")[1]])

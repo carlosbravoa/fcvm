@@ -4,6 +4,48 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## 0.10.0 (2026-10-20)
+
+The second half of a host that serves several tenants: what a tenant
+makes is its own, disk counts against its quota, its package cache is
+its own, and `NODE=1` turns a host into a node that refuses what would
+put the host itself in a tenant's hands. As before, a host with no
+tenants and no `NODE` setting sees no change. After `fcvm upgrade`,
+`fcvm service install` so the API serves the new endpoints.
+
+- **Tenants own their images, snapshots and volumes.** `commit` and
+  `snapshot` give the result the VM's tenant; `import`, `build`, `volume
+  create` and `snapshot import` take `--tenant`; a volume `-v` creates on
+  first use is the VM's tenant's. A VM of another tenant, or of none,
+  that names one of them is refused with the new code `policy` (HTTP
+  403), and a tenant's snapshot forks for that tenant only (the forks
+  take its label). `images`, `snapshot ls` and `volume ls` show the
+  tenant and take `--tenant`, as do `GET /api/images|snapshots|volumes`;
+  `POST /api/volumes` and the SDKs' `create_volume` are new; `tenant
+  show` lists what a tenant owns. See [Tenants and
+  quotas](docs/vms.md#tenants-and-quotas).
+- **Disk in quotas.** `tenant set --disk MiB` limits the nominal size of
+  everything a tenant has: VM layers (stopped ones too), images,
+  snapshots and volumes, checked before any of them is created
+  (`quota_exceeded`). `NODE_DISK_MIB` is the host's capacity for it
+  (default: the state's filesystem), enforced with `NODE_ADMIT=1`.
+- **A package mirror per tenant.** A tenant's VMs fill and read their own
+  cache (`cache/egress/tenants/NAME`), so one tenant's installs neither
+  reveal anything to another nor serve it files it didn't fetch. The
+  egress proxy is now replaced at the next VM start after an upgrade.
+- **Node mode.** `NODE=1` in `fcvm.conf` pins admission, jailing and
+  isolation on, refuses host paths outside `NODE_PATHS` (`-v HOST/DIR`,
+  `mount`, `cp`, `--secret @FILE`, build contexts, local imports,
+  exports), `--forward`, `--no-jail` and unjailed VMs or snapshots, and
+  gives new VMs a restricted network unless told otherwise;
+  `NODE_NETWORKS` limits the modes a host accepts. Enforced in the CLI,
+  so the API, the MCP server and scripts obey. `--net restricted` (an
+  empty allowlist, filled later with `fcvm egress --allow`) is new for
+  everyone, and templates and the API accept the same. See [Node
+  mode](docs/configuration.md#node-mode).
+- `fcvm status --json` adds `node_mode`, `objects` and the host's disk;
+  `fcvm status` says when node mode or admission is on.
+
 ## 0.9.0 (2026-10-20)
 
 A host that several teams, customers or agents share: VMs say whose they

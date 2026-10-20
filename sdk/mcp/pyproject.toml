@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fcvm-mcp"
-version = "0.9.0"
+version = "0.10.0"
 description = "Launches fcvm's MCP server: Firecracker microVM sandboxes as tools for AI agents"
 readme = "README.md"
 license = "Apache-2.0"

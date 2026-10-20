@@ -283,11 +283,14 @@ Still open:
 
 ### E6. Resource governance
 
-Jailed VMs have cgroup v2 limits on CPU, memory and pids (E1). Still open:
+Jailed VMs have cgroup v2 limits on CPU, memory and pids (E1), and
+[tenant quotas](vms.md#tenants-and-quotas) cap what a tenant may hold in
+vCPUs, memory, VMs and nominal disk (layers, images, snapshots, volumes),
+with the host's own capacity enforced by `NODE_ADMIT=1`. Still open:
 - limits for rootless VMs (a user-level cgroup through systemd);
 - Firecracker rate limiters for block and network I/O;
-- quotas on writable layers and volumes (today they are sparse files that
-  can fill the host disk);
+- disk quotas by actual use (today's count the sizes given; sparse files
+  can still fill the host disk past them);
 - disk encryption at rest.
 
 ### E7. Credentials in images ✅

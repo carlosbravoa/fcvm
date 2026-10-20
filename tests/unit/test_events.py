@@ -37,6 +37,31 @@ class Emit(unittest.TestCase):
         self.assertEqual([e["seq"] for e in events.read(vm="box")], [1, 2])
         self.assertEqual([e["seq"] for e in events.read(limit=1)], [3])
 
+    def test_argv_is_recorded_and_secrets_masked(self):
+        r = bash("argv_record create box --secret KEY=hunter2 --secret F=@/tmp/f --secret BARE -- echo 'a b'", home=self.home)
+        self.assertEqual(r.stdout.split("\x1f"), ["create", "box", "--secret", "KEY=***", "--secret", "F=@/tmp/f", "--secret", "BARE", "--", "echo", "a b"])
+        self.emit("vm.created", "box", env={"FCVM_ARGV": r.stdout})
+        self.emit("vm.restarting", "box", "policy:always", env={"FCVM_ARGV": ""})
+        self.emit("vm.started", "box")
+        evs = events.read()
+        self.assertEqual(evs[0]["argv"], ["create", "box", "--secret", "KEY=***", "--secret", "F=@/tmp/f", "--secret", "BARE", "--", "echo", "a b"])
+        self.assertNotIn("argv", evs[1])
+        self.assertNotIn("hunter2", events.fmt(evs[0]))
+        self.assertTrue(events.fmt(evs[0]).endswith("$ fcvm create box --secret 'KEY=***' --secret F=@/tmp/f --secret BARE -- echo 'a b'"), events.fmt(evs[0]))
+
+    def test_filters_by_actor_and_type(self):
+        self.emit("vm.created", "box", env={"FCVM_ACTOR": "serve"})
+        self.emit("vm.started", "box", env={"FCVM_ACTOR": "serve"})
+        self.emit("vm.started", "other")
+        self.assertEqual([e["seq"] for e in events.read(by="serve")], [1, 2])
+        self.assertEqual([e["seq"] for e in events.read(type_="vm.started")], [2, 3])
+        self.assertEqual([e["seq"] for e in events.read(by="serve", type_="vm.started", vm="box")], [2])
+        t = events.Tail(by="serve")
+        self.assertEqual([e["seq"] for e in t.poll()], [1, 2])
+        self.emit("vm.stopped", "box", env={"FCVM_ACTOR": "serve"})
+        self.emit("vm.stopped", "other")
+        self.assertEqual([e["seq"] for e in t.poll()], [4])
+
     def test_rotation_keeps_the_previous_file(self):
         for i in range(4):
             self.emit("vm.updated", "box", env={"FCVM_EVENTS_ROTATE": "300"})   # rotate after ~2 lines

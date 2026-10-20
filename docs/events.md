@@ -11,6 +11,8 @@ fcvm events                     # everything kept, oldest first
 fcvm events --since -20         # the last 20
 fcvm events -f web              # follow one VM
 fcvm events --since 4012 --json # as JSON lines, after event 4012
+fcvm events --by cli:carlos     # what one person (or program) did
+fcvm events --type vm.deleted   # one kind
 ```
 
 ```
@@ -36,6 +38,7 @@ fcvm events --since 4012 --json # as JSON lines, after event 4012
 | `by` | who did it: `cli:USER` for a command run by hand, `serve` for the console and the API, `supervisor` for restart policies, lifetimes and pools. A program sets its own with `FCVM_ACTOR` |
 | `labels` | the VM's [labels](vms.md#listing-and-inspecting) at the time |
 | `data` | details per type |
+| `argv` | the fcvm command line that caused it, for events a command records (absent for the supervisor's own, such as `vm.restarting`); `--secret` values are masked. See [Audit](#audit) |
 
 ## Types
 
@@ -58,11 +61,37 @@ A stop produces both `vm.exited` (the guest ended) and `vm.stopped` (who
 asked for it, and why). Releases may add types and reasons; they don't
 rename them.
 
+## Audit
+
+Who did what is in every event: `by` names the actor (`cli:USER` for a
+command, `serve` for the console and API, `supervisor` for restart
+policies and lifetimes, or whatever a program sets in `FCVM_ACTOR`), and
+`argv` is the command line as fcvm received it, with the values of
+`--secret NAME=VALUE` replaced by `NAME=***` (a `NAME=@FILE` keeps its
+path, a bare `NAME` stays). An event the service records for a request
+has `by: serve` and the argv the service ran; a VM the supervisor
+restarts has no `argv`.
+
+```sh
+fcvm events --by serve --type vm.created     # VMs the console or API created
+fcvm events --by cli:carlos --since -50      # one person's last actions
+FCVM_ACTOR=deploy fcvm start web             # a script names itself
+```
+
+```
+  4021  15:02:11  vm.created     web                      image=nginx-latest       cli:carlos  $ fcvm create web nginx-latest --secret KEY=***
+```
+
+The API and the MCP tool take the same filters (`by`, `type`). Commands
+inside VMs (`exec`, `shell`) aren't events; that's on the
+[roadmap](roadmap.md#e5-audit-and-observability-).
+
 ## In the API
 
 `GET /api/events?since=N` returns `{"events": [...], "next": N}`: the
 events after `N`, oldest first, and the sequence number to pass next
-time. `vm=NAME` keeps one VM's, `limit=N` only the last N of them (so
+time. `vm=NAME` keeps one VM's, `by=ACTOR` one actor's, `type=TYPE` one
+kind, `limit=N` only the last N of them (so
 `next` then skips the older ones; the MCP tool's `limit` keeps the oldest
 instead, for paging). `GET /api/vms`
 carries `X-Fcvm-Seq`, the latest event at the time of the list, so a

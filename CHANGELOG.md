@@ -24,6 +24,11 @@ to move across.
   never parse `fcvm.conf`.
 - **Events** for pools (`pool.set`, `pool.removed`, a `tenant` on
   `pool.claimed`) and tenants (`tenant.set`, `tenant.removed`).
+- **Audit.** Every event a command records carries `argv`, the command
+  line as fcvm received it with `--secret` values masked, next to `by`
+  (who). `fcvm events --by ACTOR --type TYPE`, and the same filters on
+  `GET /api/events` and the MCP `events` tool. See
+  [Audit](docs/events.md#audit).
 - **Fixed:** a failure relayed from the service (`start`, `fork`,
   `publish` through `fcvm serve`) now ends with its `fcvm-error: CODE`
   line like a local one; `POST /api/vms` answers with the start's own

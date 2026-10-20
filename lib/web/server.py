@@ -641,25 +641,27 @@ class App:
 
     # events (docs/events.md) -----------------------------------------------------------
     async def events(self, q, headers, writer):
-        """GET /api/events?since=N[&vm=X][&limit=N]: the state changes after
-        event N, as JSON; with Accept: text/event-stream, kept open and
-        streamed as they happen (Last-Event-ID resumes a dropped stream)."""
+        """GET /api/events?since=N[&vm=X][&by=ACTOR][&type=TYPE][&limit=N]: the
+        state changes after event N, as JSON; with Accept: text/event-stream,
+        kept open and streamed as they happen (Last-Event-ID resumes a
+        dropped stream)."""
         vm = q.get("vm")
         if vm and not NAME.match(vm):
             raise HTTPError(400, "invalid name")
+        by, type_ = q.get("by") or None, q.get("type") or None
         since = headers.get("last-event-id") or q.get("since") or "0"
         since = events.last_seq() if since == "latest" else int(since)
         oldest = events.oldest_seq()
         if 0 < since < (oldest or 1) - 1:
             raise HTTPError(410, f"events before {oldest} are no longer kept; list the VMs again and watch from X-Fcvm-Seq", "gone")
         if "text/event-stream" not in headers.get("accept", ""):
-            evs = events.read(since, vm, int(q.get("limit") or 0) or None)
+            evs = events.read(since, vm, int(q.get("limit") or 0) or None, by, type_)
             return 200, {"Content-Type": "application/json", "X-Fcvm-Seq": str(events.last_seq())}, \
                 json.dumps({"events": evs, "next": evs[-1]["seq"] if evs else since}).encode()
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
                      b"X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n")
         quiet = 0.0
-        tail = events.Tail(since, vm)
+        tail = events.Tail(since, vm, by, type_)
         try:
             while not writer.is_closing():
                 new = tail.poll()

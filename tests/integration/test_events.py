@@ -38,6 +38,23 @@ class Events(VMTestCase):
         self.assertTrue(by_type["vm.created"]["by"].startswith("cli:") or by_type["vm.created"]["by"] == "serve")
         self.assertIn("vm.started", fcvm("events", "--since", before, vm).stdout)   # the human format
 
+    def test_audit_trail(self):
+        seq = last_seq()
+        vm = self.vm("--secret", "TOKEN=hunter2", "--label", "k=v", start=False)
+        ev = [e for e in self.events(vm, seq) if e["type"] == "vm.created"][0]
+        self.assertEqual(ev["argv"][:4], ["create", vm, "alpine-latest", "--secret"])
+        self.assertIn("TOKEN=***", ev["argv"])
+        self.assertNotIn("TOKEN=hunter2", json.dumps(ev))
+        out = fcvm("events", "--since", seq, "--type", "vm.created", "--by", ev["by"], "--json").stdout
+        self.assertIn(vm, out)
+        self.assertNotIn("hunter2", out)
+        self.assertEqual(fcvm("events", "--since", seq, "--type", "no.such", "--json").stdout.strip(), "")
+        self.assertIn("$ fcvm create", fcvm("events", "--since", seq, vm).stdout)
+        fcvm("start", vm)                                      # through the service: by serve, argv the service's
+        started = [e for e in self.events(vm, seq) if e["type"] == "vm.started"][0]
+        self.assertEqual(started["argv"][:2], ["start", vm])
+        self.assertEqual(fcvm("events", "--nope", check=False).stderr.splitlines()[-1], "fcvm-error: invalid")
+
     def test_update_and_run(self):
         vm = self.vm(start=False)
         seq = last_seq()

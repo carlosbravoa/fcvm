@@ -3,13 +3,16 @@
 command records in vms/.events.jsonl (emit_event in lib/common.sh), one JSON
 object per line with a strictly increasing `seq`.
 
-  fcvm events [--since N] [-f] [--json] [VM]      the command (this file's main)
+  fcvm events [--since N] [-f] [--json] [--by ACTOR] [--type TYPE] [VM]
+                                                  the command (this file's main)
 
-`read(since, vm)` and `follow(since, vm)` are what the command and the web
-console's GET /api/events (lib/web/server.py) use. Standard library only.
+`read(since, vm, limit, by, type_)` and `Tail` are what the command, the
+web console's GET /api/events (lib/web/server.py) and the MCP server use.
+Standard library only.
 """
 import json
 import os
+import shlex
 import sys
 import time
 
@@ -43,8 +46,14 @@ def oldest_seq():
     return None
 
 
-def read(since=0, vm=None, limit=None):
-    """Events with seq > since (oldest first), optionally for one VM, at most limit."""
+def wanted(e, since, vm, by, type_):
+    return e.get("seq", 0) > since and (vm is None or e.get("vm") == vm) \
+        and (by is None or e.get("by") == by) and (type_ is None or e.get("type") == type_)
+
+
+def read(since=0, vm=None, limit=None, by=None, type_=None):
+    """Events with seq > since (oldest first), optionally for one VM, one
+    actor (`by`) or one type, at most limit (the latest ones)."""
     out = []
     for path in FILES:
         try:
@@ -57,7 +66,7 @@ def read(since=0, vm=None, limit=None):
                 e = json.loads(line)
             except ValueError:
                 continue                        # a line cut by a crash, or still being written
-            if e.get("seq", 0) > since and (vm is None or e.get("vm") == vm):
+            if wanted(e, since, vm, by, type_):
                 out.append(e)
     out.sort(key=lambda e: e["seq"])
     return out[-limit:] if limit else out
@@ -68,8 +77,8 @@ class Tail:
     appended since the last poll (and the whole file again after a
     rotation), so a follower costs nothing while nothing happens."""
 
-    def __init__(self, since=0, vm=None):
-        self.since, self.vm = since, vm
+    def __init__(self, since=0, vm=None, by=None, type_=None):
+        self.since, self.vm, self.by, self.type_ = since, vm, by, type_
         self.ino, self.pos = None, 0
 
     def poll(self):
@@ -81,7 +90,7 @@ class Tail:
             return []
         if st.st_ino != self.ino or st.st_size < self.pos:
             # a rotation (or the first poll): everything after `since`, across both files
-            out = read(self.since, self.vm)
+            out = read(self.since, self.vm, None, self.by, self.type_)
             self.ino, self.pos = st.st_ino, st.st_size
         else:
             if st.st_size == self.pos:
@@ -98,16 +107,16 @@ class Tail:
                     e = json.loads(line)
                 except ValueError:
                     continue
-                if e.get("seq", 0) > self.since and (self.vm is None or e.get("vm") == self.vm):
+                if wanted(e, self.since, self.vm, self.by, self.type_):
                     out.append(e)
         if out:
             self.since = out[-1]["seq"]
         return out
 
 
-def follow(since=0, vm=None):
+def follow(since=0, vm=None, by=None, type_=None):
     """Yield events as they are recorded, forever."""
-    tail = Tail(since, vm)
+    tail = Tail(since, vm, by, type_)
     while True:
         yield from tail.poll()
         time.sleep(POLL)
@@ -121,11 +130,15 @@ def fmt(e):
     for k, v in (e.get("data") or {}).items():
         if v not in (None, "", [], {}, False) and k != "at":
             extra.append(f"{k}={v}")
-    return f"{e['seq']:>6}  {t}  {e['type']:<14} {e.get('vm') or '':<24} {' '.join(extra):<24} {e.get('by', '')}"
+    line = f"{e['seq']:>6}  {t}  {e['type']:<14} {e.get('vm') or '':<24} {' '.join(extra):<24} {e.get('by', '')}"
+    if e.get("argv"):
+        line += "  $ fcvm " + " ".join(shlex.quote(a) for a in e["argv"])
+    return line
 
 
 def main(argv):
-    since, follow_, as_json, vm = 0, False, False, None
+    since, follow_, as_json, vm, by, type_ = 0, False, False, None, None, None
+    usage = "usage: fcvm events [--since N] [-f] [--json] [--by ACTOR] [--type TYPE] [VM]"
     args = list(argv)
     while args:
         a = args.pop(0)
@@ -135,20 +148,27 @@ def main(argv):
             follow_ = True
         elif a == "--json":
             as_json = True
+        elif a == "--by" and args:
+            by = args.pop(0)
+        elif a == "--type" and args:
+            type_ = args.pop(0)
         elif a.startswith("-"):
-            sys.exit(f"\033[1;31merror:\033[0m unknown option {a} (usage: fcvm events [--since N] [-f] [--json] [VM])")
+            sys.stderr.write(f"\033[1;31merror:\033[0m unknown option {a} ({usage})\n")
+            if not sys.stderr.isatty():
+                sys.stderr.write("fcvm-error: invalid\n")
+            sys.exit(1)
         else:
             vm = a
     if since < 0:                                   # the last -N events
-        events = read(0, vm)[since:]
+        events = read(0, vm, None, by, type_)[since:]
     else:
-        events = read(since, vm)
+        events = read(since, vm, None, by, type_)
     for e in events:
         print(json.dumps(e) if as_json else fmt(e), flush=True)
     if follow_:
         last = events[-1]["seq"] if events else max(since, 0)
         try:
-            for e in follow(last, vm):
+            for e in follow(last, vm, by, type_):
                 print(json.dumps(e) if as_json else fmt(e), flush=True)
         except KeyboardInterrupt:
             pass

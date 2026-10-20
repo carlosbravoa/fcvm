@@ -17,7 +17,9 @@ Everything is relative to the state directory (`fcvm version` prints it).
   a terminal, `fcvm-error: CODE` ([Error codes](errors.md)). The codes and
   their meanings are part of the contract; messages aren't.
 - **`FCVM_ACTOR`** in the environment names who acts in events and logs
-  (`serve`, `supervisor`, or your program's name).
+  (`serve`, `supervisor`, or your program's name); events also record
+  the command line (`argv`, secrets masked), so the event stream is the
+  audit trail ([Audit](events.md#audit)).
 - **`FCVM_DAEMON=1`** makes `start`, `fork` and `publish` act locally
   instead of delegating to the running service.
 - **Locks.** A command that changes a VM holds `vms/.locks/vm-NAME`

@@ -72,7 +72,7 @@ These use sudo.
 | `rm VM` | deletes a stopped VM and its writable layer (volumes are kept) |
 | `ls [--all] [--json] [--label K=V] [--tenant NAME]` | lists VMs: state, exit code, IP, memory used/allocated, disk, network, ports, volumes, restart policy. `--all` includes build VMs; `--label` only those carrying that label, `--tenant` only that tenant's |
 | `cordon [REASON]`, `uncordon` | refuses new VMs (`create`, `fork`, `pool claim`, pool refills fail with `cordoned`) until uncordoned; running VMs, `start` and restart policies aren't affected. For draining a host |
-| `events [--since N] [-f] [--json] [VM]` | the state changes fcvm recorded (`vm.created`, `vm.started`, `vm.stopped`, `vm.exited`, `vm.deleted`, ...), oldest first: after event `N`, or the last `N` with `--since -N`; `-f` follows. See [Events](events.md) |
+| `events [--since N] [-f] [--json] [--by ACTOR] [--type TYPE] [VM]` | the state changes fcvm recorded (`vm.created`, `vm.started`, `vm.stopped`, `vm.exited`, `vm.deleted`, ...), oldest first: after event `N`, or the last `N` with `--since -N`; `-f` follows; `--by` one actor's (`cli:USER`, `serve`, ...), `--type` one kind. Each carries who did it and the command line ([Audit](events.md#audit)) |
 | `inspect VM` | one VM's details as JSON: its `spec` (the create request, as a template holds it), `status` (`state`, `reason`, `since`), `labels`, its last exit, resource use... see [Listing and inspecting](vms.md#listing-and-inspecting) |
 
 `create` and `run` options:

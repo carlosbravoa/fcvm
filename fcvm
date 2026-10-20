@@ -122,9 +122,10 @@ VMs:
   template save NAME --from VM | IMAGE [create opts] [-- CMD]  [-d DESCRIPTION]
                              save a recipe: create/run --template NAME use it
   inspect VM                 VM details as JSON: its spec, status (state, reason, since), labels...
-  events [--since N] [-f] [--json] [VM]
+  events [--since N] [-f] [--json] [--by ACTOR] [--type TYPE] [VM]
                              state changes fcvm recorded (created, started, stopped, exited,
-                             deleted, ...), oldest first; -f follows; --since -20: the last 20
+                             deleted, ...), oldest first; -f follows; --since -20: the last 20;
+                             --by, --type: only one actor's (cli:USER, serve, ...) or one type
   ops [ID] [-f] [--json]     operations: slow commands (import, build, export, push, snapshot,
                              commit) run detached with --op; their state and output are kept
   cordon [REASON] | uncordon refuse new VMs (create, fork, pool claims and refills) until
@@ -144,6 +145,9 @@ EOF
 }
 
 cmd=${1:-help}; shift || true
+# What events record as `argv` (docs/events.md, Audit): this command line,
+# secret values masked. Internal commands (_event, _reap) act for someone else.
+case $cmd in _*) unset FCVM_ARGV ;; *) FCVM_ARGV=$(argv_record "$cmd" "$@"); export FCVM_ARGV ;; esac
 # --op: run a slow command detached as an operation (fcvm ops), printing its id.
 if [[ " $* " == *" --op "* ]]; then
     case $cmd in

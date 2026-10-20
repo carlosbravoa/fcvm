@@ -81,8 +81,10 @@ fleet view would be a separate control-plane product built on this API.
   rename, delete) using the exec agent's native file operations, so it works
   in any image, even without a shell, and management of host-directory
   mounts, live on running VMs.
-- **W5. Activity and audit.** A timeline of who did what (launch, exec,
-  console sessions, egress denials), feeding E5.
+- **W5. Activity and audit.** ◐ [Events](events.md#audit) record who did
+  what (the actor and the command line, secrets masked) for every state
+  change, and the console redraws on them. Still open: `exec`, console
+  sessions and egress denials in the same trail, feeding E5.
 - **W6. Service mode.** ✅ `fcvm service install`: the network and
   `fcvm serve` at boot (a system unit running as you). VMs with a restart
   policy come back after a reboot or crash (with E4).

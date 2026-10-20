@@ -232,7 +232,7 @@ in `vms/.ops/` and survive a restart of the server.
 
 | method, path | query | returns |
 |---|---|---|
-| `GET /events` | `?since=N[&vm=NAME][&limit=N]` | `{"events": [...], "next": N}`: the state changes after event `N` (`vm.created`, `vm.started`, `vm.stopped`, `vm.exited`, `vm.deleted`, ...), oldest first; with `Accept: text/event-stream`, streamed as they happen. `410` when `N` is older than what's kept. See [Events](events.md) |
+| `GET /events` | `?since=N[&vm=NAME][&by=ACTOR][&type=TYPE][&limit=N]` | `{"events": [...], "next": N}`: the state changes after event `N` (`vm.created`, `vm.started`, `vm.stopped`, `vm.exited`, `vm.deleted`, ...), oldest first; with `Accept: text/event-stream`, streamed as they happen. `410` when `N` is older than what's kept. See [Events](events.md) |
 
 `GET /vms` carries `X-Fcvm-Seq`, the latest event when the list was made.
 

@@ -140,8 +140,8 @@ def t_list_vms():
     return json.loads(fcvm("ls", "--json")[1])
 
 
-def t_events(since=0, vm=None, limit=100):
-    evs = events.read(int(since or 0), vm or None)[:int(limit or 100)]   # the oldest first: paging with next
+def t_events(since=0, vm=None, limit=100, by=None, type=None):
+    evs = events.read(int(since or 0), vm or None, None, by or None, type or None)[:int(limit or 100)]   # the oldest first: paging with next
     return {"events": evs, "next": evs[-1]["seq"] if evs else int(since or 0)}
 
 
@@ -417,7 +417,9 @@ TOOLS = {
          "no_cache": {"type": "boolean"}}, ["context", "tag"]),
     "list_vms": (t_list_vms, "List VMs with state, IP, image, ports and volumes.", {}, []),
     "events": (t_events, "State changes fcvm recorded (vm.created, vm.started, vm.stopped, vm.exited, vm.deleted, ...), the oldest `limit` of those after `since`, each with a seq; pass next as since to continue.",
-               {"since": {**I, "description": "only events after this seq (0: all kept)"}, "vm": S, "limit": I}, []),
+               {"since": {**I, "description": "only events after this seq (0: all kept)"}, "vm": S, "limit": I,
+                "by": {**S, "description": "only one actor's: cli:USER, serve, supervisor, or a program's FCVM_ACTOR"},
+                "type": {**S, "description": "only one type, e.g. vm.started"}}, []),
     "templates": (t_templates, "List launch templates: saved recipes (image, vCPUs, memory, network, volumes, process) for create_sandbox's template argument.", {}, []),
     "create_sandbox": (t_create_sandbox,
         "Create and boot a VM from an image or a template. Container images stay up idle for exec unless a command is given (or the template says otherwise). Returns the VM's details (name, ip)."

@@ -154,6 +154,17 @@ refuse_if_cordoned() {   # what
 emit_event() {   # type vm [reason] [data-json]
     _emit_event "$@" 2>/dev/null || warn "could not record event $1 for '$2'"
 }
+# The command line an event records as `argv` (the audit trail): the fcvm
+# command dispatches with it in FCVM_ARGV, the arguments joined by a unit
+# separator, secret values masked (--secret NAME=VALUE becomes NAME=***).
+argv_record() {   # cmd args...
+    local out="" a prev=""
+    for a; do
+        if [ "$prev" = --secret ] && [[ $a == *=* && $a != *=@* ]]; then a="${a%%=*}=***"; fi
+        out+="${out:+$'\x1f'}$a"; prev=$a
+    done
+    printf '%s' "$out"
+}
 _emit_event() (   # a subshell: the lock's fd never outlives this, whatever path leaves it
     local type=$1 vm=$2 reason=${3:-} data=${4:-'{}'} fd seq labels
     mkdir -p "$VMS_DIR/.locks"
@@ -162,9 +173,9 @@ _emit_event() (   # a subshell: the lock's fd never outlives this, whatever path
     seq=$(( $(cat "$VMS_DIR/.events.seq" 2>/dev/null || echo 0) + 1 ))
     labels=$(jq -c '.labels // {}' "$VMS_DIR/$vm/vm.json" 2>/dev/null) || labels='{}'
     jq -nc --argjson seq "$seq" --arg type "$type" --arg vm "$vm" --arg reason "$reason" --argjson data "$data" \
-        --arg by "${FCVM_ACTOR:-cli:$(id -un)}" --argjson labels "$labels" \
+        --arg by "${FCVM_ACTOR:-cli:$(id -un)}" --argjson labels "$labels" --arg argv "${FCVM_ARGV-}" \
         '{seq: $seq, t: now, type: $type, vm: (if $vm == "" then null else $vm end), reason: (if $reason == "" then null else $reason end),
-          by: $by, labels: $labels, data: $data}' >> "$VMS_DIR/.events.jsonl" || exit 1
+          by: $by, labels: $labels, data: $data} + (if $argv == "" then {} else {argv: ($argv | split("\u001f"))} end)' >> "$VMS_DIR/.events.jsonl" || exit 1
     echo "$seq" > "$VMS_DIR/.events.seq"
     if [ "$(stat -c %s "$VMS_DIR/.events.jsonl")" -gt "${FCVM_EVENTS_ROTATE:-4194304}" ]; then
         mv -f "$VMS_DIR/.events.jsonl" "$VMS_DIR/.events.1.jsonl"

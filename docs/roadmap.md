@@ -163,6 +163,8 @@ Still open:
 - The kernel tarball is checked against kernel.org's `sha256sums.asc`, and
   Firecracker against its `.sha256.txt`. Both come from the same place as
   the download, and the `.asc` signature isn't verified yet.
+- A new kernel build becomes the one VMs boot only once it has every
+  option of the config fragment and boots a test VM.
 - Private registries take one set of credentials (`REGISTRY_USER`,
   `REGISTRY_PASSWORD`).
 - The default kernel is the newest `stable`: patched quickly, but not

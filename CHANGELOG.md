@@ -4,7 +4,7 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
-## 0.11.0 (unreleased)
+## 0.11.0 (2026-10-27)
 
 A host can join a control plane. `fcvm node join URL --token TOKEN`
 enrolls it once; the fcvm service then keeps one outbound session with
@@ -20,6 +20,24 @@ contract](docs/node-contract.md#joining-a-control-plane); the contract
 version stays 1 (additions only). New error codes `node_joined`,
 `node_not_joined`, `join_refused`. After `fcvm upgrade`, `fcvm service
 install` so the service runs the session.
+
+Also:
+- **A new kernel build has to boot before new VMs get it.** `fcvm kernel`
+  pointed `kernels/vmlinux` at every build that compiled, even one whose
+  `.config` had lost options of the fragment (a renamed symbol or a new
+  dependency in a newer kernel), so one bad build broke every VM started
+  after it. Now the switch needs every fragment option and a throwaway VM
+  that boots on the build; otherwise `kernels/vmlinux` stays where it was
+  and `fcvm kernel` fails, saying why. `--no-check` switches anyway.
+  Switching to a version already built runs the same checks. See [The
+  guest kernel](docs/configuration.md#the-guest-kernel).
+- `fcvm kernel --help` went looking for a kernel called `--help` on
+  kernel.org. It prints the usage now, and an argument that's neither a
+  channel nor a version is refused.
+- The docs said `kernels/vmlinux` points at the newest build; it points at
+  the one `fcvm kernel` last switched to. They say so now, and why a new
+  release such as 7.3 is `mainline` on kernel.org until its first point
+  release.
 
 ## 0.10.0 (2026-10-20)
 

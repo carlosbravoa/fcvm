@@ -14,8 +14,8 @@ class Leases(VMTestCase):
         until = self.inspect(vm)["lease_until"]
         self.assertAlmostEqual(until, time.time() + 7200, delta=30)
         self.assertRegex(fcvm("ls").stdout, rf"{vm}.*lease:1(19|20)m")
-        fcvm("update", vm, "--lease", "2026-10-20T12:00:00Z")
-        self.assertEqual(self.inspect(vm)["lease_until"], 1792497600)
+        fcvm("update", vm, "--lease", "2036-01-01T12:00:00Z")   # far off: a past lease gets the VM removed
+        self.assertEqual(self.inspect(vm)["lease_until"], 2082801600)
         fcvm("update", vm, "--lease", str(int(time.time()) + 60))
         fcvm("update", vm, "--lease", "none")
         self.assertIsNone(self.inspect(vm)["lease_until"])

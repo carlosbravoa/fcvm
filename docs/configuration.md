@@ -121,8 +121,29 @@ fcvm kernel 6.18.54            # an exact version
 FORCE=1 fcvm kernel            # rebuild a version already built (e.g. after editing the fragment)
 ```
 
-**Customizing.** Every VM boots `kernels/vmlinux`, a symlink to the newest
-build. The kernel is monolithic, with no loadable modules: features come
+kernel.org lists a new release such as 7.3 as `mainline` until its first
+point release (7.3.1) ships, so `stable` picks it up a week or two after
+its release. `fcvm kernel 7.3` builds it sooner.
+
+**Which kernel VMs boot.** New VMs, and stopped VMs when they start again,
+boot `kernels/vmlinux`, a symlink to the build `fcvm kernel` last switched
+to: the version it was asked for, not necessarily the highest one built.
+Running VMs keep their kernel until they restart (`fcvm status` lists them),
+and forks keep their snapshot's.
+
+Before the switch, the new build has to pass two checks, or `kernels/vmlinux`
+stays where it was and `fcvm kernel` fails:
+- every option of the config fragment made it into the build's `.config`
+  (a newer kernel can rename an option or give it a dependency the fragment
+  lacks, and the build still succeeds without it);
+- a throwaway VM from a container image (`alpine-latest` if there is one),
+  with no network, boots on it and runs a command, in about 2 s.
+
+The first kernel on a host skips both (there is nothing to keep instead),
+and a host with no container image yet skips the boot test. `fcvm kernel X.Y.Z --no-check` switches without the checks,
+for a build you've looked at.
+
+**Customizing.** The kernel is monolithic, with no loadable modules: features come
 from the fragment `kernel/microvm-x86_64.config`, applied on top of
 `allnoconfig`. To add a feature:
 1. Add its options to the fragment.
@@ -130,7 +151,8 @@ from the fragment `kernel/microvm-x86_64.config`, applied on top of
 3. Restart the VMs that need it.
 
 The build reports any option that didn't make it into the final `.config`,
-because of a renamed symbol or an unmet dependency.
+because of a renamed symbol or an unmet dependency, and new VMs don't get a
+build that lacks one.
 
 **Rolling back.** Earlier builds stay in `kernels/`:
 

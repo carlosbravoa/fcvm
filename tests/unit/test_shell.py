@@ -98,6 +98,25 @@ class Status(unittest.TestCase):
         self.assertIn("kernel", r.stdout)
 
 
+class KernelArgs(unittest.TestCase):
+    # Both answered before anything is fetched from kernel.org.
+    def run_kernel(self, *args):
+        return subprocess.run([os.path.join(ROOT, "fcvm"), "kernel", *args], capture_output=True, text=True,
+                              env={**os.environ, "FCVM_HOME": tempfile.mkdtemp(), "https_proxy": "http://127.0.0.1:9"})
+
+    def test_help(self):
+        r = self.run_kernel("--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("usage: fcvm kernel", r.stdout)
+        self.assertIn("--no-check", r.stdout)
+
+    def test_not_a_version(self):
+        for bad in (["7.x"], ["--bogus"], ["7.3", "7.2"]):
+            r = self.run_kernel(*bad)
+            self.assertEqual(r.returncode, 1, bad)
+            self.assertIn("usage: fcvm kernel", r.stderr)
+
+
 class HostSetupCheck(unittest.TestCase):
     def test_check_runs_without_sudo(self):
         r = subprocess.run([os.path.join(LIB, "host-setup.sh"), "--check"], capture_output=True, text=True,

@@ -211,8 +211,10 @@ need() {
     for c; do command -v "$c" >/dev/null || die "missing command '$c' (run: fcvm host-setup)"; done
 }
 
-# Default kernel: the newest one built, via the kernels/vmlinux symlink.
+# The kernel new VMs boot: kernels/vmlinux, a symlink that `fcvm kernel` moves
+# to a build once it passed its checks. FCVM_KERNEL is that check's boot test.
 default_kernel() {
+    if [ -n "${FCVM_KERNEL:-}" ]; then echo "$FCVM_KERNEL"; return; fi
     [ -e "$KERNELS_DIR/vmlinux" ] || die "no kernel built yet (run: fcvm kernel)"
     readlink -f "$KERNELS_DIR/vmlinux"
 }

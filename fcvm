@@ -27,7 +27,9 @@ Host (need sudo):
 
 Build:
   firecracker                download the Firecracker release ($FC_VERSION) into bin/
-  kernel [VERSION]           fetch latest $KERNEL_CHANNEL kernel from kernel.org, build a microVM vmlinux
+  kernel [stable|mainline|longterm|X.Y[.Z]] [--no-check]
+                             build a microVM vmlinux from kernel.org (default: newest $KERNEL_CHANNEL);
+                             new VMs get it once it has every config option and boots a test VM
   init                       build fc-init and the initramfs every VM boots with
   base [NAME]                build a full-OS base image from scratch: Ubuntu 26.04 (default name: ubuntu-26.04)
   import REF [NAME] [--tenant NAME]

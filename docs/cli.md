@@ -40,7 +40,7 @@ These use sudo.
 | command | what it does |
 |---|---|
 | `firecracker` | downloads the latest Firecracker release (or `FC_VERSION`) into `bin/`, checksum-verified |
-| `kernel [stable\|mainline\|longterm\|X.Y.Z]` | builds `kernels/vmlinux-X.Y.Z` from kernel.org sources; `kernels/vmlinux` points at the newest. `FORCE=1` rebuilds |
+| `kernel [stable\|mainline\|longterm\|X.Y[.Z]] [--no-check]` | builds `kernels/vmlinux-X.Y.Z` from kernel.org sources (a version already built isn't rebuilt; `FORCE=1` rebuilds it), then points `kernels/vmlinux`, the kernel new VMs boot, at it if it has every option of the config fragment and boots a throwaway VM; otherwise `kernels/vmlinux` stays where it was. `--no-check` skips the checks. See [The guest kernel](configuration.md#the-guest-kernel) |
 | `init` | builds `build/fc-init` (static) and `build/initramfs.cpio`, which every VM boots with. Runs automatically when needed |
 | `base [NAME]` | builds the Ubuntu 26.04 system image (default name `ubuntu-26.04`) |
 | `all` | `firecracker` + `kernel` + `init` + `base` |

@@ -197,6 +197,7 @@ without it.
 | `NODE` | `0` | `1`: node mode. Admission is on (`NODE_ADMIT=1`), every VM is jailed (`JAIL=1`, `--no-jail` is refused, and an unjailed VM or snapshot from before won't start or fork), `NET_ISOLATE=1` and `NET_HOST_ACCESS=0` are pinned, credential forwarding (`--forward`) is refused, and a VM gets a restricted network with an empty allowlist unless `--net` or `--allow` says otherwise |
 | `NODE_PATHS` | `builds/` in the state directory | the host paths commands may be given in node mode, colon-separated: a directory to share (`-v HOST/DIR`, `mount`), a file to copy (`cp`), a `--secret NAME=@FILE`, a build context or file, a local image to `import`, a snapshot to import, a file to `export` to. Anything else is refused. The default is where the service keeps uploaded build projects |
 | `NODE_NETWORKS` | `full,restricted,none` | the network modes `create` accepts (`policy` otherwise); `restricted,none` keeps every VM behind the egress proxy. Checked on every host, not only in node mode |
+| `NODE_ORPHAN_CMD` | (empty) | after [`fcvm node join`](cli.md#interfaces): a command the fcvm service runs once when the control plane has been unreachable for the time it announced (`orphan_after`) and no VM with a `tenant` label is left on the host. A cloud node image sets `sudo shutdown -h now` (with a sudoers rule) so a node its control plane forgot ends itself |
 
 `fcvm status` says when node mode is on, `fcvm status --json` carries
 `node_mode`, and `fcvm config` shows the pinned values. `fcvm jail-setup`

@@ -146,6 +146,7 @@ Then pick how you want to drive it:
 | **Stronger isolation:** run VMs under the Firecracker jailer | `fcvm jail-setup` (offered by `setup`), then `--jail` |
 | **Your own tooling:** labels, leases, events, operations and error codes, so scripts and a control plane can drive a host | `fcvm events -f`, `fcvm create ... --label --lease`, [the node contract](docs/node-contract.md) |
 | **Several tenants on one host:** quotas per tenant (vCPUs, memory, VMs, disk), tenant-owned images, snapshots and volumes, the host's capacity, a node view for whatever places VMs, and a node mode that locks the host down for them | `fcvm tenant set acme --vcpus 8 --disk 102400`, `fcvm create ... --tenant acme`, `fcvm status --json`, `NODE=1` |
+| **A node of a fleet:** join a control plane with one command; it drives the host through an outbound session, nothing listens | `fcvm node join https://cp.example --token ...`, [the node contract](docs/node-contract.md#joining-a-control-plane) |
 
 A few everyday commands:
 
@@ -218,6 +219,7 @@ The [documentation index](docs/README.md) describes each page.
 - ✅ HTTP API with token auth, and client libraries for Python and Node ([sdk/](sdk/README.md))
 - ✅ MCP server for agents, jailed by default, with an optional pinned network policy
 - ✅ Boot-time systemd service
+- ✅ `fcvm node join`: the host becomes a node of a control plane, driven through an outbound session
 
 **Not (yet)**: multi-host orchestration, remote multi-user access, IPv6
 guests, disk and network rate limits, aarch64. See the

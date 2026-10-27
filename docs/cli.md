@@ -205,6 +205,9 @@ the process was killed) shows as `failed` with the error `interrupted`.
 |---|---|
 | `serve [--port 8686] [--service]` | the web console and [HTTP API](api.md) on `127.0.0.1`, plus the supervisor for restart policies. Prints a login URL. `--service` keeps the token across restarts |
 | `mcp` | the MCP server on stdio, for agents ([Agents](agents.md)) |
+| `node join URL --token TOKEN [--name NAME] [--label K=V]... [--ca FILE]` | make this host a node of a control plane: enroll once with a token the control plane issued. The fcvm service then keeps an outbound session the control plane drives the host through; nothing listens on the node ([the node contract](node-contract.md#joining-a-control-plane)). A cloud image runs it from cloud-init |
+| `node status [--json]` | the control plane this host is joined to, and whether the session is up |
+| `node leave` | forget the control plane; the session closes |
 
 ## Conventions
 

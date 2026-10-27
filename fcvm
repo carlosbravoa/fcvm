@@ -137,6 +137,11 @@ VMs:
                              commit) run detached with --op; their state and output are kept
   cordon [REASON] | uncordon refuse new VMs (create, fork, pool claims and refills) until
                              uncordoned; running VMs and restart policies aren't affected
+  node join URL --token TOKEN [--name NAME] [--label K=V] [--ca FILE]
+                             make this host a node of a control plane: enroll once; the fcvm
+                             service then keeps a session it is driven through (no inbound port)
+  node status [--json] | leave
+                             the control plane and the session's state; forget the control plane
   ls [--all] [--json] [--label K=V] [--tenant NAME]
                              list VMs (--all: include build VMs; --label, --tenant: only those)
   rm VM                      delete a VM
@@ -172,6 +177,7 @@ case $cmd in
     status)             exec "$FCVM_ROOT/lib/status.sh" "$@" ;;
     config)             exec "$FCVM_ROOT/lib/config.sh" "$@" ;;
     tenant)             exec python3 "$FCVM_ROOT/lib/node.py" tenant "$@" ;;
+    node)               exec python3 "$FCVM_ROOT/lib/node_agent.py" "$@" ;;
     host-setup)         exec "$FCVM_ROOT/lib/host-setup.sh" "$@" ;;
     net-up|net-down)    exec "$FCVM_ROOT/lib/net.sh" "${cmd#net-}" "$@" ;;
     jail-setup)         exec "$FCVM_ROOT/lib/jail-setup.sh" "$@" ;;

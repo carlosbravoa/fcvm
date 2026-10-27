@@ -4,6 +4,23 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## 0.11.0 (unreleased)
+
+A host can join a control plane. `fcvm node join URL --token TOKEN`
+enrolls it once; the fcvm service then keeps one outbound session with
+the control plane, which drives the host through the HTTP API as if it
+were local: for each request it asks for a work connection, and the
+service pipes a fresh outbound WebSocket to its own `127.0.0.1` API.
+Nothing listens on the node, no agent is installed, and a cloud image
+runs the command from cloud-init. `fcvm node status` and `fcvm node
+leave`; `fcvm status` shows the session, `fcvm status --json` carries
+`control_plane`; `NODE_ORPHAN_CMD` lets a node its control plane forgot
+end itself. The protocol (version 1) is in [the node
+contract](docs/node-contract.md#joining-a-control-plane); the contract
+version stays 1 (additions only). New error codes `node_joined`,
+`node_not_joined`, `join_refused`. After `fcvm upgrade`, `fcvm service
+install` so the service runs the session.
+
 ## 0.10.0 (2026-10-20)
 
 The second half of a host that serves several tenants: what a tenant

@@ -176,6 +176,14 @@ elif [ "$NODE" = 1 ]; then
 else
     info jailer "not installed (optional: fcvm jail-setup)"
 fi
+if [ -f "$VMS_DIR/.node/join.json" ]; then
+    cp_url=$(jq -r .url "$VMS_DIR/.node/join.json") cp_node=$(jq -r .node_id "$VMS_DIR/.node/join.json")
+    if [ "$(jq -r .connected "$VMS_DIR/.node/state.json" 2>/dev/null)" = true ]; then
+        ok "control plane" "joined to $cp_url as $cp_node, session connected"
+    else
+        note "control plane" "joined to $cp_url as $cp_node, session not connected" "see fcvm node status (and journalctl -u fcvm)"
+    fi
+fi
 if [ "$NODE" = 1 ]; then
     ok "node mode" "NODE=1: admission on, every VM jailed, host paths only under $NODE_PATHS, networks $NODE_NETWORKS (restricted by default)"
 elif [ "$NODE_ADMIT" = 1 ]; then

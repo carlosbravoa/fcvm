@@ -130,6 +130,54 @@ adds: `LEASE_GRACE` (seconds, default 300), and the
 `NODE_MEM_OVERCOMMIT`, `NODE_RESERVE_MIB`, and [node
 mode](configuration.md#node-mode)'s `NODE`, `NODE_PATHS`, `NODE_NETWORKS`.
 
+### Joining a control plane
+
+`fcvm node join URL --token TOKEN` makes the host a node of a control
+plane; the fcvm service then keeps a session the control plane drives
+the host through. Nothing listens on the node: the session and every
+work connection go out from the node. **Protocol version 1.**
+
+- `vms/.node/join.json` (mode 0600): `{url, node_id, credential,
+  cluster, name, ca, labels, joined}`, written by `join`, removed by
+  `leave` or by the control plane's `leave` message. While it exists,
+  `fcvm serve` keeps the session.
+- `vms/.node/state.json`: `{connected, since, control_plane, cluster,
+  node_id, streams_open, streams_total, last_error, updated, removed,
+  removed_reason}`, written by the session; `fcvm node status [--json]`
+  and `fcvm status --json`'s `control_plane` (`{url, cluster, node_id,
+  connected}`, or `null`) read it.
+- **Enrollment:** `POST URL/node/v1/join` with `{token, hostname, name,
+  labels, fcvm, contract, protocol, status}` (`status` is `fcvm status
+  --json`, or `null`); `200 {node_id, credential, cluster, name}`, or an
+  error `{error, code}` (`join_refused` on the command line, with the
+  control plane's code in the message). `https` is required except to
+  `127.0.0.1` (`FCVM_NODE_INSECURE=1` lifts that); `--ca FILE` adds a
+  private CA.
+- **The session:** a WebSocket to `URL/node/v1/session` with
+  `Authorization: Bearer CREDENTIAL`. Text frames carry one JSON object
+  each. The node sends `{type: "hello", node_id, protocol, fcvm,
+  contract, api_port, api_token, status}` first (`api_token` is the
+  serve's current bearer token, so the control plane sets `Host`,
+  `Origin` and `Authorization` itself) and expects `{type: "welcome",
+  cluster, name, ping_every, orphan_after}`. Then: `{type: "open",
+  stream: ID}` asks for a work connection; `{type: "status?"}` is
+  answered with `{type: "status", status, api_token}`; `{type: "leave",
+  reason}` removes `join.json`. The node sends `{type: "bye"}` before
+  closing on `fcvm node leave`. Both sides ping every `ping_every`
+  seconds (default 15); the node reconnects after three silent
+  intervals or any close, with backoff from 1 s to 30 s (60 s after a
+  401 or 403; a 410 means removed).
+- **A work connection:** on `open`, the node connects to its own API
+  (`127.0.0.1:api_port`) and opens a WebSocket to
+  `URL/node/v1/stream/ID` with the same bearer; binary frames are the
+  TCP bytes, both ways, until either side closes. The node parses
+  nothing. At most 256 at once.
+- `POST URL/node/v1/leave` `{node_id}` with the bearer: sent by `fcvm
+  node leave`, best effort.
+- `NODE_ORPHAN_CMD` (a setting): run once when the control plane has
+  been unreachable for `orphan_after` seconds and no VM with a `tenant`
+  label is on the host; empty by default.
+
 ### Node mode
 
 `NODE=1` is the setting a fleet's host runs with. It pins `NODE_ADMIT=1`,

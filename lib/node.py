@@ -443,6 +443,16 @@ def free_taps(prefix, total):
     return free
 
 
+def control_plane():
+    """After fcvm node join: {url, cluster, node_id, connected}, else None."""
+    j = read_json(os.path.join(VMS, ".node", "join.json"))
+    if not j:
+        return None
+    s = read_json(os.path.join(VMS, ".node", "state.json")) or {}
+    return {"url": j.get("url"), "cluster": j.get("cluster"), "node_id": j.get("node_id"),
+            "connected": bool(s.get("connected"))}
+
+
 def status():
     """The node view: capacity, allocated, allocatable, tenants, slots."""
     all_vms, objs = vms(), objects()
@@ -472,6 +482,7 @@ def status():
                   "jail": os.path.exists("/run/fcvm/jaild.sock")},
         "kernel": os.path.basename(os.path.realpath(os.path.join(STATE, "kernels", "vmlinux"))) or None,
         "firecracker": os.environ.get("FIRECRACKER_VERSION") or None,
+        "control_plane": control_plane(),
     }
     if out["kernel"] == "vmlinux":
         out["kernel"] = None

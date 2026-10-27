@@ -63,7 +63,9 @@ export NODE_ADMIT NODE_VCPUS NODE_MEM_MIB NODE_VMS NODE_DISK_MIB NODE_CPU_OVERCO
 : "${NODE_NETWORKS:=full,restricted,none}"     # the network modes create accepts (policy otherwise)
 : "${NODE_PATHS:=$FCVM_HOME/builds}"            # in node mode, host paths must lie under one of these (colon-separated)
 if [ "$NODE" = 1 ]; then NODE_ADMIT=1 NET_ISOLATE=1 NET_HOST_ACCESS=0 JAIL=1; fi
-export NODE NODE_NETWORKS NODE_PATHS
+: "${NODE_ORPHAN_CMD:=}"                       # fcvm node join: run when the control plane has been gone for the time it
+                                               # announced and no tenant VM is left (a cloud node ends itself, say)
+export NODE NODE_NETWORKS NODE_PATHS NODE_ORPHAN_CMD
 CONTRACT=1                                     # docs/node-contract.md: what outside programs may rely on
 
 BIN_DIR=$FCVM_HOME/bin

@@ -45,6 +45,7 @@ from supervisor import Supervisor
 sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # lib/
 import events  # noqa: E402  (lib/events.py: the state changes the CLI records)
 import node  # noqa: E402  (lib/node.py: tenants, capacity and admission)
+import node_agent  # noqa: E402  (lib/node_agent.py: the session with a control plane, after fcvm node join)
 import ops  # noqa: E402  (lib/ops.py: slow commands run detached, their state on disk)
 import templates  # noqa: E402  (lib/templates.py, shared with the CLI and MCP)
 
@@ -1404,6 +1405,7 @@ class App:
         server = await asyncio.start_server(self.handle, "127.0.0.1", self.port, limit=1 << 20)
         asyncio.get_running_loop().create_task(self.stats.run())
         asyncio.get_running_loop().create_task(self.supervisor.run())
+        asyncio.get_running_loop().create_task(node_agent.Agent(self.port, lambda: self.token).run())
         url = f"http://127.0.0.1:{self.port}/?token={self.token}"
         state = os.path.join(VMS, ".serve.json")
         fd = os.open(state, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

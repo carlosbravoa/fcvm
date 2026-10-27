@@ -37,6 +37,17 @@ Two systemd units:
   and `fcvm-jaild` (if installed). That's the web console, its
   [HTTP API](api.md), and the supervisor.
 
+## A node of a control plane
+
+After `fcvm node join URL --token TOKEN`, the service also keeps a
+session with that control plane: one outbound connection, over which the
+control plane drives this host through the [HTTP API](api.md) as if it
+were local. Nothing listens on the host for it. `fcvm node status` shows
+the session, `fcvm node leave` ends it, and [the node
+contract](node-contract.md#joining-a-control-plane) describes the
+protocol. Without the service (a plain `fcvm serve`) the session works
+the same for as long as that serve runs.
+
 ## Restart policies
 
 Set a policy at `create`, change it with `fcvm update`, or pick it in the

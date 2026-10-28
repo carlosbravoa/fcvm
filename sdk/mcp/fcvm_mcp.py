@@ -9,7 +9,7 @@ import os
 import shutil
 import sys
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 # Where install.sh puts the command (per user, then --system). MCP clients
 # often start servers with a minimal PATH, so these are tried after PATH.

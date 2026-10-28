@@ -4,6 +4,20 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## 0.11.1 (2026-10-27)
+
+Two fixes found on the first nodes run in the cloud. After `fcvm upgrade`,
+`fcvm service install` so the API serves the first.
+
+- `GET /api/host`'s `node` section left out `node_mode`, `objects`,
+  `tenants` and `control_plane`, though the node contract says it carries
+  all of `fcvm status --json`. A control plane reading `node_mode` there
+  took every node as not in node mode. It's the whole status now.
+- The first VM started on a fresh cloud host could fail with "console
+  relay failed to start": `start` gave the relay 2 s, and a cold disk
+  made Python and the jail's setup slower than that. It now waits up to
+  15 s, and still fails at once if the relay has crashed.
+
 ## 0.11.0 (2026-10-27)
 
 A host can join a control plane. `fcvm node join URL --token TOKEN`

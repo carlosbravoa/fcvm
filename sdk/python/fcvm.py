@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 
 __all__ = ["Client", "Sandbox", "Snapshot", "Job", "ServerJob", "ExecResult", "FcvmError"]
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 
 class FcvmError(Exception):

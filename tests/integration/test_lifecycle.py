@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 
 from fcvmtest import VMTestCase, fcvm, IMAGE, unique, wait_for, VMS, STATE
@@ -38,6 +39,21 @@ class Lifecycle(VMTestCase):
         self.assertTrue(info["stopped_by_user"])
         fcvm("rm", vm)
         self.assertNotEqual(fcvm("inspect", vm, check=False).returncode, 0)
+
+    def test_a_relay_that_dies_fails_fast(self):
+        # start waits up to 15 s for the console relay (a cold disk is slow),
+        # but not for one that is already gone: here it can't import pty.
+        vm = self.vm(start=False)
+        broken = tempfile.mkdtemp()
+        with open(os.path.join(broken, "pty.py"), "w") as f:
+            f.write("raise SystemExit('pty broken on purpose')\n")
+        t0 = time.time()
+        r = fcvm("start", vm, check=False, env={"FCVM_DAEMON": "1", "PYTHONPATH": broken})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("console relay failed to start", r.stderr)
+        self.assertIn("pty broken on purpose", r.stderr)   # its log is shown
+        self.assertLess(time.time() - t0, 8)
+        fcvm("start", vm)   # and the VM itself is fine
 
     def test_restart_keeps_the_disk(self):
         vm = self.vm()

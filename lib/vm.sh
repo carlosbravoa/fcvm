@@ -953,9 +953,16 @@ start() {
     setsid python3 "$FCVM_ROOT/lib/console.py" serve --sock "$DIR/console.sock" --log "$DIR/console.log" \
         --pidfile "$DIR/pid" --on-exit "$(printf '%q _reap %q' "$FCVM_ROOT/fcvm" "$vm")" "${launch[@]}" \
         </dev/null >"$DIR/relay.log" 2>&1 {VM_LOCK}>&- &
-    local i pid=""
-    for ((i = 0; i < 100; i++)); do pid=$(vm_pid "$vm"); [ -n "$pid" ] && break; sleep 0.02; done
-    [ -n "$pid" ] || { cat "$DIR/relay.log" >&2; die "console relay failed to start"; }
+    # The relay writes the pid once Firecracker (or the jail) is launched: well
+    # under a second, but more on a cold disk (the first VM on a fresh cloud
+    # host reads Python, the kernel and the image for the first time).
+    local i pid="" relay=$!
+    for ((i = 0; i < 750; i++)); do
+        pid=$(vm_pid "$vm"); [ -n "$pid" ] && break
+        kill -0 "$relay" 2>/dev/null || { pid=$(vm_pid "$vm"); break; }   # the relay is gone
+        sleep 0.02
+    done
+    [ -n "$pid" ] || { cat "$DIR/relay.log" >&2; die "console relay failed to start$([ $i -lt 750 ] || echo " in 15 s")"; }
     record_pid_id "$vm" "$pid"; rm -f "$DIR/starting"
     if [ ${#exports[@]} -gt 0 ] && [ $jailed = 1 ]; then start_shares "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi
     if [ "$secrets" != 0 ] && [ $jailed = 1 ]; then start_secrets "$(dirname "$(readlink "$DIR/vsock.sock")")/vsock.sock"; fi

@@ -9,6 +9,7 @@ jobs:
   checks:
     name: lint and unit tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 15                  # a hung test fails the job instead of holding it for hours
     steps:
       - uses: actions/checkout@v7
         with:

@@ -186,6 +186,7 @@ class WebSocketFraming(unittest.IsolatedAsyncioTestCase):
                     break
                 await got.put((op, data))
                 await ws.send(data, op)        # echo, unmasked (a server)
+            w.close()   # else 3.12's wait_closed below waits for this connection forever
         s = await asyncio.start_server(handle, "127.0.0.1", 0)
         port = s.sockets[0].getsockname()[1]
         r, w = await asyncio.open_connection("127.0.0.1", port)
@@ -203,7 +204,7 @@ class WebSocketFraming(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await c.recv(), (0x2, b"after"))
         await c.close()
         s.close()
-        await s.wait_closed()
+        await asyncio.wait_for(s.wait_closed(), 5)
 
 
 class JoinCommands(NodeJoinCase):

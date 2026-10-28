@@ -1116,7 +1116,7 @@ class App:
             "disk_total": st.f_blocks * st.f_frsize, "disk_free": st.f_bavail * st.f_frsize,
             "taps_full": taps("fctap"), "taps_restricted": taps("fcrtap"),
             "jail_available": os.path.exists("/run/fcvm/jaild.sock"),
-            "node": {k: v for k, v in node.status().items() if k in ("admission", "capacity", "allocated", "allocatable", "vms", "slots")},
+            "node": node.status(),   # all of `fcvm status --json`, as docs/node-contract.md promises
             "history": list(self.stats.host),
             "vm_history": {n: list(s)[-1:] for n, s in self.stats.vms.items()},
         }

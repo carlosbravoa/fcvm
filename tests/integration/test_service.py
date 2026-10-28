@@ -267,7 +267,8 @@ class Service(VMTestCase):
         code, body = self.server.api("GET", "tenants")
         self.assertIn(t, [x["name"] for x in body])
         code, body = self.server.api("GET", "host")
-        self.assertEqual(set(body["node"]), {"admission", "capacity", "allocated", "allocatable", "vms", "slots"})
+        self.assertLessEqual({"node_mode", "admission", "capacity", "allocated", "allocatable", "vms", "objects", "tenants",
+                              "slots", "control_plane"}, set(body["node"]))   # the whole fcvm status --json
         self.assertGreaterEqual(body["node"]["allocated"]["vms"], 1)
         code, body = self.server.api("DELETE", f"tenants/{t}")
         self.assertEqual((code, body), (200, {"removed": t}))

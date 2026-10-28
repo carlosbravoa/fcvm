@@ -74,7 +74,7 @@ wrap this API: `Client().create("box", template="python-sandbox")`, then
 
 | method, path | returns |
 |---|---|
-| `GET /host` | hostname, kernel, CPUs, load, disk and memory, free taps per network, `jail_available`, `cordoned` (the reason, or `null`), `node` (the node view: `admission`, `capacity`, `allocated`, `allocatable`, `vms`, `slots`, as `fcvm status --json`), and recent host samples |
+| `GET /host` | hostname, kernel, CPUs, load, disk and memory, free taps per network, `jail_available`, `cordoned` (the reason, or `null`), `node` (the node view, all of `fcvm status --json`: `node_mode`, `admission`, `capacity`, `allocated`, `allocatable`, `vms`, `objects`, `tenants`, `slots`, `control_plane`, ...), and recent host samples |
 | `POST /host/cordon` `{"reason": "..."}`, `POST /host/uncordon` | `fcvm cordon` / `uncordon`: refuse new VMs, or accept them again |
 | `POST /leases/renew` `{"label": "cp=prod", "until": 1760900300}` | `fcvm update --lease` on every VM carrying that label; returns `{"renewed": [names]}` |
 | `GET /presets` | the egress presets (`@pypi`, ...) with their host patterns |

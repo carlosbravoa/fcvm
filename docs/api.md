@@ -31,7 +31,8 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8686/api/vms | jq '.[
 ```
 
 - **Scripts** send `Authorization: Bearer <token>`. That header is only
-  accepted under `/api/`.
+  accepted under `/api/`, on `/metrics` and on the
+  [terminal WebSockets](#terminals-websockets).
 - **Browsers** open the printed URL (`/?token=...`) once, and the server
   swaps the token for an HttpOnly, SameSite=Strict cookie. Changes made with
   the cookie must carry a same-origin `Origin` header. Bearer requests don't
@@ -266,6 +267,14 @@ registered by path.
 
 `/ws/vms/{vm}/console` (the serial console) and `/ws/vms/{vm}/shell` (an
 interactive shell through the exec agent) are WebSockets carrying raw
-terminal bytes. They authenticate with the browser cookie and a same-origin
-`Origin`, not with a bearer token. For scripted access, use the CLI
-(`fcvm exec`, `fcvm console`) instead.
+terminal bytes: binary frames both ways. They authenticate like the rest of
+the API: the browser cookie with a same-origin `Origin`, or `Authorization:
+Bearer <token>` with no `Origin` needed (what a control plane or a script
+sends). The shell's first message is a text frame `{"rows": 24, "cols": 80,
+"user": ""}` (`user` empty: the image's user), and a text frame `{"resize":
+[ROWS, COLS]}` resizes it later. The console replays its recent output
+first.
+
+```sh
+websocat -H "Authorization: Bearer $TOKEN" ws://127.0.0.1:8686/ws/vms/web/console
+```

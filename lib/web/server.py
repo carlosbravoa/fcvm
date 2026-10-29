@@ -4,8 +4,9 @@
   fcvm serve [--port 8686] [--service]
 
 It is also fcvm's daemon: the supervisor (supervisor.py) brings VMs back after
-a reboot and applies restart policies, and the JSON API under /api/ accepts
-the token as "Authorization: Bearer <token>" for scripts (docs/api.md).
+a reboot and applies restart policies, and the JSON API under /api/, /metrics
+and the terminal WebSockets under /ws/ accept the token as "Authorization:
+Bearer <token>" for scripts and control planes (docs/api.md).
 `fcvm service install` runs it at boot with --service, which keeps the token
 across restarts. The running server's URL and token are in vms/.serve.json.
 
@@ -18,7 +19,8 @@ Security (local only): binds 127.0.0.1. The startup URL carries a random
 token, exchanged for an HttpOnly SameSite=Strict cookie. Requests must have a
 localhost Host header (against DNS rebinding), and browser changes and
 WebSockets a same-origin Origin (against cross-site requests). API calls with
-a bearer token need no Origin: browsers never add that header by themselves.
+a bearer token need no Origin: browsers never add that header by themselves
+(a browser's WebSocket can't send it at all).
 """
 import argparse
 import asyncio
@@ -467,6 +469,27 @@ async def agent_open(vmdir, *fields):
     return r, w
 
 
+async def agent_connect(vmdir, wait=15):
+    """The exec agent's stream for a session, retrying while the VM boots (as
+    fcvm exec does): a terminal is often the first thing opened on a new VM."""
+    sock, deadline = os.path.join(vmdir, "vsock.sock"), time.monotonic() + wait
+    while True:
+        if not os.path.exists(sock):
+            raise OSError(errno.ENOENT, "the VM is not running")
+        try:
+            r, w = await asyncio.open_unix_connection(sock)
+            w.write(b"CONNECT 1024\n")
+            await w.drain()
+            if (await r.readline()).startswith(b"OK "):
+                return r, w
+            w.close()
+        except OSError:
+            pass
+        if time.monotonic() > deadline:
+            raise OSError(0, "the exec agent is not answering")
+        await asyncio.sleep(0.2)
+
+
 async def agent_result(r, w, collect=True):
     out, err = b"", ""
     try:
@@ -590,7 +613,7 @@ class App:
         if host not in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
             raise HTTPError(403, "bad Host header")
         auth = headers.get("authorization", "")
-        if auth.startswith("Bearer ") and (path.startswith("/api/") or path == "/metrics"):   # scripts, Prometheus
+        if auth.startswith("Bearer ") and (path.startswith(("/api/", "/ws/")) or path == "/metrics"):   # scripts, Prometheus, control planes
             if not secrets.compare_digest(auth[7:].strip(), self.token):
                 raise HTTPError(401, "wrong token")
             return
@@ -1309,13 +1332,8 @@ class App:
         """An interactive shell through the exec agent (vsock), like `fcvm shell`."""
         op, first = await ws.recv()         # {"rows": R, "cols": C, "user": "..."}
         opts = json.loads(first or b"{}") if op == 0x1 else {}
-        r, w = await asyncio.open_unix_connection(os.path.join(d, "vsock.sock"))
+        r, w = await agent_connect(d)
         touch_activity(d)
-        w.write(b"CONNECT 1024\n")
-        await w.drain()
-        line = await r.readline()
-        if not line.startswith(b"OK "):
-            raise OSError(0, "the exec agent is not answering")
         fields = ["fcvm2", "1", str(opts.get("rows", 24)), str(opts.get("cols", 80)), "xterm-256color",
                   opts.get("user", ""), "", "0"]
         payload = b"\0".join(f.encode() for f in fields) + b"\0"

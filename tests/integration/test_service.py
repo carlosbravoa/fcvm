@@ -24,6 +24,52 @@ class Service(VMTestCase):
         code, _ = self.server.api("GET", "vms", token="wrong")
         self.assertEqual(code, 401)
 
+    def test_terminals_with_a_bearer_token(self):
+        """/ws/ takes the bearer token without an Origin, as a control plane sends it."""
+        import asyncio
+        import os
+        import sys
+        from fcvmtest import ROOT
+        sys.path.insert(0, os.path.join(ROOT, "lib"))
+        import node_agent as na   # its WebSocket client sends a bearer and no Origin
+        vm = self.vm()
+
+        async def read_until(ws, want):
+            out = b""
+            while want not in out:
+                op, data = await asyncio.wait_for(ws.recv(), 20)
+                if op is None:
+                    break
+                out += data
+            await ws.close()
+            return out
+
+        async def shell():
+            ws = await na.ws_connect(self.server.url, f"/ws/vms/{vm}/shell", self.server.token)
+            await ws.send_json({"rows": 24, "cols": 80})
+            await ws.send(b"echo ws-$((40+2))\n", 0x2)
+            return await read_until(ws, b"ws-42")
+
+        async def console():   # an idle app VM's console may have printed nothing: the handshake is the test
+            ws = await na.ws_connect(self.server.url, f"/ws/vms/{vm}/console", self.server.token)
+            await ws.close()
+            return True
+
+        async def refused():
+            try:
+                await na.ws_connect(self.server.url, f"/ws/vms/{vm}/shell", "wrong")
+            except na.WSError as e:
+                return e.status
+        try:
+            self.assertEqual(asyncio.run(refused()), 401)
+            out = asyncio.run(shell())
+        except na.WSError as e:
+            if e.status == 401:
+                self.skipTest("the running fcvm service predates bearer terminals: fcvm service install")
+            raise
+        self.assertIn(b"ws-42", out)
+        self.assertTrue(asyncio.run(console()))
+
     def test_error_codes(self):
         code, body = self.server.api("GET", f"vms/{unique('none')}")
         if code == 400 and "code" not in body:

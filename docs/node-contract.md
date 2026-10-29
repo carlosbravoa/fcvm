@@ -176,7 +176,10 @@ work connection go out from the node. **Protocol version 1.**
   node parses nothing. At most 256 at once. A stream it can't serve is
   opened and closed at once with a reason: 1008 for a target it refuses
   (malformed, a port outside 1..65535, no such VM, not running, no
-  network), 1011 when the connection fails.
+  network), 1011 when the connection fails. The API's [terminal
+  WebSockets](api.md#terminals-websockets) take the bearer token like
+  the rest of it, so the control plane reaches them through a work
+  connection too.
 - `POST URL/node/v1/leave` `{node_id}` with the bearer: sent by `fcvm
   node leave`, best effort.
 - `NODE_ORPHAN_CMD` (a setting): run once when the control plane has

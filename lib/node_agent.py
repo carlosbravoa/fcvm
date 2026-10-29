@@ -9,9 +9,10 @@ then on the fcvm service (fcvm serve, which runs Agent.run as a task) keeps a
 session with the control plane: one outbound WebSocket carrying JSON
 messages, and, whenever the control plane says {"type": "open", "stream":
 ID}, a work connection: a second WebSocket (/node/v1/stream/ID) piped byte
-for byte to this host's own API on 127.0.0.1. The control plane sets Host,
-Origin and Authorization itself (hello tells it the port and the token), so
-nothing here parses HTTP. The protocol is part of the node contract
+for byte to this host's own API on 127.0.0.1, or, when the open has a
+"target": "vm:NAME:PORT", to that VM's guest port. The control plane sets
+Host, Origin and Authorization itself (hello tells it the port and the
+token), so nothing here parses HTTP. The protocol is part of the node contract
 (docs/node-contract.md, "Joining a control plane").
 
 Standard library only (os.urandom rather than the secrets module, which
@@ -25,6 +26,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import ssl
 import struct
 import subprocess
@@ -34,6 +36,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import node  # lib/node.py: whether a VM runs
+
 PROTOCOL = 1
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.environ.get("FCVM_HOME") or ROOT
@@ -41,7 +45,9 @@ FCVM = os.path.join(ROOT, "fcvm")
 NODE_DIR = os.path.join(STATE, "vms", ".node")
 JOIN = os.path.join(NODE_DIR, "join.json")
 STATE_FILE = os.path.join(NODE_DIR, "state.json")
+VMS = os.path.join(STATE, "vms")
 MAX_STREAMS = 256
+VM_TARGET = re.compile(r"vm:([A-Za-z0-9_][A-Za-z0-9_.-]*):([0-9]{1,5})")
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -124,6 +130,23 @@ def host_status(timeout=30):
         return None
 
 
+def vm_target(target):
+    """An open's "vm:NAME:PORT" -> (guest IP, port) of a VM running here;
+    ValueError says why not."""
+    m = VM_TARGET.fullmatch(target) if isinstance(target, str) else None
+    if not m or not 1 <= int(m.group(2)) <= 65535:
+        raise ValueError(f"bad target {target!r} (want vm:NAME:PORT, PORT 1-65535)")
+    name, d = m.group(1), os.path.join(VMS, m.group(1))
+    if not os.path.isfile(os.path.join(d, "vm.json")):
+        raise ValueError(f"no VM '{name}' on this host")
+    if not node.running(d):
+        raise ValueError(f"VM '{name}' is not running")
+    ip = node.read(os.path.join(d, "ip")).strip()
+    if not ip:
+        raise ValueError(f"VM '{name}' has no network")
+    return ip, int(m.group(2))
+
+
 def serve_running():
     s = read_json(os.path.join(STATE, "vms", ".serve.json"))
     return bool(s and os.path.exists(f"/proc/{s.get('pid')}"))
@@ -144,6 +167,7 @@ class WS:
     def __init__(self, reader, writer, mask=True):
         self.r, self.w, self.mask = reader, writer, mask
         self.closed = False
+        self.close_code, self.close_reason = None, ""   # the other side's, once it closed
 
     async def recv(self):
         """-> (opcode, bytes) of the next complete message; (None, None) once closed."""
@@ -169,6 +193,9 @@ class WS:
                 for i in range(n):
                     payload[i] ^= mask[i % 4]
             if op == 0x8:                       # close: echo it, done
+                if n >= 2:
+                    self.close_code = struct.unpack(">H", payload[:2])[0]
+                    self.close_reason = payload[2:].decode(errors="replace")
                 await self.send(bytes(payload[:2]), 0x8)
                 self.closed = True
                 return None, None
@@ -208,9 +235,9 @@ class WS:
     async def ping(self):
         await self.send(b"", 0x9)
 
-    async def close(self):
+    async def close(self, code=None, reason=""):
         if not self.closed:
-            await self.send(b"", 0x8)
+            await self.send(struct.pack(">H", code) + reason.encode()[:120] if code else b"", 0x8)
             self.closed = True
         try:
             self.w.close()
@@ -399,7 +426,7 @@ class Agent:
                     elif t == "open":
                         sid = str(m.get("stream") or "")
                         if sid and len(self.streams) < MAX_STREAMS:
-                            self.streams[sid] = asyncio.ensure_future(self.stream(j, sid))
+                            self.streams[sid] = asyncio.ensure_future(self.stream(j, sid, m.get("target")))
                     elif t == "status?":
                         status = await asyncio.get_running_loop().run_in_executor(None, host_status)
                         await ws.send_json({"type": "status", "status": status, "api_token": self.token_fn()})
@@ -422,19 +449,29 @@ class Agent:
                 return
             await ws.ping()
 
-    async def stream(self, j, sid):
-        """A work connection: the control plane's WebSocket piped to the local API."""
+    async def stream(self, j, sid, target=None):
+        """A work connection: the control plane's WebSocket piped to the local
+        API, or to a VM's guest port. One that can't be served is opened and
+        closed at once, with 1008 (refused target) or 1011 (unreachable)."""
         try:
+            w, refused = None, None
             try:
-                r, w = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", self.api_port), 5)
+                host, port = ("127.0.0.1", self.api_port) if target is None else vm_target(target)
+                r, w = await asyncio.wait_for(asyncio.open_connection(host, port), 5)
+            except ValueError as e:
+                refused = (1008, str(e))
             except (OSError, asyncio.TimeoutError) as e:
-                log(f"stream {sid}: cannot reach the local API: {e}")
-                return
+                refused = (1011, f"cannot reach {'the local API' if target is None else target}: {e or 'timeout'}")
             try:
                 ws = await ws_connect(j["url"], f"/node/v1/stream/{sid}", j["credential"], j.get("ca"))
             except (OSError, WSError, asyncio.TimeoutError) as e:
-                w.close()
+                if w:
+                    w.close()
                 log(f"stream {sid}: {e}")
+                return
+            if refused:
+                log(f"stream {sid}: {refused[1]}")
+                await ws.close(*refused)
                 return
             self.served += 1
             self.save()

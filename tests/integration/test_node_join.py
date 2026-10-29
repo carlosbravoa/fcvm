@@ -12,7 +12,7 @@ import tempfile
 import threading
 import unittest
 
-from fcvmtest import FCVM, ROOT, free_port, wait_for
+from fcvmtest import FCVM, ROOT, VMS, VMTestCase, fcvm, free_port, jail_usable, wait_for
 
 if os.path.join(ROOT, "lib") not in sys.path:
     sys.path.append(os.path.join(ROOT, "lib"))
@@ -24,6 +24,7 @@ sys.path.append(os.path.join(ROOT, "tests", "unit"))   # for its `from helpers i
 _spec.loader.exec_module(_mod)
 sys.path.remove(os.path.join(ROOT, "tests", "unit"))
 FakeControlPlane = _mod.FakeControlPlane
+na = _mod.na
 
 
 class NodeJoin(unittest.TestCase):
@@ -98,6 +99,69 @@ class NodeJoin(unittest.TestCase):
         self.assertEqual(self.cp.leaves[-1][1], {"node_id": "n-test"})
         wait_for(lambda: self.cp.session is None or self.cp.session.closed, 30, what="the session to close")
         self.assertIn("not joined", self.fcvm("node", "status").stdout)
+
+
+class StreamTargets(VMTestCase):
+    """A work connection with target vm:NAME:PORT reaches a real VM's guest port,
+    jailed or not. The session runs in this process against the real VMs, with
+    a join of its own in a throwaway directory."""
+
+    def setUp(self):
+        self.node_dir = tempfile.mkdtemp(prefix="fcvmtest-node-")
+        saved = (na.NODE_DIR, na.JOIN, na.STATE_FILE, na.VMS)
+        na.NODE_DIR, na.VMS = self.node_dir, VMS
+        na.JOIN, na.STATE_FILE = os.path.join(self.node_dir, "join.json"), os.path.join(self.node_dir, "state.json")
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, daemon=True).start()
+        self.cp = FakeControlPlane()
+        self.on_cp(self.cp.start())
+        na.write_json(na.JOIN, {"url": self.cp.url, "node_id": "n-test", "credential": self.cp.credential,
+                                "cluster": "unit", "name": "fake", "ca": None, "labels": {}, "joined": 0})
+        self.agent = asyncio.run_coroutine_threadsafe(na.Agent(1, lambda: "t", orphan_cmd="").run(), self.loop)
+        self.on_cp(asyncio.wait_for(self.cp.hellos.get(), 15))
+
+        def restore():
+            self.agent.cancel()
+            self.on_cp(self.cp.stop())
+            self.loop.call_soon_threadsafe(self.loop.stop)
+            na.NODE_DIR, na.JOIN, na.STATE_FILE, na.VMS = saved
+            shutil.rmtree(self.node_dir, ignore_errors=True)
+        self.addCleanup(restore)
+
+    def on_cp(self, coro, timeout=30):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
+
+    def guest_port(self, *opts):
+        vm = self.vm(*opts)
+        fcvm("exec", vm, "--", "sh", "-c", 'setsid sh -c "echo from-guest | nc -l -p 8000" >/dev/null 2>&1 </dev/null &')
+        return vm
+
+    def read(self, target):
+        async def go():
+            ws = await self.cp.open_stream(10, target=target)
+            op, data = await asyncio.wait_for(ws.recv(), 20)
+            await ws.close()
+            return data if op else (ws.close_code, ws.close_reason)
+        return self.on_cp(go())
+
+    def served(self, vm):
+        """The guest's line, once its nc listens (before that, the stream closes with 1011)."""
+        return wait_for(lambda: (lambda d: d if isinstance(d, bytes) else None)(self.read(f"vm:{vm}:8000")),
+                        10, what="the guest's nc").strip()
+
+    def test_a_vm_port(self):
+        vm = self.guest_port()
+        self.assertEqual(self.served(vm), b"from-guest")
+        code, why = self.read(f"vm:{vm}:8001")
+        self.assertEqual(code, 1011)
+        self.assertIn("cannot reach", why)
+        none = self.vm("--net", "none")
+        self.assertEqual(self.read(f"vm:{none}:8000"), (1008, f"VM '{none}' has no network"))
+
+    @unittest.skipUnless(jail_usable(), "fcvm-jaild isn't set up for this state directory")
+    def test_a_jailed_vm_port(self):
+        vm = self.guest_port("--jail")
+        self.assertEqual(self.served(vm), b"from-guest")
 
 
 if __name__ == "__main__":

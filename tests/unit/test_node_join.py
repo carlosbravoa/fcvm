@@ -115,11 +115,11 @@ class FakeControlPlane:
             else:
                 await ws.close()
 
-    async def open_stream(self, timeout=5):
+    async def open_stream(self, timeout=5, **extra):
         sid = os.urandom(4).hex()
         fut = asyncio.get_running_loop().create_future()
         self.streams[sid] = fut
-        await self.session.send_json({"type": "open", "stream": sid})
+        await self.session.send_json({"type": "open", "stream": sid, **extra})
         return await asyncio.wait_for(fut, timeout)
 
 
@@ -153,6 +153,7 @@ class NodeJoinCase(unittest.IsolatedAsyncioTestCase):
         na.NODE_DIR = os.path.join(self.home, "vms", ".node")
         na.JOIN = os.path.join(na.NODE_DIR, "join.json")
         na.STATE_FILE = os.path.join(na.NODE_DIR, "state.json")
+        na.VMS = os.path.join(self.home, "vms")
 
     def tearDown(self):
         os.environ.pop("FCVM_HOME", None)
@@ -316,6 +317,50 @@ class Session(NodeJoinCase):
             self.assertIn("removed by the control plane", out)
             await asyncio.sleep(1.5)
             self.assertTrue(cp.hellos.empty())
+        finally:
+            task.cancel()
+            echo.close()
+            await cp.stop()
+
+    async def test_streams_to_a_vm(self):
+        """target: vm:NAME:PORT connects to the VM's IP; anything else closes the stream with a reason."""
+        cp = FakeControlPlane()
+        await cp.start()
+        echo, port = await echo_server()
+        def vm(name, ip="127.0.0.1", live=True):
+            d = os.path.join(na.VMS, name)
+            os.makedirs(d)
+            na.write_json(os.path.join(d, "vm.json"), {"name": name})
+            if ip:
+                with open(os.path.join(d, "ip"), "w") as f:
+                    f.write(ip + "\n")
+            with open(os.path.join(d, "pid"), "w") as f:
+                f.write(f"{os.getpid()}\n")
+            with open(os.path.join(d, "pid.id"), "w") as f:   # this process stands in for its Firecracker
+                f.write(f"{na.node.boot_id()} {na.node.proc_start(os.getpid()) if live else 0}\n")
+        vm("web")
+        vm("offline", ip=None)
+        vm("stopped", live=False)
+        self.joined(cp)
+        agent = na.Agent(1, lambda: "tok-1", orphan_cmd="")   # no API: only targets can work
+        task = asyncio.ensure_future(agent.run())
+        try:
+            await asyncio.wait_for(cp.hellos.get(), 10)
+            ws = await cp.open_stream(target=f"vm:web:{port}")
+            await ws.send(b"to the guest", 0x2)
+            self.assertEqual(await asyncio.wait_for(ws.recv(), 5), (0x2, b"to the guest"))
+            await ws.close()
+
+            for target, code, why in [(f"vm:nope:{port}", 1008, "no VM 'nope' on this host"),
+                                      (f"vm:stopped:{port}", 1008, "VM 'stopped' is not running"),
+                                      (f"vm:offline:{port}", 1008, "VM 'offline' has no network"),
+                                      ("vm:web:0", 1008, "bad target"), ("vm:web:65536", 1008, "bad target"),
+                                      (f"host:{port}", 1008, "bad target"), (["vm"], 1008, "bad target"),
+                                      ("vm:web:1", 1011, "cannot reach vm:web:1"), (None, 1011, "the local API")]:
+                ws = await cp.open_stream(target=target)
+                self.assertEqual(await asyncio.wait_for(ws.recv(), 5), (None, None), target)
+                self.assertEqual(ws.close_code, code, target)
+                self.assertIn(why, ws.close_reason, target)
         finally:
             task.cancel()
             echo.close()

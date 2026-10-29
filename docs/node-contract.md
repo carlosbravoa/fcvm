@@ -160,7 +160,8 @@ work connection go out from the node. **Protocol version 1.**
   serve's current bearer token, so the control plane sets `Host`,
   `Origin` and `Authorization` itself) and expects `{type: "welcome",
   cluster, name, ping_every, orphan_after}`. Then: `{type: "open",
-  stream: ID}` asks for a work connection; `{type: "status?"}` is
+  stream: ID, target}` asks for a work connection (`target` is
+  optional); `{type: "status?"}` is
   answered with `{type: "status", status, api_token}`; `{type: "leave",
   reason}` removes `join.json`. The node sends `{type: "bye"}` before
   closing on `fcvm node leave`. Both sides ping every `ping_every`
@@ -168,10 +169,14 @@ work connection go out from the node. **Protocol version 1.**
   intervals or any close, with backoff from 1 s to 30 s (60 s after a
   401 or 403; a 410 means removed).
 - **A work connection:** on `open`, the node connects to its own API
-  (`127.0.0.1:api_port`) and opens a WebSocket to
-  `URL/node/v1/stream/ID` with the same bearer; binary frames are the
-  TCP bytes, both ways, until either side closes. The node parses
-  nothing. At most 256 at once.
+  (`127.0.0.1:api_port`), or with `target: "vm:NAME:PORT"` to that
+  running VM's guest port (any port, jailed or not), and opens a
+  WebSocket to `URL/node/v1/stream/ID` with the same bearer; binary
+  frames are the TCP bytes, both ways, until either side closes. The
+  node parses nothing. At most 256 at once. A stream it can't serve is
+  opened and closed at once with a reason: 1008 for a target it refuses
+  (malformed, a port outside 1..65535, no such VM, not running, no
+  network), 1011 when the connection fails.
 - `POST URL/node/v1/leave` `{node_id}` with the bearer: sent by `fcvm
   node leave`, best effort.
 - `NODE_ORPHAN_CMD` (a setting): run once when the control plane has

@@ -4,6 +4,28 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## 0.12.0 (2026-10-28)
+
+What a control plane needs to give its users terminals and ports on a
+node. Both are additions: the node contract stays at version 1 and the
+session protocol at 1. After `fcvm upgrade`, `fcvm service install` so
+the service runs them.
+
+- **A work connection can reach a VM.** An `open` may name a target,
+  `{"type": "open", "stream": ID, "target": "vm:NAME:PORT"}`, and the
+  node pipes that stream to the running VM's guest port, jailed or not,
+  instead of to its own API. A stream the node can't serve (a malformed
+  target, no such VM, not running, no network, nothing listening) is
+  opened and closed at once with a reason (code 1008 or 1011) rather
+  than dropped. ([Node contract](docs/node-contract.md#joining-a-control-plane))
+- **Terminal WebSockets take the bearer token.** `/ws/vms/{vm}/shell`
+  and `/console` accept `Authorization: Bearer <token>` with no `Origin`,
+  like `/api`, so a control plane or a script can open them; the browser
+  console keeps its cookie. ([Terminals](docs/api.md#terminals-websockets))
+- A shell opened right after a VM started could fail with "the exec
+  agent is not answering". It now waits for the agent up to 15 s, as
+  `fcvm exec` does.
+
 ## 0.11.1 (2026-10-27)
 
 Two fixes found on the first nodes run in the cloud. After `fcvm upgrade`,

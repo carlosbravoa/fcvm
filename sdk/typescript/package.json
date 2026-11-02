@@ -1,6 +1,6 @@
 {
   "name": "fcvm",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "A client for the fcvm HTTP API: Firecracker microVM sandboxes from Node",
   "keywords": [
     "firecracker",

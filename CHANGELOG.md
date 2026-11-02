@@ -4,6 +4,15 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## 0.12.1 (2026-11-02)
+
+`fcvm kernel` refused the current stable kernel on a host that already had
+one. Linux 7.3 renamed `CONFIG_PROC_SYSCTL` to `CONFIG_SYSCTL`, and the
+check took the old name for an option that didn't apply, so it built 7.3.1
+and stayed on the previous kernel. It now accepts either name. Guests on
+7.3 were never affected, and fresh installs got 7.3.1 as usual. If you used
+`--no-check` to get past this, nothing needs redoing.
+
 ## 0.12.0 (2026-10-28)
 
 What a control plane needs to give its users terminals and ports on a

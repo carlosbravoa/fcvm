@@ -42,6 +42,13 @@ class KernelSwitch(unittest.TestCase):
         os.symlink(real, os.path.join(k, "vmlinux-1.0.3"))
         with open(config) as src, open(os.path.join(k, "config-1.0.3"), "w") as dst:
             dst.write(src.read().replace("CONFIG_VIRTIO_BLK=y", "# CONFIG_VIRTIO_BLK is not set"))
+        # Linux 7.3's /proc/sys option, and a kernel with neither name
+        with open(config) as f:
+            rest = [l for l in f if not l.startswith(("CONFIG_SYSCTL=", "CONFIG_PROC_SYSCTL="))]
+        for v, lines in (("1.0.4", rest + ["CONFIG_SYSCTL=y\n"]), ("1.0.5", rest)):
+            os.symlink(real, os.path.join(k, f"vmlinux-{v}"))
+            with open(os.path.join(k, f"config-{v}"), "w") as f:
+                f.writelines(lines)
 
     @classmethod
     def tearDownClass(cls):
@@ -88,6 +95,14 @@ class KernelSwitch(unittest.TestCase):
         r = self.kernel("1.0.3", "--no-check")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.current(), "vmlinux-1.0.3")
+
+    def test_the_sysctl_option_may_go_by_either_name(self):
+        r = self.kernel("1.0.4", "--no-check")     # --no-check moves it anyway, but still warns
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("SYSCTL", r.stderr)
+        r = self.kernel("1.0.5", "--no-check")
+        self.assertIn("requested CONFIG_PROC_SYSCTL=y", r.stderr)
+        self.assertIn("requested CONFIG_SYSCTL=y", r.stderr)
 
 
 if __name__ == "__main__":

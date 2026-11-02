@@ -53,6 +53,8 @@ config_missing() {   # CONFIG-FILE
     local line n=0
     while IFS= read -r line; do
         grep -qxF "$line" "$1" && continue
+        # gone since 7.3, where CONFIG_SYSCTL (also in the fragment) took its place
+        [ "$line" = CONFIG_PROC_SYSCTL=y ] && grep -qxF CONFIG_SYSCTL=y "$1" && continue
         warn "requested $line, got: $(grep -E "^(# )?${line%%=*}[= ]" "$1" || echo 'not present')"
         n=$((n + 1))
     done < <(grep -E '^CONFIG_[A-Z0-9_]+=' "$fragment")

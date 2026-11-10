@@ -4,6 +4,16 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## 0.12.2 (2026-11-10)
+
+Validated on Firecracker v1.18.0, now the version `fcvm firecracker`
+installs by default (`FC_VERSION=latest`). 1.18.0's one new feature, Nitro
+Sandboxes (the `PUT /enclave` API), needs AWS Nitro hardware and doesn't
+apply to fcvm's local microVMs, so nothing in fcvm changed for it. If you
+pin `FC_VERSION`, move it to `v1.18.0`; after changing it, re-run `fcvm
+jail-setup` so the root helper's copy matches, or jailed VMs keep booting
+the old binary.
+
 ## 0.12.1 (2026-11-02)
 
 `fcvm kernel` refused the current stable kernel on a host that already had

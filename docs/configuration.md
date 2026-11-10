@@ -100,7 +100,7 @@ Change subnets or bridge names only with no VMs running, then run
 
 | setting | default | |
 |---|---|---|
-| `FC_VERSION` | `latest` | the release `fcvm firecracker` downloads, e.g. `v1.17.0` |
+| `FC_VERSION` | `latest` | the release `fcvm firecracker` downloads, e.g. `v1.18.0` |
 | `ARCH` | `uname -m` | only x86_64 is supported today |
 
 Snapshots are tied to the Firecracker version that took them. After

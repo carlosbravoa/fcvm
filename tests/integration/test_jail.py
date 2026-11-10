@@ -2,7 +2,7 @@
 import os
 import unittest
 
-from fcvmtest import VMTestCase, fcvm, VMS, jail_usable
+from fcvmtest import VMTestCase, fcvm, VMS, jail_usable, allocated_mib, wait_for
 
 
 @unittest.skipUnless(jail_usable(), "fcvm-jaild isn't set up for this state directory")
@@ -18,6 +18,18 @@ class Jail(VMTestCase):
         self.assertEqual(ifaces, {"lo", "veth0", "br0", "tap0"})
         self.assertEqual(fcvm("exec", vm, "--", "echo", "inside").stdout.strip(), "inside")
         self.assertTrue(os.path.islink(os.path.join(VMS, vm, "fc.sock")))   # links into the chroot
+
+    def test_discard_reclaims_space_through_the_chroot(self):
+        """virtio-blk discard punches holes in the backing file whose bind mount
+        the jailed Firecracker writes through."""
+        vm = self.vm("--jail")
+        backing = os.path.join(VMS, vm, "rw.ext4")
+        base = allocated_mib(backing)
+        self.sh(vm, "dd if=/dev/zero of=/root/big bs=1M count=200 2>/dev/null; sync")
+        self.assertGreater(allocated_mib(backing), base + 150)
+        self.sh(vm, "rm -f /root/big; sync")
+        wait_for(lambda: allocated_mib(backing) < base + 50, timeout=10,
+                 what="the jailed backing file to shrink after delete")
 
     def test_secrets_and_live_ports_in_a_jail(self):
         """The secrets server and the port forwarder work through the chroot's sockets."""

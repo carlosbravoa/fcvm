@@ -162,7 +162,8 @@ class Jaild:
             name = f"drive{i}.ext4"
             files.append((name, src, writable))
             drives.append({"drive_id": d["drive_id"], "path_on_host": f"/{name}",
-                           "is_root_device": False, "is_read_only": not writable})
+                           "is_root_device": False, "is_read_only": not writable,
+                           "discard": bool(d.get("discard", False))})
         for name, src, writable in files:
             dst = os.path.join(chroot, name)
             open(dst, "w").close()

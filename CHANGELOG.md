@@ -4,6 +4,16 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## 0.13.0 (2026-11-10)
+
+VM disks reclaim space. A VM's writable layer and its writable volumes are
+mounted with ext4 `discard`, and Firecracker (1.17.0+) honors the TRIM by
+punching holes in the backing file, so deleting a large file or a build's
+intermediates shrinks the disk on the host again instead of leaving it
+grown for the VM's life. Nothing to configure: it applies to every VM,
+jailed or not. On an older pinned Firecracker the `discard` drive field is
+left off and disks behave as before.
+
 ## 0.12.2 (2026-11-10)
 
 Validated on Firecracker v1.18.0, now the version `fcvm firecracker`

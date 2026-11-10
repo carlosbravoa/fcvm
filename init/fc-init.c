@@ -187,13 +187,15 @@ static void mkdir_p(const char *path, mode_t mode)
     mkdir(tmp, mode);
 }
 
-/* Mount an ext4 block device, waiting briefly for its node to appear. */
-static int mount_dev(const char *dev, const char *dir, unsigned long flags)
+/* Mount an ext4 block device, waiting briefly for its node to appear. opts is
+ * the ext4 mount-option string (e.g. "discard" to issue TRIM so a writable
+ * drive's backing file reclaims space), or NULL for none. */
+static int mount_dev(const char *dev, const char *dir, unsigned long flags, const char *opts)
 {
     for (int i = 0; i < 100 && access(dev, F_OK) < 0; i++)
         usleep(20000);
     mkdir_p(dir, 0755);
-    if (mount(dev, dir, "ext4", flags, NULL) < 0) {
+    if (mount(dev, dir, "ext4", flags, opts) < 0) {
         int err = errno;
         /* A read-only disk whose journal needs replaying (its last user
          * crashed) can't be recovered in place: mount it without replaying,
@@ -406,7 +408,7 @@ static void merge_main(void)
 {
     char *layers = karg("fcvm.merge"), *out = karg("fcvm.merge_out"), *save;
     int n = 0;
-    if (!out || mount_dev(out, "/mnt/out", MS_NOATIME) < 0) {
+    if (!out || mount_dev(out, "/mnt/out", MS_NOATIME, NULL) < 0) {
         msg("merge: no output disk");
         shutdown_vm();
     }
@@ -415,7 +417,7 @@ static void merge_main(void)
         char dir[32], upper[48];
         snprintf(dir, sizeof(dir), "/mnt/m%d", n++);
         snprintf(upper, sizeof(upper), "%s/upper", dir);
-        if (mount_dev(dev, dir, MS_RDONLY) < 0) {
+        if (mount_dev(dev, dir, MS_RDONLY, NULL) < 0) {
             merge_errors++;
             break;
         }
@@ -653,7 +655,7 @@ static void export_main(void)
 {
     char *devs = karg("fcvm.export"), *out = karg("fcvm.export_out"), *save, *list[64];
     int n = 0;
-    if (!out || mount_dev(out, "/mnt/out", MS_NOATIME) < 0) {
+    if (!out || mount_dev(out, "/mnt/out", MS_NOATIME, NULL) < 0) {
         msg("export: no output disk");
         shutdown_vm();
     }
@@ -664,7 +666,7 @@ static void export_main(void)
     for (int i = 0; i < n; i++) {
         char dir[32];
         snprintf(dir, sizeof(dir), "/mnt/l%d", i);
-        if (mount_dev(list[i], dir, MS_RDONLY) < 0) {
+        if (mount_dev(list[i], dir, MS_RDONLY, NULL) < 0) {
             msg("export: cannot mount %s", list[i]);
             shutdown_vm();
         }
@@ -1072,12 +1074,12 @@ static int assemble_root(void)
         return -1;
     }
     if (!rw) { /* private disk (--copy): mount it read-write as is */
-        if (mount_dev(root, nr, MS_NOATIME) < 0)
+        if (mount_dev(root, nr, MS_NOATIME, "discard") < 0)
             return -1;
     } else {
         char lower[2048] = "", opts[2400];
-        if (mount_dev(root, "/mnt/base", MS_RDONLY) < 0 ||
-            mount_dev(rw, "/mnt/rw", MS_NOATIME) < 0)
+        if (mount_dev(root, "/mnt/base", MS_RDONLY, NULL) < 0 ||
+            mount_dev(rw, "/mnt/rw", MS_NOATIME, "discard") < 0)
             return -1;
         mkdir("/mnt/rw/upper", 0755);
         mkdir("/mnt/rw/work", 0755);
@@ -1085,7 +1087,7 @@ static int assemble_root(void)
         for (char *d = layers ? strtok_r(layers, ",", &save) : NULL; d; d = strtok_r(NULL, ",", &save)) {
             char dir[32];
             snprintf(dir, sizeof(dir), "/mnt/l%d", i++);
-            if (mount_dev(d, dir, MS_RDONLY) < 0)
+            if (mount_dev(d, dir, MS_RDONLY, NULL) < 0)
                 return -1;
             size_t n = strlen(lower);
             snprintf(lower + n, sizeof(lower) - n, "%s/upper:", dir);
@@ -1115,7 +1117,7 @@ static int assemble_root(void)
         snprintf(dst, sizeof(dst), "%s%s", nr, path);
         struct stat under;
         int had = stat(dst, &under) == 0 && S_ISDIR(under.st_mode);
-        if (mount_dev(dev, dst, ro ? MS_RDONLY : MS_NOATIME) < 0)
+        if (mount_dev(dev, dst, ro ? MS_RDONLY : MS_NOATIME, ro ? NULL : "discard") < 0)
             return -1;
         if (had && !ro && is_empty_dir(dst)) {
             chown(dst, under.st_uid, under.st_gid);

@@ -4,7 +4,7 @@ import tempfile
 import time
 import unittest
 
-from fcvmtest import VMTestCase, fcvm, IMAGE
+from fcvmtest import VMTestCase, fcvm, IMAGE, VMS, allocated_mib, wait_for
 
 
 class Volumes(VMTestCase):
@@ -80,6 +80,24 @@ class HostDirectories(VMTestCase):
         self.assertEqual(self.sh(vm, "cat /late/f").stdout, "mounted")
         fcvm("umount", vm, "/late")
         self.assertNotEqual(self.sh(vm, "cat /late/f", check=False).returncode, 0)
+
+
+class Discard(VMTestCase):
+    """virtio-blk discard: deleting files in the guest reclaims host disk space."""
+
+    def test_overlay_backing_file_shrinks_after_delete(self):
+        vm = self.vm()
+        backing = os.path.join(VMS, vm, "rw.ext4")
+        base = allocated_mib(backing)
+        self.sh(vm, "dd if=/dev/zero of=/root/big bs=1M count=200 2>/dev/null; sync")
+        self.assertGreater(allocated_mib(backing), base + 150,
+                           "writing 200 MiB should grow the writable layer's backing file")
+        self.sh(vm, "rm -f /root/big; sync")
+        # The overlay's rw layer is mounted -o discard, so ext4 issues TRIM as it
+        # frees blocks and Firecracker punches holes in the backing file; no
+        # fstrim needed. It returns close to its original size.
+        wait_for(lambda: allocated_mib(backing) < base + 50, timeout=10,
+                 what="the backing file to shrink after delete")
 
 
 if __name__ == "__main__":

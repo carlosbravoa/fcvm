@@ -797,11 +797,19 @@ start() {
     # Drives, in attach order: vda, vdb, ... (Firecracker keeps config order).
     # fc-init (initramfs) assembles the root from the fcvm.* arguments.
     initramfs_current || "$FCVM_ROOT/lib/build-init.sh"
+    # virtio-blk discard (Firecracker 1.17.0+) lets the guest's TRIM punch holes
+    # in a writable drive's backing file, so overlays and volumes reclaim space
+    # instead of only growing. Omitted on an older pinned Firecracker, which
+    # would reject the field.
+    local fcver fc_discard=false
+    fcver=$("$FIRECRACKER" --version 2>/dev/null | head -1 | awk '{print $2}' | sed 's/^v//')
+    [ -n "$fcver" ] && [ "$(printf '%s\n' 1.17.0 "$fcver" | sort -V | head -n1)" = 1.17.0 ] && fc_discard=true
     local drives='[]' n=0 dev letters=abcdefghijklmnopqrstuvwxyz
     add_drive() {   # id path read_only
         dev=/dev/vd${letters:n:1}
-        drives=$(jq --arg id "$1" --arg path "$2" --argjson ro "$3" \
-            '. + [{drive_id: $id, path_on_host: $path, is_root_device: false, is_read_only: $ro}]' <<<"$drives")
+        local disc=false; [ "$fc_discard" = true ] && [ "$3" = false ] && disc=true
+        drives=$(jq --arg id "$1" --arg path "$2" --argjson ro "$3" --argjson disc "$disc" \
+            '. + [{drive_id: $id, path_on_host: $path, is_root_device: false, is_read_only: $ro, discard: $disc}]' <<<"$drives")
         n=$((n + 1))
     }
     if [ -f "$DIR/disk.ext4" ]; then
@@ -885,7 +893,7 @@ start() {
             warn "fcvm-jaild has a different Firecracker than bin/ (re-run fcvm jail-setup)"
         # The helper re-validates everything in this request (paths, ownership, writability).
         jq -n --arg vm "$vm" --arg kernel "$kernel" --arg initrd "$BUILD_DIR/initramfs.cpio" --arg args "$args" \
-            --argjson drives "$(jq '[.[] | {drive_id, path: .path_on_host, read_only: .is_read_only}]' <<<"$drives")" \
+            --argjson drives "$(jq '[.[] | {drive_id, path: .path_on_host, read_only: .is_read_only, discard}]' <<<"$drives")" \
             --argjson vcpus "$vcpus" --argjson mem "$mem" \
             --arg tap "$(jq -r '.[0].host_dev_name // empty' <<<"$net")" --arg mac "$(jq -r '.[0].guest_mac // empty' <<<"$net")" \
             '{op: "launch", vm: $vm, kernel: $kernel, initrd: $initrd, drives: $drives, boot_args: $args,

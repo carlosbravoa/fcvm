@@ -51,6 +51,12 @@ def free_port():
         return s.getsockname()[1]
 
 
+def allocated_mib(path):
+    """Blocks actually allocated to a (possibly sparse) file, in MiB — what du
+    reports, and what drops when discard punches holes in a backing file."""
+    return os.stat(path).st_blocks * 512 / 2**20
+
+
 def wait_for(fn, timeout=30, every=0.5, what="condition"):
     end = time.time() + timeout
     while time.time() < end:

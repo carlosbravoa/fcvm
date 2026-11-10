@@ -70,7 +70,12 @@ Every VM boots the same `build/initramfs.cpio`.
 **ext4 disks and overlayfs, not image files per VM.** Images are shared
 read-only disks, each VM gets a sparse writable layer, and the guest's
 overlayfs stacks them. `create` is instant, and a VM costs megabytes.
-`mkfs.ext4 -d` builds disks from a tarball without root.
+`mkfs.ext4 -d` builds disks from a tarball without root. The writable layer
+and writable volumes are mounted `-o discard`, so deleting a file in the
+guest issues TRIM and Firecracker punches holes in the backing file: it
+shrinks again instead of only growing. (Needs Firecracker 1.17.0+, which
+fcvm requires; on an older pinned release the `discard` drive field is
+left off and disks only grow.)
 
 **exec over vsock, not SSH.** It works in every image (distroless ones
 too), with no network, keys or sshd. It carries exit codes and separate

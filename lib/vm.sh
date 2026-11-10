@@ -980,9 +980,13 @@ start() {
         die "cannot publish ports; VM not started"
     fi
     if [ -n "${RESTORE:-}" ]; then   # fork of a jailed snapshot: same chroot paths, same tap0
+        # clock_realtime advances the guest clock at restore (x86_64/kvm-clock).
+        # The tsc clocksource already tracks wall time across the pause, so this
+        # is a safety net for a kvm-clock fallback, not the primary mechanism.
+        local clk=""; [ "$ARCH" = x86_64 ] && clk=', "clock_realtime": true'
         if ! fc_api "$DIR/fc.sock" PUT /snapshot/load '{"snapshot_path": "/snap.vmstate",
                 "mem_backend": {"backend_type": "File", "backend_path": "/snap.mem"},
-                "resume_vm": true}'; then
+                "resume_vm": true'"$clk"'}'; then
             jaild kill "$vm" >/dev/null || true
             die "restore of '$RESTORE' failed"
         fi
@@ -1830,9 +1834,14 @@ fork_one() {
         ln -s "$sdir/$disk" "$srcdisk"; stand_in=1
     fi
     local load
-    load=$(jq -n --arg s "$sdir/vmstate" --arg m "$sdir/mem" --arg tap "$tap" --arg vsock "$dir/vsock.sock" '
+    # clock_realtime advances the guest clock at restore (x86_64/kvm-clock); the
+    # tsc clocksource already tracks wall time across the pause, so it is a safety
+    # net rather than the primary mechanism.
+    load=$(jq -n --arg s "$sdir/vmstate" --arg m "$sdir/mem" --arg tap "$tap" --arg vsock "$dir/vsock.sock" \
+        --arg x86 "$([ "$ARCH" = x86_64 ] && echo 1 || echo 0)" '
         {snapshot_path: $s, mem_backend: {backend_type: "File", backend_path: $m},
          vsock_override: {uds_path: $vsock}, resume_vm: false}
+        + (if $x86 == "1" then {clock_realtime: true} else {} end)
         + (if $tap != "" then {network_overrides: [{iface_id: "eth0", host_dev_name: $tap}]} else {} end)')
     if ! fc_api "$dir/fc.sock" PUT /snapshot/load "$load" ||
        ! fc_api "$dir/fc.sock" PATCH "/drives/$drive" "$(jq -n --arg id "$drive" --arg p "$dir/$disk" '{drive_id: $id, path_on_host: $p}')" ||

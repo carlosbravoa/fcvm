@@ -4,6 +4,14 @@ fcvm follows [semantic versioning](https://semver.org/). Before 1.0, minor
 releases (0.x.0) may change commands and on-disk formats; the notes say how
 to move across.
 
+## 0.13.1 (2026-11-10)
+
+Restoring or forking a VM now asks Firecracker to advance the guest clock
+at load time (`clock_realtime`, x86_64). Forked VMs were already current —
+the `tsc` clocksource tracks host time across the pause and the exec agent
+sets the clock right after restore — so this is a safety net for any
+kvm-clock fallback rather than a visible change.
+
 ## 0.13.0 (2026-11-10)
 
 VM disks reclaim space. A VM's writable layer and its writable volumes are

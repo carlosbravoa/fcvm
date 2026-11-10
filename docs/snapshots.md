@@ -34,7 +34,10 @@ fcvm rm try-2 && fcvm fork ready try-2   # roll back: a fresh copy of the prepar
   carried over, since they would conflict with the source.
 - **Hostname:** its own, set after restore by the exec agent over vsock.
 - **Clock:** set from the host's clock right after the restore (by the exec
-  agent), so it's current, whatever time has passed since the snapshot.
+  agent), so it's current, whatever time has passed since the snapshot. The
+  `tsc` clocksource already tracks host time across the pause, and Firecracker
+  is asked to advance the clock at restore (`clock_realtime`), so it is close
+  even before the agent runs.
 - **Randomness:** the guest kernel reseeds its RNG on restore (VMGenID), so
   forks don't share random state. User-space programs that keep their own
   random state in memory (a PRNG seeded before the snapshot) will still
